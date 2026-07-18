@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1.0 - 2026-07-18
+
+- Add auto-detected, overrideable nFPM `.deb`/`.rpm` assets with verifier-bound package metadata and checksums, plus an opt-in `macos-15` GoReleaser build host for native Darwin/CGO projects.
+
 ## v1.0.0-alpha.13 - 2026-07-18
 
 - Bind Homebrew handoff to GoReleaser target metadata in the independently verified asset inventory, dispatch exact per-platform filenames and SHA-256 values, require tap-side download re-hashing, and update artifact actions to Node 24 releases.

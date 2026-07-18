@@ -22,7 +22,7 @@ jobs:
 - a protected default branch and a caller dispatched at its exact head;
 - every branch-protection or effective-ruleset required status context green on the frozen target commit;
 - `CHANGELOG.md` with a dated `##` section containing the requested version;
-- `go.mod` and `.goreleaser.yml` or `.goreleaser.yaml`;
+- `go.mod` and a GoReleaser config in its canonical lookup path (`.config/goreleaser.yml`, `.config/goreleaser.yaml`, `.goreleaser.yml`, `.goreleaser.yaml`, `goreleaser.yml`, or `goreleaser.yaml`);
 - a GoReleaser build matrix containing both `darwin/amd64` and `darwin/arm64` for every macOS binary name;
 - consistent versions in any present `.release-version`, `VERSION`, `version.txt`, root `package.json`, and extra-package `package.json` files.
 
@@ -50,6 +50,8 @@ Inputs:
 | `homebrew-tap` | Optional `owner/repo`. Empty defaults to `openclaw/homebrew-tap` for `openclaw` and `steipete/homebrew-tap` for `personal`; an explicit value always wins. |
 | `homebrew-formula` | Optional formula name. Empty skips handoff. |
 | `extra-packages` | JSON array of safe repo-relative files/directories. Basenames must be unique. |
+| `nfpm` | `auto` (default), `enabled`, or `disabled`. Auto builds `.deb`/`.rpm` assets when the frozen GoReleaser config has a nonempty `nfpms` list. Enabled requires that list; disabled preserves binary-only mode even when it exists. |
+| `build-runner` | `ubuntu` (default) or `macos`. macOS selects `macos-15` for the GoReleaser build job; use it for native Darwin/CGO dependencies. |
 | `strict-checks` | Boolean. Default `false` checks only branch-required contexts. `true` requires every independent check/status green. When no required contexts exist, both modes use the all-check fallback and require at least one completed, non-failed CI signal. |
 
 Repository policies:
@@ -62,6 +64,18 @@ Repository policies:
 The CI gate merges required status checks from legacy branch protection and effective branch rules, including any required GitHub App binding. With the default `strict-checks: false`, unrelated optional or dynamic failures do not block a release. Required checks must still be present and green on the frozen target commit. Repositories without required contexts fall back to requiring all independent checks/statuses completed and non-failed. Set `strict-checks: true` to request that stricter all-check behavior even when required contexts exist.
 
 The first attempt, when no version tag exists, freezes the current protected default-branch head and creates an annotated tag there. On every retry, an existing exact annotated version tag takes precedence: its peeled commit becomes `target-sha`, even when the caller runs from a newer default-branch head. That frozen commit must still be reachable from the protected default branch; the workflow checks out that commit and evaluates its changelog, version metadata, and required CI signals. The tag is never moved or replaced. Lightweight tags, tags that do not peel directly to a commit, and tags outside protected-branch ancestry fail closed. The caller itself must still be dispatched at the current protected default-branch head.
+
+### Build host and nFPM packages
+
+Existing callers need no changes: `build-runner: ubuntu` retains the cross-build job, and `nfpm: auto` behaves exactly like the prior binary-only build when the GoReleaser config has no `nfpms` entries.
+
+Use `build-runner: macos` when Darwin binaries import native frameworks or otherwise require CGO on macOS. The complete GoReleaser build runs from the same frozen tag on `macos-15`; signing, notarization, verification, draft binding, and publication remain separate later jobs. Native callers should list only targets that can build on that host. A Darwin-only CGO project should omit Linux from its GoReleaser `goos` list. Projects that need both native Darwin and Linux should use separate GoReleaser build IDs whose environment/toolchain works on the selected host; this workflow does not depend on GoReleaser Pro partial-build merging.
+
+With `nfpm: auto`, a nonempty top-level `nfpms` list switches GoReleaser to its non-publishing release pipeline, skips unrelated package/publisher pipes, and retains only its `Linux Package` artifacts. The workflow accepts checksum-bound `.deb` and `.rpm` files with safe GitHub asset names; prerelease templates must avoid `~`, which GitHub rewrites on upload. Use `nfpm: disabled` for a configured repository that intentionally wants binary archives only, or `nfpm: enabled` to fail closed unless packages are configured and emitted.
+
+The selected configuration path is passed explicitly to GoReleaser, and `GORELEASER_CURRENT_TAG` is fixed to the validated annotated tag. Multiple tags on the same frozen commit therefore cannot change package versions, filenames, or build-time version templates.
+
+nFPM assets are copied by exact `artifacts.json` path and name, never reconstructed. `ASSET-INVENTORY.json` records each as `kind: nfpm` with `packageFormat` and Linux `platform`, and `SHA256SUMS` covers the exact package bytes. Both independent macOS verifiers require those names, sizes, metadata, and digests. Debian and RPM containers are not Apple-signable; their provenance is the frozen-source GoReleaser build plus the same dual-verifier checksum and byte-bound publication chain as every other release asset. Embedded Darwin binaries continue to require Developer ID signing, hardened runtime, designated-requirement stability, and notarization.
 
 Binary authenticity does not trust the tag signature or annotation. Each architecture verifier has only `actions: read`; it downloads the draft job's immutable Actions artifact by its producer-exported name, never calls the draft Releases API, and independently enforces the exact commit, inventory, SHA-256 checksums, Apple certificate chain, hardened-runtime flag, timestamp, stable embedded designated requirement, Team ID, notarization requirement, and native plus universal architectures. GoReleaser's own `goos`/`goarch` artifact metadata assigns canonical platform targets before inventory creation; verifiers check those target labels against archive binary formats and architectures. Each verifier uploads an attestation containing its `verified` verdict, source artifact name, and exact `ASSET-INVENTORY.json` and `SHA256SUMS` bytes. Producer-bound names and 30-day artifact retention preserve this chain across GitHub's partial-job reruns, where consumer `run_attempt` values can differ.
 
@@ -117,4 +131,4 @@ Run:
 scripts/validate-workflows.sh
 ```
 
-This runs actionlint on reusable, CI, and example workflows; parses every YAML document with Psych safe loading; executes adversarial frozen-tag, draft-binding, Homebrew tap-selection, explicit-assets, fallback, and post-dispatch formula-binding scenarios; and enforces the required job/input topology, actions-read-only dual-architecture verifier, publisher hash binding, and immutable action references.
+This runs actionlint on reusable, CI, and example workflows; parses every YAML document with Psych safe loading; executes adversarial frozen-tag, native-build selection, nFPM target/inventory, draft-binding, Homebrew tap-selection, explicit-assets, fallback, and post-dispatch formula-binding scenarios; and enforces the required job/input topology, actions-read-only dual-architecture verifier, publisher hash binding, and immutable action references.

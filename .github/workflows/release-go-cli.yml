@@ -26,6 +26,16 @@ on:
         required: false
         default: '[]'
         type: string
+      nfpm:
+        description: 'nFPM package mode: auto, enabled, or disabled'
+        required: false
+        default: auto
+        type: string
+      build-runner:
+        description: 'GoReleaser build host: ubuntu or macos'
+        required: false
+        default: ubuntu
+        type: string
       strict-checks:
         description: Require every independent check green instead of only branch-required contexts
         required: false
@@ -82,9 +92,11 @@ jobs:
       - name: Validate inputs
         id: inputs
         env:
+          BUILD_RUNNER: ${{ inputs.build-runner }}
           EXTRA_PACKAGES: ${{ inputs.extra-packages }}
           HOMEBREW_FORMULA: ${{ inputs.homebrew-formula }}
           HOMEBREW_TAP: ${{ inputs.homebrew-tap }}
+          NFPM_MODE: ${{ inputs.nfpm }}
           REPOSITORY_TYPE: ${{ inputs.repository-type }}
           VERSION: ${{ inputs.version }}
         run: |
@@ -96,6 +108,14 @@ jobs:
           fi
           if [[ "$REPOSITORY_TYPE" != openclaw && "$REPOSITORY_TYPE" != personal ]]; then
             echo "repository-type must be openclaw or personal" >&2
+            exit 1
+          fi
+          if [[ "$BUILD_RUNNER" != ubuntu && "$BUILD_RUNNER" != macos ]]; then
+            echo "build-runner must be ubuntu or macos" >&2
+            exit 1
+          fi
+          if [[ "$NFPM_MODE" != auto && "$NFPM_MODE" != enabled && "$NFPM_MODE" != disabled ]]; then
+            echo "nfpm must be auto, enabled, or disabled" >&2
             exit 1
           fi
           homebrew_tap=$HOMEBREW_TAP
@@ -213,8 +233,18 @@ jobs:
           set -euo pipefail
           [[ -f CHANGELOG.md ]] || { echo "CHANGELOG.md is required" >&2; exit 1; }
           [[ -f go.mod ]] || { echo "go.mod is required" >&2; exit 1; }
-          [[ -f .goreleaser.yml || -f .goreleaser.yaml ]] || {
-            echo ".goreleaser.yml or .goreleaser.yaml is required" >&2
+          goreleaser_config=
+          for candidate in \
+            .config/goreleaser.yml .config/goreleaser.yaml \
+            .goreleaser.yml .goreleaser.yaml \
+            goreleaser.yml goreleaser.yaml; do
+            if [[ -f "$candidate" ]]; then
+              goreleaser_config=$candidate
+              break
+            fi
+          done
+          [[ -n "$goreleaser_config" ]] || {
+            echo "a GoReleaser config is required" >&2
             exit 1
           }
 
@@ -519,11 +549,13 @@ jobs:
             });
 
   build:
-    name: 3a · GoReleaser cross-build matrix
+    name: 3a · GoReleaser build matrix
     needs: [validate, tag]
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.build-runner == 'macos' && 'macos-15' || 'ubuntu-latest' }}
     permissions:
       contents: read
+    outputs:
+      nfpm-enabled: ${{ steps.build-mode.outputs.nfpm-enabled }}
     steps:
       - name: Check out frozen tag
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -542,12 +574,62 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Resolve GoReleaser package mode
+        id: build-mode
+        env:
+          NFPM_MODE: ${{ inputs.nfpm }}
+        run: |
+          set -euo pipefail
+          config=
+          for candidate in \
+            .config/goreleaser.yml .config/goreleaser.yaml \
+            .goreleaser.yml .goreleaser.yaml \
+            goreleaser.yml goreleaser.yaml; do
+            if [[ -f "$candidate" ]]; then
+              config=$candidate
+              break
+            fi
+          done
+          [[ -n "$config" ]] || { echo "a GoReleaser config is required" >&2; exit 1; }
+          has_nfpms=$(ruby -rpsych -e '
+            config = Psych.safe_load(
+              File.read(ARGV.fetch(0)),
+              permitted_classes: [],
+              permitted_symbols: [],
+              aliases: true
+            ) || {}
+            nfpms = config["nfpms"]
+            abort "nfpms must be an array when present" unless nfpms.nil? || nfpms.is_a?(Array)
+            print(!nfpms.nil? && !nfpms.empty? ? "true" : "false")
+          ' "$config")
+          case "$NFPM_MODE" in
+            auto) nfpm_enabled=$has_nfpms ;;
+            enabled)
+              [[ "$has_nfpms" == true ]] || {
+                echo "nfpm=enabled requires a nonempty nfpms list in $config" >&2
+                exit 1
+              }
+              nfpm_enabled=true
+              ;;
+            disabled) nfpm_enabled=false ;;
+          esac
+          if [[ "$nfpm_enabled" == true ]]; then
+            args="release --config=$config --clean --timeout 60m --release-notes=/dev/null --skip=announce,archive,aur,aur-source,chocolatey,docker,flatpak,homebrew,ko,makeself,mcp,nix,notarize,publish,sbom,scoop,sign,snapcraft,srpm,validate,winget"
+          else
+            args="build --config=$config --clean --timeout 60m"
+          fi
+          {
+            echo "nfpm-enabled=$nfpm_enabled"
+            echo "args=$args"
+          } >>"$GITHUB_OUTPUT"
       - name: Build configured GoReleaser matrix
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
+        env:
+          GORELEASER_CURRENT_TAG: ${{ needs.validate.outputs.tag }}
         with:
           distribution: goreleaser
           version: '~> v2'
-          args: build --clean --timeout 60m
+          args: ${{ steps.build-mode.outputs.args }}
       - name: Add extra package payloads
         env:
           EXTRA_PACKAGES: ${{ inputs.extra-packages }}
@@ -842,45 +924,136 @@ jobs:
           mkdir -p release-assets
           jq -s --arg repository "$GITHUB_REPOSITORY" '{schemaVersion:1,repository:$repository,binaries:.}' \
             "$work/signing-manifest.jsonl" >release-assets/SIGNING-MANIFEST.json
-          jq -e 'type == "array"' dist/artifacts.json >/dev/null
-          : >"$work/asset-targets.jsonl"
-          while IFS= read -r directory; do
-            target=$(basename "$directory" | sed -E 's/[^A-Za-z0-9._-]+/-/g')
-            archive="release-assets/${REPOSITORY_NAME}_${{ needs.validate.outputs.release-version }}_${target}.tar.gz"
-            tar -czf "$archive" -C "$directory" .
-            canonical_target=
-            if [[ "$directory" == dist/universal_darwin_all ]]; then
-              canonical_target=darwin_universal
-            else
-              target_platforms=()
-              while IFS= read -r platform; do
-                [[ -n "$platform" ]] && target_platforms+=("$platform")
-              done < <(jq -r --arg prefix "$directory/" \
-                '[.[] | select(.type == "Binary" and (.path | startswith($prefix))) | [.goos,.goarch] | @tsv] | unique[]' \
-                dist/artifacts.json)
-              if (( ${#target_platforms[@]} > 1 )); then
-                echo "release archive mixes GoReleaser platforms: $directory" >&2
-                exit 1
-              fi
-              if (( ${#target_platforms[@]} == 1 )); then
-                IFS=$'\t' read -r goos goarch <<<"${target_platforms[0]}"
-                case "$goos/$goarch" in
-                  darwin/amd64) canonical_target=darwin_amd64 ;;
-                  darwin/arm64) canonical_target=darwin_arm64 ;;
-                  linux/amd64) canonical_target=linux_amd64 ;;
-                  linux/arm64) canonical_target=linux_arm64 ;;
-                  windows/amd64) canonical_target=windows_amd64 ;;
-                  windows/arm64) canonical_target=windows_arm64 ;;
-                esac
-              fi
-            fi
-            if [[ -n "$canonical_target" ]]; then
-              jq -n --arg name "$(basename "$archive")" --arg target "$canonical_target" \
-                '{name:$name,target:$target}' >>"$work/asset-targets.jsonl"
-            fi
-          done < <(find dist -mindepth 1 -maxdepth 1 -type d | LC_ALL=C sort)
-          jq -s . "$work/asset-targets.jsonl" >release-assets/.ASSET-TARGETS.json
-          [[ -n "$(find release-assets -type f -name '*.tar.gz' -print -quit)" ]]
+
+      - name: Assemble signed archives and nFPM packages
+        env:
+          NFPM_ENABLED: ${{ needs.build.outputs.nfpm-enabled }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.release-version }}
+          REPOSITORY_NAME: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          // artifact-assembler-begin
+          const fs = require('fs');
+          const path = require('path');
+          const { execFileSync } = require('child_process');
+
+          const distDirectory = path.resolve('dist');
+          const releaseDirectory = path.resolve('release-assets');
+          const repositoryName = process.env.REPOSITORY_NAME;
+          const releaseVersion = process.env.RELEASE_VERSION;
+          const nfpmEnabled = process.env.NFPM_ENABLED === 'true';
+          const artifactsPath = path.join(distDirectory, 'artifacts.json');
+          if (!fs.existsSync(artifactsPath)) throw new Error('GoReleaser artifacts.json is missing');
+          const artifacts = JSON.parse(fs.readFileSync(artifactsPath, 'utf8'));
+          if (!Array.isArray(artifacts)) throw new Error('GoReleaser artifacts.json must be an array');
+          if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(repositoryName ?? '')) {
+            throw new Error('repository name cannot form a safe release asset name');
+          }
+          if (!/^[0-9A-Za-z][0-9A-Za-z.+-]*$/.test(releaseVersion ?? '')) {
+            throw new Error('release version cannot form a safe release asset name');
+          }
+          fs.mkdirSync(releaseDirectory, { recursive: true });
+
+          const canonicalTargets = new Map([
+            ['darwin/amd64', 'darwin_amd64'],
+            ['darwin/arm64', 'darwin_arm64'],
+            ['linux/amd64', 'linux_amd64'],
+            ['linux/arm64', 'linux_arm64'],
+            ['windows/amd64', 'windows_amd64'],
+            ['windows/arm64', 'windows_arm64'],
+          ]);
+          const targetRows = [];
+          const archiveNames = new Set();
+          const directories = fs.readdirSync(distDirectory, { withFileTypes: true })
+            .filter((entry) => entry.isDirectory())
+            .sort((left, right) => left.name.localeCompare(right.name));
+          for (const entry of directories) {
+            const directory = path.join(distDirectory, entry.name);
+            const targetSlug = entry.name.replace(/[^A-Za-z0-9._-]+/g, '-');
+            const archiveName = `${repositoryName}_${releaseVersion}_${targetSlug}.tar.gz`;
+            if (!/^[A-Za-z0-9][A-Za-z0-9+@._-]*\.tar\.gz$/.test(archiveName)) {
+              throw new Error(`unsafe release archive name: ${archiveName}`);
+            }
+            if (archiveNames.has(archiveName) || fs.existsSync(path.join(releaseDirectory, archiveName))) {
+              throw new Error(`duplicate release archive name: ${archiveName}`);
+            }
+            archiveNames.add(archiveName);
+            execFileSync('tar', ['-czf', path.join(releaseDirectory, archiveName), '-C', directory, '.'], {
+              stdio: 'inherit',
+            });
+
+            let canonicalTarget = '';
+            if (entry.name === 'universal_darwin_all') {
+              canonicalTarget = 'darwin_universal';
+            } else {
+              const prefix = `dist/${entry.name}/`;
+              const platforms = new Set(artifacts
+                .filter((artifact) => artifact.type === 'Binary' &&
+                  typeof artifact.path === 'string' && artifact.path.startsWith(prefix))
+                .map((artifact) => `${artifact.goos}/${artifact.goarch}`));
+              if (platforms.size > 1) {
+                throw new Error(`release archive mixes GoReleaser platforms: dist/${entry.name}`);
+              }
+              if (platforms.size === 1) canonicalTarget = canonicalTargets.get([...platforms][0]) ?? '';
+            }
+            if (canonicalTarget) targetRows.push({ name: archiveName, target: canonicalTarget });
+          }
+          if (directories.length === 0) throw new Error('GoReleaser produced no release archive directories');
+
+          const packageArtifacts = artifacts.filter((artifact) => artifact.type === 'Linux Package');
+          if (!nfpmEnabled && packageArtifacts.length > 0) {
+            throw new Error('GoReleaser emitted nFPM packages while nfpm mode is disabled');
+          }
+          if (nfpmEnabled && packageArtifacts.length === 0) {
+            throw new Error('nFPM mode is enabled but GoReleaser emitted no Linux Package artifacts');
+          }
+          const packageRows = [];
+          const packageNames = new Set();
+          for (const artifact of packageArtifacts) {
+            const name = artifact.name;
+            const artifactPath = artifact.path;
+            if (typeof name !== 'string' || typeof artifactPath !== 'string' || path.basename(artifactPath) !== name) {
+              throw new Error('nFPM artifact name/path mismatch');
+            }
+            const match = name.match(/^[A-Za-z0-9][A-Za-z0-9+@._-]*\.(deb|rpm)$/);
+            if (!match) throw new Error(`unsupported or unsafe nFPM package filename: ${name}`);
+            if (artifact.goos !== 'linux' ||
+                typeof artifact.goarch !== 'string' ||
+                !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(artifact.goarch)) {
+              throw new Error(`nFPM package lacks a safe Linux architecture: ${name}`);
+            }
+            const source = path.resolve(artifactPath);
+            if (path.dirname(source) !== distDirectory) {
+              throw new Error(`nFPM package must be a top-level dist artifact: ${name}`);
+            }
+            const sourceStat = fs.lstatSync(source);
+            if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) {
+              throw new Error(`nFPM package must be a regular file: ${name}`);
+            }
+            if (packageNames.has(name) || fs.existsSync(path.join(releaseDirectory, name))) {
+              throw new Error(`duplicate release asset name: ${name}`);
+            }
+            packageNames.add(name);
+            fs.copyFileSync(source, path.join(releaseDirectory, name), fs.constants.COPYFILE_EXCL);
+            packageRows.push({
+              name,
+              platform: `linux_${artifact.goarch}`,
+              format: match[1],
+            });
+          }
+          targetRows.sort((left, right) => left.name.localeCompare(right.name));
+          packageRows.sort((left, right) => left.name.localeCompare(right.name));
+          fs.writeFileSync(
+            path.join(releaseDirectory, '.ASSET-TARGETS.json'),
+            `${JSON.stringify(targetRows, null, 2)}\n`,
+          );
+          fs.writeFileSync(
+            path.join(releaseDirectory, '.NFPM-PACKAGES.json'),
+            `${JSON.stringify(packageRows, null, 2)}\n`,
+          );
+          // artifact-assembler-end
+          NODE
           tar -czf signed-release-assets.tar.gz release-assets
       - name: Upload signed release payload
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -946,44 +1119,117 @@ jobs:
           [[ -s validated-release-notes/RELEASE-NOTES.md ]] || { echo "validated release notes missing" >&2; exit 1; }
           cp validated-release-notes/RELEASE-NOTES.md release-assets/RELEASE-NOTES.md
           target_map="$RUNNER_TEMP/ASSET-TARGETS.json"
+          package_map="$RUNNER_TEMP/NFPM-PACKAGES.json"
           mv release-assets/.ASSET-TARGETS.json "$target_map"
-          jq -e '
-            type == "array" and
-            all(.[];
-              (.name | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9+@._-]*\\.tar\\.gz$")) and
-              (.target | type == "string" and test("^(darwin|linux|windows)_(amd64|arm64)$|^darwin_universal$"))) and
-            ((map(.name) | unique | length) == length) and
-            ((map(.target) | unique | length) == length)
-          ' "$target_map" >/dev/null
-          while IFS=$'\t' read -r name target; do
-            [[ -f "release-assets/$name" ]] || { echo "target map references missing archive: $name" >&2; exit 1; }
-          done < <(jq -r '.[] | [.name,.target] | @tsv' "$target_map")
-          if [[ -n "$HOMEBREW_FORMULA" ]]; then
-            for target in darwin_amd64 darwin_arm64 linux_amd64 linux_arm64; do
-              [[ "$(jq --arg target "$target" '[.[] | select(.target == $target)] | length' "$target_map")" == 1 ]] || {
-                echo "Homebrew handoff requires exactly one GoReleaser archive for $target" >&2
-                exit 1
+          mv release-assets/.NFPM-PACKAGES.json "$package_map"
+          ASSET_TARGETS_PATH="$target_map" NFPM_PACKAGES_PATH="$package_map" node <<'NODE'
+          // asset-inventory-builder-begin
+          const crypto = require('crypto');
+          const fs = require('fs');
+          const path = require('path');
+
+          const releaseDirectory = path.resolve('release-assets');
+          const readJsonArray = (file, label) => {
+            const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+            if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+            return value;
+          };
+          const exactKeys = (value, expected) =>
+            Object.keys(value).sort().join('\0') === [...expected].sort().join('\0');
+          const requireRegularAsset = (name, label) => {
+            const assetPath = path.join(releaseDirectory, name);
+            const stat = fs.lstatSync(assetPath);
+            if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`${label} is not a regular file: ${name}`);
+            return assetPath;
+          };
+          const digest = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+
+          const targetRows = readJsonArray(process.env.ASSET_TARGETS_PATH, 'asset target map');
+          const targetNames = new Set();
+          const targets = new Set();
+          for (const row of targetRows) {
+            if (row === null || typeof row !== 'object' || !exactKeys(row, ['name', 'target']) ||
+                typeof row.name !== 'string' ||
+                !/^[A-Za-z0-9][A-Za-z0-9+@._-]*\.tar\.gz$/.test(row.name) ||
+                typeof row.target !== 'string' ||
+                !/^(?:(?:darwin|linux|windows)_(?:amd64|arm64)|darwin_universal)$/.test(row.target)) {
+              throw new Error('asset target map contains an invalid row');
+            }
+            if (targetNames.has(row.name) || targets.has(row.target)) {
+              throw new Error('asset target map contains a duplicate name or target');
+            }
+            requireRegularAsset(row.name, 'target archive');
+            targetNames.add(row.name);
+            targets.add(row.target);
+          }
+
+          const packageRows = readJsonArray(process.env.NFPM_PACKAGES_PATH, 'nFPM package map');
+          const packageNames = new Set();
+          for (const row of packageRows) {
+            if (row === null || typeof row !== 'object' || !exactKeys(row, ['format', 'name', 'platform']) ||
+                typeof row.name !== 'string' ||
+                !/^[A-Za-z0-9][A-Za-z0-9+@._-]*\.(?:deb|rpm)$/.test(row.name) ||
+                typeof row.platform !== 'string' || !/^linux_[A-Za-z0-9][A-Za-z0-9._-]*$/.test(row.platform) ||
+                !['deb', 'rpm'].includes(row.format) || !row.name.endsWith(`.${row.format}`)) {
+              throw new Error('nFPM package map contains an invalid row');
+            }
+            if (packageNames.has(row.name) || targetNames.has(row.name)) {
+              throw new Error(`duplicate inventory asset name: ${row.name}`);
+            }
+            requireRegularAsset(row.name, 'nFPM package');
+            packageNames.add(row.name);
+          }
+
+          if (process.env.HOMEBREW_FORMULA) {
+            for (const target of ['darwin_amd64', 'darwin_arm64', 'linux_amd64', 'linux_arm64']) {
+              if (!targets.has(target)) {
+                throw new Error(`Homebrew handoff requires exactly one GoReleaser archive for ${target}`);
               }
-            done
-          fi
-          cd release-assets
-          : >"$RUNNER_TEMP/inventory.jsonl"
-          while IFS= read -r file; do
-            name=$(basename "$file")
-            target=$(jq -r --arg name "$name" '[.[] | select(.name == $name) | .target][0] // empty' "$target_map")
-            jq -n --arg name "$name" --arg sha256 "$(sha256sum "$file" | awk '{print $1}')" \
-              --argjson size "$(stat -c %s "$file")" --arg target "$target" \
-              '{name:$name,size:$size,sha256:$sha256} + if $target == "" then {} else {target:$target} end' \
-              >>"$RUNNER_TEMP/inventory.jsonl"
-          done < <(find . -mindepth 1 -maxdepth 1 -type f | LC_ALL=C sort)
-          inventory="$RUNNER_TEMP/ASSET-INVENTORY.json"
-          checksums="$RUNNER_TEMP/SHA256SUMS"
-          jq -s --arg repository "$GITHUB_REPOSITORY" --arg tag "$TAG" --arg commit "$TARGET_SHA" \
-            '{schemaVersion:1,repository:$repository,tag:$tag,commit:$commit,payloads:.}' \
-            "$RUNNER_TEMP/inventory.jsonl" >"$inventory"
-          cp "$inventory" ASSET-INVENTORY.json
-          find . -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort | xargs sha256sum >"$checksums"
-          mv "$checksums" SHA256SUMS
+            }
+          }
+
+          const names = fs.readdirSync(releaseDirectory).sort();
+          if (names.includes('ASSET-INVENTORY.json') || names.includes('SHA256SUMS')) {
+            throw new Error('release controls already exist before inventory creation');
+          }
+          for (const name of names) {
+            requireRegularAsset(name, 'release asset');
+            if (/\.(?:deb|rpm)$/.test(name) && !packageNames.has(name)) {
+              throw new Error(`unmapped nFPM package asset: ${name}`);
+            }
+          }
+          const targetByName = new Map(targetRows.map((row) => [row.name, row.target]));
+          const packageByName = new Map(packageRows.map((row) => [row.name, row]));
+          const payloads = names.map((name) => {
+            const file = path.join(releaseDirectory, name);
+            const payload = { name, size: fs.statSync(file).size, sha256: digest(file) };
+            if (targetByName.has(name)) payload.target = targetByName.get(name);
+            if (packageByName.has(name)) {
+              const packageRow = packageByName.get(name);
+              payload.kind = 'nfpm';
+              payload.packageFormat = packageRow.format;
+              payload.platform = packageRow.platform;
+            }
+            return payload;
+          });
+          const inventory = {
+            schemaVersion: 1,
+            repository: process.env.GITHUB_REPOSITORY,
+            tag: process.env.TAG,
+            commit: process.env.TARGET_SHA,
+            payloads,
+          };
+          fs.writeFileSync(
+            path.join(releaseDirectory, 'ASSET-INVENTORY.json'),
+            `${JSON.stringify(inventory, null, 2)}\n`,
+          );
+          const checksumNames = [...names, 'ASSET-INVENTORY.json'].sort();
+          const checksums = checksumNames
+            .map((name) => `${digest(path.join(releaseDirectory, name))}  ${name}\n`)
+            .join('');
+          fs.writeFileSync(path.join(releaseDirectory, 'SHA256SUMS'), checksums);
+          // asset-inventory-builder-end
+          NODE
 
       - name: Package immutable verification payload
         id: verification-payload
@@ -1196,6 +1442,33 @@ jobs:
             [[ "$(stat -f %z "$name")" == "$size" ]]
             [[ "$(shasum -a 256 "$name" | awk '{print $1}')" == "$digest" ]]
           done < <(jq -r '.payloads[] | [.name,.size,.sha256] | @tsv' ASSET-INVENTORY.json)
+
+          # nfpm-checksum-verifier-begin
+          jq -e '
+            all(.payloads[];
+              if (.kind? == "nfpm") then
+                (.name | test("^[A-Za-z0-9][A-Za-z0-9+@._-]*\\.(deb|rpm)$")) and
+                (.packageFormat == "deb" or .packageFormat == "rpm") and
+                (.packageFormat as $format | .name | endswith("." + $format)) and
+                (.platform | type == "string" and test("^linux_[A-Za-z0-9][A-Za-z0-9._-]*$")) and
+                (has("target") | not)
+              elif has("kind") or has("packageFormat") or has("platform") then
+                false
+              else
+                true
+              end)
+          ' ASSET-INVENTORY.json >/dev/null
+          inventory_package_names=$(jq -r '.payloads[] | select(.kind? == "nfpm") | .name' ASSET-INVENTORY.json | LC_ALL=C sort)
+          actual_package_names=$(find . -mindepth 1 -maxdepth 1 -type f \( -name '*.deb' -o -name '*.rpm' \) -exec basename {} \; | LC_ALL=C sort)
+          [[ "$actual_package_names" == "$inventory_package_names" ]] || {
+            echo "nFPM package inventory mismatch" >&2
+            diff -u <(printf '%s\n' "$inventory_package_names") <(printf '%s\n' "$actual_package_names") >&2 || true
+            exit 1
+          }
+          if [[ -n "$inventory_package_names" ]]; then
+            echo "verified nFPM package payloads by inventory-bound SHA-256; package files are not Apple code-signed"
+          fi
+          # nfpm-checksum-verifier-end
 
           if [[ -n "$HOMEBREW_FORMULA" ]]; then
             for target in darwin_amd64 darwin_arm64 linux_amd64 linux_arm64; do

@@ -13,6 +13,7 @@ done < <(find .github/workflows examples -type f \( -name '*.yml' -o -name '*.ya
 actionlint "${workflow_files[@]}"
 
 node scripts/test-release-target-resolution.mjs
+node scripts/test-build-artifact-matrix.mjs
 node scripts/test-release-notes-extraction.mjs
 node scripts/test-draft-binding.mjs
 node scripts/test-homebrew-handoff.mjs
@@ -37,7 +38,10 @@ for job in required_jobs:
     if not re.search(rf'^  {re.escape(job)}:\s*$', workflow, re.MULTILINE):
         raise SystemExit(f'missing required job: {job}')
 
-required_inputs = ['version', 'repository-type', 'homebrew-tap', 'homebrew-formula', 'extra-packages', 'strict-checks']
+required_inputs = [
+    'version', 'repository-type', 'homebrew-tap', 'homebrew-formula', 'extra-packages',
+    'nfpm', 'build-runner', 'strict-checks',
+]
 for name in required_inputs:
     if not re.search(rf'^      {re.escape(name)}:\s*$', workflow, re.MULTILINE):
         raise SystemExit(f'missing workflow_call input: {name}')
@@ -61,6 +65,14 @@ for forbidden_verify_release_access in [
 ]:
     if forbidden_verify_release_access in verify:
         raise SystemExit(f'verify job must not access draft releases: {forbidden_verify_release_access}')
+for required_nfpm_verifier_control in [
+    ".kind? == \"nfpm\"",
+    '.packageFormat == "deb" or .packageFormat == "rpm"',
+    'nFPM package inventory mismatch',
+    'verified nFPM package payloads by inventory-bound SHA-256',
+]:
+    if required_nfpm_verifier_control not in verify:
+        raise SystemExit(f'missing checksum-only nFPM verifier control: {required_nfpm_verifier_control}')
 for required_verify_attestation_control in [
     'needs.draft.outputs.verification-artifact-name',
     '--rawfile releaseNotes RELEASE-NOTES.md',
@@ -89,6 +101,17 @@ if not app_condition < spctl_assessment < app_condition_end:
 
 publish = workflow.split('\n  publish:\n', 1)[1].split('\n  handoff:\n', 1)[0]
 draft = workflow.split('\n  draft:\n', 1)[1].split('\n  verify:\n', 1)[0]
+build = workflow.split('\n  build:\n', 1)[1].split('\n  sign:\n', 1)[0]
+for required_build_control in [
+    "inputs.build-runner == 'macos' && 'macos-15' || 'ubuntu-latest'",
+    'NFPM_MODE: ${{ inputs.nfpm }}',
+    'nfpm-enabled:',
+    'release --config=$config --clean --timeout 60m --release-notes=/dev/null --skip=',
+    'build --config=$config --clean --timeout 60m',
+    'GORELEASER_CURRENT_TAG: ${{ needs.validate.outputs.tag }}',
+]:
+    if required_build_control not in build:
+        raise SystemExit(f'missing build-mode control: {required_build_control}')
 if 'verification-artifact-name:' not in draft or 'retention-days: 30' not in draft:
     raise SystemExit('draft must export and retain its verification payload for the retry window')
 for required_release_notes_control in [
@@ -167,6 +190,14 @@ if not re.search(r'permissions:\s*\n\s*actions: read\s*$', handoff, re.MULTILINE
     raise SystemExit('handoff source token must grant only actions: read')
 
 sign = workflow.split('\n  sign:\n', 1)[1].split('\n  draft:\n', 1)[0]
+for required_package_assembly_control in [
+    "artifact.type === 'Linux Package'",
+    'GoReleaser emitted no Linux Package artifacts',
+    "path.join(releaseDirectory, '.NFPM-PACKAGES.json')",
+    "platform: `linux_${artifact.goarch}`",
+]:
+    if required_package_assembly_control not in sign:
+        raise SystemExit(f'missing nFPM package assembly control: {required_package_assembly_control}')
 for required_signing_control in [
     'echo "identity-hash=$identity_hash"',
     '--sign "$SIGNING_IDENTITY_HASH"',

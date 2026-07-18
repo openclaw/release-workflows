@@ -80,7 +80,13 @@ const dispatchedAssets = Object.fromEntries(Object.entries(targetNames).map(([ta
   sha256: digest(artifactData.get(name)),
 }]));
 
-function resolveInputs({ repositoryType, homebrewTap = '', formula = 'spogo' }) {
+function resolveInputs({
+  buildRunner = 'ubuntu',
+  formula = 'spogo',
+  homebrewTap = '',
+  nfpmMode = 'auto',
+  repositoryType,
+}) {
   const fixtureRoot = mkdtempSync(join(tmpdir(), 'release-homebrew-inputs-'));
   const githubOutput = join(fixtureRoot, 'github-output');
   let thrown;
@@ -89,10 +95,12 @@ function resolveInputs({ repositoryType, homebrewTap = '', formula = 'spogo' }) 
       encoding: 'utf8',
       env: {
         ...process.env,
+        BUILD_RUNNER: buildRunner,
         EXTRA_PACKAGES: '[]',
         GITHUB_OUTPUT: githubOutput,
         HOMEBREW_FORMULA: formula,
         HOMEBREW_TAP: homebrewTap,
+        NFPM_MODE: nfpmMode,
         REPOSITORY_TYPE: repositoryType,
         VERSION: '1.2.3',
       },
@@ -305,6 +313,8 @@ for (const [name, fixture, expectedTap] of inputMatrix) {
 for (const [name, fixture, expectedError] of [
   ['invalid tap name fails closed', { repositoryType: 'openclaw', homebrewTap: 'steipete' }, /owner\/repo/],
   ['unsafe formula name fails closed', { repositoryType: 'openclaw', formula: '../spogo' }, /formula filename stem/],
+  ['invalid build runner fails closed', { repositoryType: 'openclaw', buildRunner: 'windows' }, /build-runner must be ubuntu or macos/],
+  ['invalid nFPM mode fails closed', { repositoryType: 'openclaw', nfpmMode: 'maybe' }, /nfpm must be auto, enabled, or disabled/],
 ]) {
   const result = resolveInputs(fixture);
   assert.notEqual(result.thrown, undefined);
