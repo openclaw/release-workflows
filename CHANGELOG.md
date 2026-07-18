@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.0.0-alpha.9 - 2026-07-18
+
+- Move independent verification to the run's immutable Actions artifact with `actions: read` only, then bind every unpublished draft asset name and digest to both architecture attestations immediately before publication.
+
 ## v1.0.0-alpha.8
 - Drop `target_commitish` from draft creation (Actions token rejects raw SHAs with 403); assert the frozen tag's peeled commit instead — same trust property, working API call.
 

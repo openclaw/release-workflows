@@ -2,8 +2,9 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
-const workflowPath = new URL('../.github/workflows/release-go-cli.yml', import.meta.url).pathname;
+const workflowPath = fileURLToPath(new URL('../.github/workflows/release-go-cli.yml', import.meta.url));
 const rubyExtractor = String.raw`
   workflow = Psych.safe_load(
     File.read(ARGV.fetch(0)),

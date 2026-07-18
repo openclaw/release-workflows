@@ -3,9 +3,9 @@
 Fleet-standard reusable release pipelines. Every archetype follows one trust boundary:
 
 1. freeze a protected-branch commit, reusing an immutable annotated tag on retries;
-2. build and create an unpublished draft;
-3. independently verify the exact draft without signing credentials;
-4. publish only after every verifier passes.
+2. build, freeze an immutable same-run artifact payload, and create an unpublished draft from those bytes;
+3. independently verify that artifact on arm64 and x86_64 without signing or release-write credentials, emitting the exact verified `SHA256SUMS` plus a verdict;
+4. let the publisher re-download every draft asset and require exact name and digest equality with both verifier attestations before un-drafting.
 
 Callers pin a release-workflows compatibility tag, never a branch:
 
@@ -49,7 +49,9 @@ The CI gate merges required status checks from legacy branch protection and effe
 
 The first attempt, when no version tag exists, freezes the current protected default-branch head and creates an annotated tag there. On every retry, an existing exact annotated version tag takes precedence: its peeled commit becomes `target-sha`, even when the caller runs from a newer default-branch head. That frozen commit must still be reachable from the protected default branch; the workflow checks out that commit and evaluates its changelog, version metadata, and required CI signals. The tag is never moved or replaced. Lightweight tags, tags that do not peel directly to a commit, and tags outside protected-branch ancestry fail closed. The caller itself must still be dispatched at the current protected default-branch head.
 
-Binary authenticity does not trust the tag signature or annotation: the draft verifier independently enforces the exact commit, inventory, SHA-256 checksums, Apple certificate chain, hardened-runtime flag, timestamp, stable embedded designated requirement, Team ID, notarization requirement, and native plus universal architectures.
+Binary authenticity does not trust the tag signature or annotation. Each architecture verifier has only `actions: read`; it downloads the draft job's immutable Actions artifact by its producer-exported name, never calls the draft Releases API, and independently enforces the exact commit, inventory, SHA-256 checksums, Apple certificate chain, hardened-runtime flag, timestamp, stable embedded designated requirement, Team ID, notarization requirement, and native plus universal architectures. Each verifier uploads an attestation containing its `verified` verdict, source artifact name, and exact `SHA256SUMS` bytes. Producer-bound names and 30-day artifact retention preserve this chain across GitHub's partial-job reruns, where consumer `run_attempt` values can differ.
+
+The publisher is the only post-draft job with `contents: write`. After both verifiers pass, it requires byte-identical checksum attestations, lists and API-downloads every unpublished draft asset, rejects duplicate, extra, missing, or renamed assets, compares the draft's `SHA256SUMS` bytes exactly, and hashes every remaining asset. It un-drafts only when the draft names and digests equal the write-free verification conclusion. Thus draft-read access remains coupled to publication authority without extending that authority to either verifier.
 
 The Homebrew handoff dispatches `update-formula.yml` in the matching tap with `formula`, `source_repository`, `version`, numeric `release_id`, and a unique `correlation_id`. The tap workflow must include `correlation_id` in its `run-name`; the release waits for that exact run to succeed. The final stage opens a PR adding the next `## Unreleased` section.
 
@@ -66,7 +68,7 @@ Provision secrets per caller repository. Do not centralize one credential across
 | `ASC_PRIVATE_KEY_P8` | Full raw contents of the matching `AuthKey_*.p8`. |
 | `TAP_TOKEN` | Optional fine-grained token able to dispatch and read Actions runs in the matching tap. Required only with `homebrew-formula`. |
 
-The signing job imports the `.p12` into a unique ephemeral keychain, adds that keychain to the scoped user search list, validates the policy identity, and signs by its SHA-1 hash. An `always()` cleanup restores the original search list and deletes the temporary keychain; the `.p8` exists only inside runner temporary storage. Post-sign assertions are individually labeled and report only sanitized public signature metadata on failure. Designated-requirement comparison normalizes codesign's optional alphanumeric quotes and `Executable=` display header before comparing both sides. The verifier jobs receive only `contents: read`; their proof step explicitly removes GitHub, Apple, signing, and tap token names from the environment.
+The signing job imports the `.p12` into a unique ephemeral keychain, adds that keychain to the scoped user search list, validates the policy identity, and signs by its SHA-1 hash. An `always()` cleanup restores the original search list and deletes the temporary keychain; the `.p8` exists only inside runner temporary storage. Post-sign assertions are individually labeled and report only sanitized public signature metadata on failure. Designated-requirement comparison normalizes codesign's optional alphanumeric quotes and `Executable=` display header before comparing both sides. The verifier jobs receive only `actions: read`; their proof step explicitly removes GitHub, Actions runtime, Apple, signing, and tap token names from the environment.
 
 ## Versioning policy
 
@@ -82,4 +84,4 @@ Run:
 scripts/validate-workflows.sh
 ```
 
-This runs actionlint on reusable, CI, and example workflows; parses every YAML document with Psych safe loading; and enforces the required job/input topology, secretless verifier, dual-architecture verifier matrix, and immutable action references.
+This runs actionlint on reusable, CI, and example workflows; parses every YAML document with Psych safe loading; executes adversarial frozen-tag and draft-binding scenarios; and enforces the required job/input topology, actions-read-only dual-architecture verifier, publisher hash binding, and immutable action references.

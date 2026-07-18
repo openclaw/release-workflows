@@ -797,6 +797,7 @@ jobs:
       contents: write
     outputs:
       release-id: ${{ steps.release.outputs.release-id }}
+      verification-artifact-name: ${{ steps.verification-payload.outputs.artifact-name }}
     steps:
       - name: Download signed payload
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
@@ -824,6 +825,20 @@ jobs:
           cp "$inventory" ASSET-INVENTORY.json
           find . -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort | xargs sha256sum >"$checksums"
           mv "$checksums" SHA256SUMS
+
+      - name: Package immutable verification payload
+        id: verification-payload
+        run: |
+          set -euo pipefail
+          tar -czf release-verification-payload.tar.gz release-assets
+          echo "artifact-name=release-verification-payload-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >>"$GITHUB_OUTPUT"
+      - name: Upload immutable verification payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.verification-payload.outputs.artifact-name }}
+          path: release-verification-payload.tar.gz
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Create draft and upload exact assets
         id: release
@@ -894,43 +909,29 @@ jobs:
             runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
     permissions:
-      contents: read
+      actions: read
     steps:
-      - name: Download draft assets by numeric ID
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
-        env:
-          RELEASE_ID: ${{ needs.draft.outputs.release-id }}
+      - name: Download immutable verification payload
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          script: |
-            const fs = require('fs');
-            const releaseId = Number(process.env.RELEASE_ID);
-            const release = await github.rest.repos.getRelease({ ...context.repo, release_id: releaseId });
-            if (!release.data.draft) {
-              core.setFailed('release is not a draft during verification');
-              return;
-            }
-            fs.mkdirSync('draft-assets', { recursive: true });
-            for (const asset of release.data.assets) {
-              const response = await github.request('GET /repos/{owner}/{repo}/releases/assets/{asset_id}', {
-                ...context.repo,
-                asset_id: asset.id,
-                headers: { accept: 'application/octet-stream' },
-              });
-              fs.writeFileSync(`draft-assets/${asset.name}`, Buffer.from(response.data));
-            }
+          name: ${{ needs.draft.outputs.verification-artifact-name }}
+      - name: Extract immutable verification payload
+        run: |
+          set -euo pipefail
+          tar -xzf release-verification-payload.tar.gz
 
       - name: Verify exact inventory, signatures, DR, and notarization
         env:
           EXPECTED_ARCH: ${{ matrix.arch }}
-          RELEASE_ID: ${{ needs.draft.outputs.release-id }}
           REPOSITORY_NAME: ${{ github.event.repository.name }}
           REPOSITORY_TYPE: ${{ inputs.repository-type }}
           TAG: ${{ needs.validate.outputs.tag }}
           TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
+          VERIFICATION_PAYLOAD_ARTIFACT: ${{ needs.draft.outputs.verification-artifact-name }}
         run: |
           set -euo pipefail
-          unset GH_TOKEN GITHUB_TOKEN ASC_KEY_ID ASC_ISSUER_ID ASC_PRIVATE_KEY_P8 MACOS_SIGNING_P12 MACOS_SIGNING_P12_PASSWORD TAP_TOKEN
-          cd draft-assets
+          unset GH_TOKEN GITHUB_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_RUNTIME_TOKEN ASC_KEY_ID ASC_ISSUER_ID ASC_PRIVATE_KEY_P8 MACOS_SIGNING_P12 MACOS_SIGNING_P12_PASSWORD TAP_TOKEN
+          cd release-assets
           [[ -f ASSET-INVENTORY.json && -f SHA256SUMS && -f SIGNING-MANIFEST.json ]]
           [[ "$(jq -r '.repository' ASSET-INVENTORY.json)" == "$GITHUB_REPOSITORY" ]]
           [[ "$(jq -r '.tag' ASSET-INVENTORY.json)" == "$TAG" ]]
@@ -1046,7 +1047,7 @@ jobs:
             identifier_prefix=com.steipete
           fi
 
-          work="$RUNNER_TEMP/verify-$RELEASE_ID-$EXPECTED_ARCH"
+          work="$RUNNER_TEMP/verify-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$EXPECTED_ARCH"
           mkdir -p "$work"
           native_count=0
           universal_count=0
@@ -1103,36 +1104,159 @@ jobs:
             exit 1
           }
 
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg runId "$GITHUB_RUN_ID" \
+            --arg verifierRunAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg payloadArtifact "$VERIFICATION_PAYLOAD_ARTIFACT" \
+            --arg tag "$TAG" \
+            --arg commit "$TARGET_SHA" \
+            --arg architecture "$EXPECTED_ARCH" \
+            --rawfile sha256sums SHA256SUMS \
+            '{schemaVersion:1,repository:$repository,runId:$runId,verifierRunAttempt:$verifierRunAttempt,payloadArtifact:$payloadArtifact,tag:$tag,commit:$commit,architecture:$architecture,verdict:"verified",sha256sums:$sha256sums}' \
+            >"$RUNNER_TEMP/verified-inventory-attestation.json"
+
+      - name: Upload verified inventory attestation
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verified-inventory-${{ matrix.arch }}-${{ needs.draft.outputs.verification-artifact-name }}
+          path: ${{ runner.temp }}/verified-inventory-attestation.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+
   publish:
     name: 6 · Publish verified draft
     needs: [validate, draft, verify]
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: write
     outputs:
       release-url: ${{ steps.publish.outputs.release-url }}
     steps:
-      - name: Undraft exact release
+      - name: Download arm64 verified inventory attestation
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: verified-inventory-arm64-${{ needs.draft.outputs.verification-artifact-name }}
+          path: verified-inventory-attestations/arm64
+      - name: Download x86_64 verified inventory attestation
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: verified-inventory-x86_64-${{ needs.draft.outputs.verification-artifact-name }}
+          path: verified-inventory-attestations/x86_64
+      - name: Bind draft bytes to verified inventory and publish
         id: publish
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
           RELEASE_ID: ${{ needs.draft.outputs.release-id }}
           TAG: ${{ needs.validate.outputs.tag }}
           TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
+          VERIFICATION_PAYLOAD_ARTIFACT: ${{ needs.draft.outputs.verification-artifact-name }}
         with:
           script: |
+            const crypto = require('crypto');
+            const fs = require('fs');
             const releaseId = Number(process.env.RELEASE_ID);
+            if (!Number.isSafeInteger(releaseId) || releaseId <= 0) {
+              throw new Error('invalid numeric release id');
+            }
+
+            const attestationPaths = {
+              arm64: 'verified-inventory-attestations/arm64/verified-inventory-attestation.json',
+              x86_64: 'verified-inventory-attestations/x86_64/verified-inventory-attestation.json',
+            };
+            const attestations = Object.fromEntries(Object.entries(attestationPaths).map(([architecture, file]) => {
+              const attestation = JSON.parse(fs.readFileSync(file, 'utf8'));
+              const expected = {
+                repository: `${context.repo.owner}/${context.repo.repo}`,
+                runId: process.env.GITHUB_RUN_ID,
+                payloadArtifact: process.env.VERIFICATION_PAYLOAD_ARTIFACT,
+                tag: process.env.TAG,
+                commit: process.env.TARGET_SHA,
+                architecture,
+                verdict: 'verified',
+              };
+              for (const [field, value] of Object.entries(expected)) {
+                if (attestation[field] !== value) {
+                  throw new Error(`${architecture} attestation ${field} mismatch: observed ${JSON.stringify(attestation[field])}, expected ${JSON.stringify(value)}`);
+                }
+              }
+              if (attestation.schemaVersion !== 1 || typeof attestation.sha256sums !== 'string') {
+                throw new Error(`${architecture} attestation schema or SHA256SUMS is invalid`);
+              }
+              return [architecture, attestation];
+            }));
+            if (attestations.arm64.sha256sums !== attestations.x86_64.sha256sums) {
+              throw new Error('verified SHA256SUMS differs between arm64 and x86_64 attestations');
+            }
+
+            const verifiedSha256sums = attestations.arm64.sha256sums;
+            if (!verifiedSha256sums.endsWith('\n')) {
+              throw new Error('verified SHA256SUMS must end with exactly one complete checksum line');
+            }
+            const checksumLines = verifiedSha256sums.slice(0, -1).split('\n');
+            if (checksumLines.length === 0 || checksumLines.some((line) => line.length === 0)) {
+              throw new Error('verified SHA256SUMS contains an empty line');
+            }
+            const expectedDigests = new Map();
+            for (const line of checksumLines) {
+              const match = /^([0-9a-f]{64})  ([^\r\n]+)$/.exec(line);
+              if (!match) throw new Error(`invalid SHA256SUMS line: ${JSON.stringify(line)}`);
+              const [, digest, name] = match;
+              if (name === 'SHA256SUMS' || name.includes('/') || name.includes('\\') || expectedDigests.has(name)) {
+                throw new Error(`unsafe or duplicate SHA256SUMS asset name: ${JSON.stringify(name)}`);
+              }
+              expectedDigests.set(name, digest);
+            }
+
             const before = await github.rest.repos.getRelease({ ...context.repo, release_id: releaseId });
+            if (!before.data.draft || before.data.tag_name !== process.env.TAG) {
+              throw new Error('draft identity changed before content binding');
+            }
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets, {
+              ...context.repo,
+              release_id: releaseId,
+              per_page: 100,
+            });
+            const downloaded = new Map();
+            for (const asset of assets) {
+              if (downloaded.has(asset.name)) {
+                throw new Error(`duplicate draft asset name: ${JSON.stringify(asset.name)}`);
+              }
+              const response = await github.request('GET /repos/{owner}/{repo}/releases/assets/{asset_id}', {
+                ...context.repo,
+                asset_id: asset.id,
+                headers: { accept: 'application/octet-stream' },
+              });
+              downloaded.set(asset.name, Buffer.from(response.data));
+            }
+
+            const expectedNames = [...expectedDigests.keys(), 'SHA256SUMS'].sort();
+            const observedNames = [...downloaded.keys()].sort();
+            if (JSON.stringify(observedNames) !== JSON.stringify(expectedNames)) {
+              const missing = expectedNames.filter((name) => !downloaded.has(name));
+              const extra = observedNames.filter((name) => !expectedNames.includes(name));
+              throw new Error(`draft asset inventory mismatch: missing=${JSON.stringify(missing)} extra=${JSON.stringify(extra)}`);
+            }
+            const draftSha256sums = downloaded.get('SHA256SUMS').toString('utf8');
+            if (draftSha256sums !== verifiedSha256sums) {
+              throw new Error('draft SHA256SUMS bytes differ from verified attestation');
+            }
+            for (const [name, expectedDigest] of expectedDigests) {
+              const observedDigest = crypto.createHash('sha256').update(downloaded.get(name)).digest('hex');
+              if (observedDigest !== expectedDigest) {
+                throw new Error(`draft asset digest mismatch for ${JSON.stringify(name)}: observed ${observedDigest}, expected ${expectedDigest}`);
+              }
+            }
+
             const ref = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
             if (ref.data.object.type !== 'tag') {
-              core.setFailed('release tag is no longer annotated or signed');
-              return;
+              throw new Error('release tag is no longer annotated or signed');
             }
             const tagObject = await github.rest.git.getTag({ ...context.repo, tag_sha: ref.data.object.sha });
-            if (!before.data.draft || before.data.tag_name !== process.env.TAG ||
-                tagObject.data.object.type !== 'commit' || tagObject.data.object.sha !== process.env.TARGET_SHA) {
-              core.setFailed('draft identity changed before publication');
-              return;
+            if (tagObject.data.object.type !== 'commit' || tagObject.data.object.sha !== process.env.TARGET_SHA) {
+              throw new Error('frozen tag target changed before publication');
             }
             const published = await github.rest.repos.updateRelease({
               ...context.repo,

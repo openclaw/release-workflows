@@ -13,6 +13,7 @@ done < <(find .github/workflows examples -type f \( -name '*.yml' -o -name '*.ya
 actionlint "${workflow_files[@]}"
 
 node scripts/test-release-target-resolution.mjs
+node scripts/test-draft-binding.mjs
 scripts/test-signature-assertions.sh
 
 ruby -e '
@@ -46,6 +47,48 @@ for secret in ['MACOS_SIGNING_P12', 'MACOS_SIGNING_P12_PASSWORD', 'ASC_KEY_ID', 
 
 if 'macos-14' not in verify or 'macos-15-intel' not in verify:
     raise SystemExit('verify matrix must cover arm64 and Intel macOS runners')
+
+if not re.search(r'permissions:\s*\n\s*actions: read\s*$', verify, re.MULTILINE):
+    raise SystemExit('verify job must grant only actions: read')
+for forbidden_verify_release_access in [
+    'contents: read',
+    'getRelease',
+    'listReleaseAssets',
+    '/releases/assets/',
+    'needs.draft.outputs.release-id',
+]:
+    if forbidden_verify_release_access in verify:
+        raise SystemExit(f'verify job must not access draft releases: {forbidden_verify_release_access}')
+for required_verify_attestation_control in [
+    'needs.draft.outputs.verification-artifact-name',
+    '--rawfile sha256sums SHA256SUMS',
+    'verdict:"verified"',
+    'payloadArtifact:$payloadArtifact',
+    'verified-inventory-${{ matrix.arch }}-${{ needs.draft.outputs.verification-artifact-name }}',
+    'retention-days: 30',
+]:
+    if required_verify_attestation_control not in verify:
+        raise SystemExit(f'missing verifier attestation control: {required_verify_attestation_control}')
+
+publish = workflow.split('\n  publish:\n', 1)[1].split('\n  handoff:\n', 1)[0]
+draft = workflow.split('\n  draft:\n', 1)[1].split('\n  verify:\n', 1)[0]
+if 'verification-artifact-name:' not in draft or 'retention-days: 30' not in draft:
+    raise SystemExit('draft must export and retain its verification payload for the retry window')
+for required_publish_binding_control in [
+    'actions: read',
+    'contents: write',
+    'verified-inventory-arm64-${{ needs.draft.outputs.verification-artifact-name }}',
+    'verified-inventory-x86_64-${{ needs.draft.outputs.verification-artifact-name }}',
+    'github.paginate(github.rest.repos.listReleaseAssets',
+    "accept: 'application/octet-stream'",
+    "crypto.createHash('sha256')",
+    'draft SHA256SUMS bytes differ from verified attestation',
+    'draft asset inventory mismatch',
+]:
+    if required_publish_binding_control not in publish:
+        raise SystemExit(f'missing publisher draft-binding control: {required_publish_binding_control}')
+if publish.index("crypto.createHash('sha256')") > publish.index('updateRelease'):
+    raise SystemExit('publisher must hash draft assets before undrafting')
 
 sign = workflow.split('\n  sign:\n', 1)[1].split('\n  draft:\n', 1)[0]
 for required_signing_control in [
