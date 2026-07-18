@@ -21,6 +21,11 @@ on:
         required: false
         default: '[]'
         type: string
+      strict-checks:
+        description: Require every independent check green instead of only branch-required contexts
+        required: false
+        default: false
+        type: boolean
     secrets:
       MACOS_SIGNING_P12:
         description: Base64-encoded Developer ID Application certificate and private key
@@ -183,36 +188,146 @@ jobs:
       - name: Require independent CI green on exact head
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
+          DEFAULT_BRANCH: ${{ steps.repository.outputs.default-branch }}
+          STRICT_CHECKS: ${{ inputs.strict-checks }}
           TARGET_SHA: ${{ steps.repository.outputs.target-sha }}
         with:
           script: |
-            const checks = await github.paginate(github.rest.checks.listForRef, {
+            const acceptableConclusions = new Set(['success', 'neutral', 'skipped']);
+            const currentRunMarker = `/actions/runs/${context.runId}`;
+            const allCheckRuns = await github.paginate(github.rest.checks.listForRef, {
               ...context.repo,
               ref: process.env.TARGET_SHA,
               per_page: 100,
               filter: 'latest',
             });
-            const currentRunMarker = `/actions/runs/${context.runId}`;
-            const independent = checks.filter((check) => !check.details_url?.includes(currentRunMarker));
-            const badChecks = independent.filter((check) =>
-              check.status !== 'completed' || !['success', 'neutral', 'skipped'].includes(check.conclusion)
-            );
-            const statuses = await github.rest.repos.getCombinedStatusForRef({
+            const checkRuns = allCheckRuns.filter((check) => !check.details_url?.includes(currentRunMarker));
+            const allStatuses = await github.paginate(github.rest.repos.listCommitStatusesForRef, {
               ...context.repo,
               ref: process.env.TARGET_SHA,
               per_page: 100,
             });
-            const hasStatuses = statuses.data.statuses.length > 0;
-            if (independent.length === 0 && !hasStatuses) {
+            const latestStatuses = new Map();
+            for (const status of allStatuses) {
+              const normalizedContext = status.context.toLowerCase();
+              if (!latestStatuses.has(normalizedContext)) latestStatuses.set(normalizedContext, status);
+            }
+
+            const required = new Map();
+            const normalizeContext = (name) => name.toLowerCase();
+            const addRequired = (name, appId = null) => {
+              if (!name) return;
+              const normalizedName = normalizeContext(name);
+              const normalizedAppId = Number.isInteger(appId) && appId >= 0 ? appId : null;
+              if (normalizedAppId !== null) {
+                required.delete(`${normalizedName}\u0000*`);
+              } else if ([...required.values()].some((entry) =>
+                entry.normalizedName === normalizedName && entry.appId !== null)) {
+                return;
+              }
+              required.set(`${normalizedName}\u0000${normalizedAppId ?? '*'}`, {
+                name,
+                normalizedName,
+                appId: normalizedAppId,
+              });
+            };
+            const addRequiredStatusChecks = (policy) => {
+              if (!policy) return;
+              const checks = policy.checks ?? [];
+              for (const check of checks) addRequired(check.context, check.app_id);
+              for (const name of policy.contexts ?? []) {
+                if (![...required.values()].some((entry) =>
+                  entry.normalizedName === normalizeContext(name))) addRequired(name);
+              }
+            };
+
+            const branch = await github.rest.repos.getBranch({
+              ...context.repo,
+              branch: process.env.DEFAULT_BRANCH,
+            });
+            const projectedPolicy = branch.data.protection?.required_status_checks;
+            addRequiredStatusChecks(projectedPolicy);
+
+            const effectiveRules = await github.paginate('GET /repos/{owner}/{repo}/rules/branches/{branch}', {
+              ...context.repo,
+              branch: process.env.DEFAULT_BRANCH,
+              per_page: 100,
+            });
+            for (const rule of effectiveRules) {
+              if (rule.type !== 'required_status_checks') continue;
+              for (const check of rule.parameters?.required_status_checks ?? []) {
+                addRequired(check.context, check.integration_id);
+              }
+            }
+
+            const strictChecks = process.env.STRICT_CHECKS === 'true';
+            if (required.size > 0) {
+              const appIdsByBotLogin = new Map();
+              const statusAppId = async (status) => {
+                const login = status.creator?.login;
+                if (status.creator?.type !== 'Bot' || !login?.endsWith('[bot]')) return null;
+                if (!appIdsByBotLogin.has(login)) {
+                  const slug = login.slice(0, -'[bot]'.length);
+                  appIdsByBotLogin.set(login, github.rest.apps.getBySlug({ app_slug: slug })
+                    .then((response) => response.data.id)
+                    .catch((error) => {
+                      if (error.status === 404) return null;
+                      throw error;
+                    }));
+                }
+                return appIdsByBotLogin.get(login);
+              };
+              const failures = [];
+              for (const requirement of required.values()) {
+                const matchingRuns = checkRuns.filter((check) =>
+                  normalizeContext(check.name) === requirement.normalizedName &&
+                  (requirement.appId === null || check.app?.id === requirement.appId)
+                );
+                let matchingStatus = latestStatuses.get(requirement.normalizedName);
+                if (matchingStatus && requirement.appId !== null &&
+                    await statusAppId(matchingStatus) !== requirement.appId) {
+                  matchingStatus = undefined;
+                  for (const status of allStatuses) {
+                    if (normalizeContext(status.context) === requirement.normalizedName &&
+                        await statusAppId(status) === requirement.appId) {
+                      matchingStatus = status;
+                      break;
+                    }
+                  }
+                }
+                const greenRuns = matchingRuns.every((check) =>
+                  check.status === 'completed' && acceptableConclusions.has(check.conclusion)
+                );
+                const hasSignal = matchingRuns.length > 0 || matchingStatus !== undefined;
+                const greenStatus = matchingStatus === undefined || matchingStatus.state === 'success';
+                if (!hasSignal || !greenRuns || !greenStatus) {
+                  const observed = [
+                    ...matchingRuns.map((check) => `${check.status}/${check.conclusion}`),
+                    ...(matchingStatus ? [`status/${matchingStatus.state}`] : []),
+                  ];
+                  failures.push(`${requirement.name}${requirement.appId === null ? '' : `@app:${requirement.appId}`}=${observed.join('|') || 'missing'}`);
+                }
+              }
+              core.info(`Required CI contexts: ${[...required.values()].map((entry) => entry.name).join(', ')}`);
+              if (failures.length > 0) core.setFailed(`required checks not green: ${failures.join(', ')}`);
+              if (!strictChecks) return;
+            }
+
+            core.info(`CI gate mode: ${strictChecks ? 'strict all-checks' : 'all-check fallback (no required contexts)'}`);
+            if (checkRuns.length === 0 && latestStatuses.size === 0) {
               core.setFailed('exact head has no independent CI check or commit status');
               return;
             }
-            if (badChecks.length > 0) {
-              core.setFailed(`non-green checks: ${badChecks.map((check) => `${check.name}=${check.status}/${check.conclusion}`).join(', ')}`);
-              return;
-            }
-            if (hasStatuses && statuses.data.state !== 'success') {
-              core.setFailed(`combined commit status is ${statuses.data.state}`);
+            const badChecks = checkRuns.filter((check) =>
+              check.status !== 'completed' || !acceptableConclusions.has(check.conclusion)
+            );
+            const badStatuses = [...latestStatuses.values()].filter((status) => status.state !== 'success');
+            if (badChecks.length > 0 || badStatuses.length > 0) {
+              const failures = [
+                ...badChecks.map((check) => `${check.name}=${check.status}/${check.conclusion}`),
+                ...badStatuses.map((status) => `${status.context}=status/${status.state}`),
+              ];
+              core.setFailed(`non-green checks: ${failures.join(', ')}`);
             }
 
   tag:

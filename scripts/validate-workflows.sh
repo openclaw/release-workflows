@@ -31,7 +31,7 @@ for job in required_jobs:
     if not re.search(rf'^  {re.escape(job)}:\s*$', workflow, re.MULTILINE):
         raise SystemExit(f'missing required job: {job}')
 
-required_inputs = ['version', 'repository-type', 'homebrew-formula', 'extra-packages']
+required_inputs = ['version', 'repository-type', 'homebrew-formula', 'extra-packages', 'strict-checks']
 for name in required_inputs:
     if not re.search(rf'^      {re.escape(name)}:\s*$', workflow, re.MULTILINE):
         raise SystemExit(f'missing workflow_call input: {name}')

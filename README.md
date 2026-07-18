@@ -20,7 +20,7 @@ jobs:
 `release-go-cli.yml` is the first fleet archetype. It requires:
 
 - a protected default branch and a caller dispatched at its exact head;
-- at least one independent successful check or commit status on that head;
+- every branch-protection or effective-ruleset required status context green on that head;
 - `CHANGELOG.md` with a dated `##` section containing the requested version;
 - `go.mod` and `.goreleaser.yml` or `.goreleaser.yaml`;
 - a GoReleaser build matrix containing both `darwin/amd64` and `darwin/arm64` for every macOS binary name;
@@ -36,6 +36,7 @@ Inputs:
 | `repository-type` | `openclaw` or `personal`. Selects the signer, stable identifier namespace, and tap owner. |
 | `homebrew-formula` | Optional formula name. Empty skips handoff. |
 | `extra-packages` | JSON array of safe repo-relative files/directories. Basenames must be unique. |
+| `strict-checks` | Boolean. Default `false` checks only branch-required contexts. `true` requires every independent check/status green. When no required contexts exist, both modes use the all-check fallback and require at least one completed, non-failed CI signal. |
 
 Repository policies:
 
@@ -43,6 +44,8 @@ Repository policies:
 | --- | --- | --- | --- | --- |
 | `openclaw` | `Developer ID Application: OpenClaw Foundation` | `FWJYW4S8P8` | `org.openclaw.<repo>.<binary>` | `openclaw/homebrew-tap` |
 | `personal` | `Developer ID Application: Peter Steinberger` | `Y5PE65HELJ` | `com.steipete.<repo>.<binary>` | `steipete/homebrew-tap` |
+
+The CI gate merges required status checks from legacy branch protection and effective branch rules, including any required GitHub App binding. With the default `strict-checks: false`, unrelated optional or dynamic failures do not block a release. Required checks must still be present and green. Repositories without required contexts fall back to requiring all independent checks/statuses completed and non-failed. Set `strict-checks: true` to request that stricter all-check behavior even when required contexts exist.
 
 The tag stage creates an annotated tag at the validated SHA. A safe retry may reuse an existing signed or annotated tag only when its peeled commit is that exact SHA; lightweight or mismatched tags fail closed. Binary authenticity does not trust the tag signature or annotation: the draft verifier independently enforces the exact commit, inventory, SHA-256 checksums, Apple certificate chain, hardened-runtime flag, timestamp, stable embedded designated requirement, Team ID, notarization requirement, and native plus universal architectures.
 

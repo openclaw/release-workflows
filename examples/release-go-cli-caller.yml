@@ -24,6 +24,7 @@ jobs:
       repository-type: openclaw
       homebrew-formula: example-cli
       extra-packages: '[]'
+      strict-checks: false
     secrets:
       MACOS_SIGNING_P12: ${{ secrets.MACOS_SIGNING_P12 }}
       MACOS_SIGNING_P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
