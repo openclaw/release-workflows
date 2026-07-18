@@ -7,7 +7,7 @@ Fleet-standard reusable release pipelines. Every archetype follows one trust bou
 3. independently verify that artifact on arm64 and x86_64 without signing or release-write credentials, emitting the exact verified `ASSET-INVENTORY.json`, `SHA256SUMS`, plus a verdict;
 4. let the publisher re-download every draft asset and require exact name and digest equality with both verifier attestations before un-drafting.
 
-Callers pin a release-workflows compatibility tag, never a branch:
+Callers pin the stable `@v1` compatibility tag, never a branch or pre-release tag:
 
 ```yaml
 jobs:
@@ -37,7 +37,7 @@ The second setting governs both pull-request creation and approval by `GITHUB_TO
 
 Because the write default is repository-wide, every workflow should still declare an explicit least-privilege top-level or job-level `permissions` block. The example caller starts from `permissions: {}` and grants only the reusable release job's required scopes.
 
-When enabling Homebrew handoff, choose the formula's actual tap independently from the signing identity and provision `TAP_TOKEN` against that exact repository. The token must have Contents read and Actions write access to the configured tap; the handoff validates repository and workflow access before dispatch. The configured tap's `update-formula.yml` must accept the optional `assets` JSON input used by alpha.13 and later. Both fleet taps retain their legacy filename-guessing fallback for older callers.
+When enabling Homebrew handoff, choose the formula's actual tap independently from the signing identity and provision `TAP_TOKEN` against that exact repository. The token must have Contents read and Actions write access to the configured tap; the handoff validates repository and workflow access before dispatch. The configured tap's `update-formula.yml` must accept the optional `assets` JSON input required by the `@v1` compatibility contract. Both fleet taps retain their legacy filename-guessing fallback for older callers.
 
 See [`examples/release-go-cli-caller.yml`](examples/release-go-cli-caller.yml) for the complete thin caller.
 
