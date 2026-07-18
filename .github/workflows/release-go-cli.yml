@@ -68,6 +68,7 @@ jobs:
       statuses: read
     outputs:
       default-branch: ${{ steps.repository.outputs.default-branch }}
+      release-notes-artifact-name: ${{ steps.metadata.outputs.release-notes-artifact-name }}
       release-version: ${{ steps.inputs.outputs.release-version }}
       tag: ${{ steps.inputs.outputs.tag }}
       target-sha: ${{ steps.repository.outputs.target-sha }}
@@ -176,6 +177,7 @@ jobs:
           ref: ${{ steps.repository.outputs.target-sha }}
 
       - name: Validate release metadata
+        id: metadata
         env:
           EXTRA_PACKAGES: ${{ inputs.extra-packages }}
           RELEASE_VERSION: ${{ steps.inputs.outputs.release-version }}
@@ -188,13 +190,67 @@ jobs:
             exit 1
           }
 
-          awk -v version="$RELEASE_VERSION" '
-            /^## / && index($0, version) && $0 ~ /[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/ { found = 1 }
-            END { exit(found ? 0 : 1) }
-          ' CHANGELOG.md || {
-            echo "CHANGELOG.md needs a dated level-two section for $RELEASE_VERSION" >&2
-            exit 1
-          }
+          python3 - "$RELEASE_VERSION" "$RUNNER_TEMP/RELEASE-NOTES.md" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          version, output = sys.argv[1:]
+          raw = Path("CHANGELOG.md").read_bytes()
+          text = raw.decode("utf-8")
+          version_pattern = re.compile(rf"(?<![0-9A-Za-z.])v?{re.escape(version)}(?![0-9A-Za-z.+-])")
+          date_pattern = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+          heading_pattern = re.compile(r"^##[ \t]+")
+          fence_pattern = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})")
+          headings = []
+          offset = 0
+          fence = None
+          in_comment = False
+          for line in text.splitlines(keepends=True):
+              content = line.rstrip("\r\n")
+              if fence is not None:
+                  closing = re.match(rf"^[ ]{{0,3}}{re.escape(fence[0])}{{{fence[1]},}}[ \t]*$", content)
+                  if closing:
+                      fence = None
+                  offset += len(line)
+                  continue
+
+              if not in_comment:
+                  opening = fence_pattern.match(content)
+                  if opening:
+                      marker = opening.group(1)
+                      fence = (marker[0], len(marker))
+                      offset += len(line)
+                      continue
+                  if heading_pattern.match(content):
+                      headings.append((offset, offset + len(line), content))
+
+              cursor = 0
+              while cursor < len(content):
+                  marker = "-->" if in_comment else "<!--"
+                  marker_at = content.find(marker, cursor)
+                  if marker_at < 0:
+                      break
+                  in_comment = not in_comment
+                  cursor = marker_at + len(marker)
+              offset += len(line)
+
+          matches = [
+              candidate
+              for candidate in headings
+              if version_pattern.search(candidate[2]) and date_pattern.search(candidate[2])
+          ]
+          if len(matches) != 1:
+              raise SystemExit(
+                  f"CHANGELOG.md needs exactly one dated level-two section for {version}; found {len(matches)}"
+              )
+          match = matches[0]
+          end = next((candidate[0] for candidate in headings if candidate[0] > match[0]), len(text))
+          section = text[match[0]:end]
+          if not section.strip():
+              raise SystemExit("release notes section is empty")
+          Path(output).write_bytes(section.encode("utf-8"))
+          PY
 
           version_files=(.release-version VERSION version.txt)
           for version_file in "${version_files[@]}"; do
@@ -229,6 +285,16 @@ jobs:
               exit 1
             }
           done < <(jq -r '.[]' <<<"$EXTRA_PACKAGES")
+
+          echo "release-notes-artifact-name=release-notes-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >>"$GITHUB_OUTPUT"
+
+      - name: Upload frozen release notes
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.metadata.outputs.release-notes-artifact-name }}
+          path: ${{ runner.temp }}/RELEASE-NOTES.md
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Require independent CI green on frozen target
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
@@ -799,6 +865,11 @@ jobs:
       release-id: ${{ steps.release.outputs.release-id }}
       verification-artifact-name: ${{ steps.verification-payload.outputs.artifact-name }}
     steps:
+      - name: Download frozen release notes
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: ${{ needs.validate.outputs.release-notes-artifact-name }}
+          path: validated-release-notes
       - name: Download signed payload
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
@@ -810,6 +881,8 @@ jobs:
         run: |
           set -euo pipefail
           tar -xzf signed-release-assets.tar.gz
+          [[ -s validated-release-notes/RELEASE-NOTES.md ]] || { echo "validated release notes missing" >&2; exit 1; }
+          cp validated-release-notes/RELEASE-NOTES.md release-assets/RELEASE-NOTES.md
           cd release-assets
           : >"$RUNNER_TEMP/inventory.jsonl"
           while IFS= read -r file; do
@@ -853,7 +926,7 @@ jobs:
             const path = require('path');
             const directory = 'release-assets';
             const names = fs.readdirSync(directory).sort();
-            if (!names.includes('ASSET-INVENTORY.json') || !names.includes('SHA256SUMS')) {
+            if (!names.includes('ASSET-INVENTORY.json') || !names.includes('RELEASE-NOTES.md') || !names.includes('SHA256SUMS')) {
               core.setFailed('release controls missing');
               return;
             }
@@ -876,7 +949,7 @@ jobs:
               ...context.repo,
               tag_name: process.env.TAG,
               name: process.env.TAG,
-              body: `Fleet draft. Publication requires independent verification of the exact ASSET-INVENTORY.json and SHA256SUMS payload.`,
+              body: '',
               draft: true,
               prerelease: process.env.RELEASE_VERSION.includes('-'),
             });
@@ -932,7 +1005,7 @@ jobs:
           set -euo pipefail
           unset GH_TOKEN GITHUB_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_RUNTIME_TOKEN ASC_KEY_ID ASC_ISSUER_ID ASC_PRIVATE_KEY_P8 MACOS_SIGNING_P12 MACOS_SIGNING_P12_PASSWORD TAP_TOKEN
           cd release-assets
-          [[ -f ASSET-INVENTORY.json && -f SHA256SUMS && -f SIGNING-MANIFEST.json ]]
+          [[ -f ASSET-INVENTORY.json && -s RELEASE-NOTES.md && -f SHA256SUMS && -f SIGNING-MANIFEST.json ]]
           [[ "$(jq -r '.repository' ASSET-INVENTORY.json)" == "$GITHUB_REPOSITORY" ]]
           [[ "$(jq -r '.tag' ASSET-INVENTORY.json)" == "$TAG" ]]
           [[ "$(jq -r '.commit' ASSET-INVENTORY.json)" == "$TARGET_SHA" ]]
@@ -1117,8 +1190,9 @@ jobs:
             --arg tag "$TAG" \
             --arg commit "$TARGET_SHA" \
             --arg architecture "$EXPECTED_ARCH" \
+            --rawfile releaseNotes RELEASE-NOTES.md \
             --rawfile sha256sums SHA256SUMS \
-            '{schemaVersion:1,repository:$repository,runId:$runId,verifierRunAttempt:$verifierRunAttempt,payloadArtifact:$payloadArtifact,tag:$tag,commit:$commit,architecture:$architecture,verdict:"verified",sha256sums:$sha256sums}' \
+            '{schemaVersion:1,repository:$repository,runId:$runId,verifierRunAttempt:$verifierRunAttempt,payloadArtifact:$payloadArtifact,tag:$tag,commit:$commit,architecture:$architecture,verdict:"verified",releaseNotes:$releaseNotes,sha256sums:$sha256sums}' \
             >"$RUNNER_TEMP/verified-inventory-attestation.json"
 
       - name: Upload verified inventory attestation
@@ -1187,16 +1261,21 @@ jobs:
                   throw new Error(`${architecture} attestation ${field} mismatch: observed ${JSON.stringify(attestation[field])}, expected ${JSON.stringify(value)}`);
                 }
               }
-              if (attestation.schemaVersion !== 1 || typeof attestation.sha256sums !== 'string') {
-                throw new Error(`${architecture} attestation schema or SHA256SUMS is invalid`);
+              if (attestation.schemaVersion !== 1 || typeof attestation.releaseNotes !== 'string' ||
+                  attestation.releaseNotes.length === 0 || typeof attestation.sha256sums !== 'string') {
+                throw new Error(`${architecture} attestation schema, release notes, or SHA256SUMS is invalid`);
               }
               return [architecture, attestation];
             }));
             if (attestations.arm64.sha256sums !== attestations.x86_64.sha256sums) {
               throw new Error('verified SHA256SUMS differs between arm64 and x86_64 attestations');
             }
+            if (attestations.arm64.releaseNotes !== attestations.x86_64.releaseNotes) {
+              throw new Error('verified release notes differ between arm64 and x86_64 attestations');
+            }
 
             const verifiedSha256sums = attestations.arm64.sha256sums;
+            const verifiedReleaseNotes = attestations.arm64.releaseNotes;
             if (!verifiedSha256sums.endsWith('\n')) {
               throw new Error('verified SHA256SUMS must end with exactly one complete checksum line');
             }
@@ -1254,6 +1333,10 @@ jobs:
                 throw new Error(`draft asset digest mismatch for ${JSON.stringify(name)}: observed ${observedDigest}, expected ${expectedDigest}`);
               }
             }
+            if (!downloaded.has('RELEASE-NOTES.md') ||
+                !downloaded.get('RELEASE-NOTES.md').equals(Buffer.from(verifiedReleaseNotes, 'utf8'))) {
+              throw new Error('draft RELEASE-NOTES.md bytes differ from verified attestation');
+            }
 
             const ref = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
             if (ref.data.object.type !== 'tag') {
@@ -1266,9 +1349,10 @@ jobs:
             const published = await github.rest.repos.updateRelease({
               ...context.repo,
               release_id: releaseId,
+              body: verifiedReleaseNotes,
               draft: false,
             });
-            if (published.data.draft || !published.data.published_at) {
+            if (published.data.draft || !published.data.published_at || published.data.body !== verifiedReleaseNotes) {
               core.setFailed('release did not become published');
               return;
             }
@@ -1373,9 +1457,19 @@ jobs:
           TAG: ${{ needs.validate.outputs.tag }}
         run: |
           set -euo pipefail
+          closeout_permission_diagnostic() {
+            echo "::error title=Closeout PR disabled::Repository Actions setting can_approve_pull_request_reviews=true is required. In Settings > Actions > General > Workflow permissions, enable Allow GitHub Actions to create and approve pull requests." >&2
+          }
           if grep -Eq '^## \[?Unreleased\]?' CHANGELOG.md; then
             echo "CHANGELOG.md already has an Unreleased section"
             exit 0
+          fi
+          workflow_policy=
+          if workflow_policy=$(gh api "repos/$GITHUB_REPOSITORY/actions/permissions/workflow" 2>/dev/null); then
+            if [[ "$(jq -r '.can_approve_pull_request_reviews' <<<"$workflow_policy")" != true ]]; then
+              closeout_permission_diagnostic
+              exit 1
+            fi
           fi
           ruby -e '
             path = "CHANGELOG.md"
@@ -1398,5 +1492,12 @@ jobs:
 
           Created by the fleet release closeout stage.
           EOF
-          gh pr create --base "${{ needs.validate.outputs.default-branch }}" --head "$branch" \
-            --title "chore: open next Unreleased section" --body-file "$body_file"
+          if ! pr_output=$(gh pr create --base "${{ needs.validate.outputs.default-branch }}" --head "$branch" \
+            --title "chore: open next Unreleased section" --body-file "$body_file" 2>&1); then
+            printf '%s\n' "$pr_output" >&2
+            if grep -Fqi 'not permitted to create or approve pull requests' <<<"$pr_output"; then
+              closeout_permission_diagnostic
+            fi
+            exit 1
+          fi
+          printf '%s\n' "$pr_output"

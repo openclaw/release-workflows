@@ -26,6 +26,17 @@ jobs:
 - a GoReleaser build matrix containing both `darwin/amd64` and `darwin/arm64` for every macOS binary name;
 - consistent versions in any present `.release-version`, `VERSION`, `version.txt`, root `package.json`, and extra-package `package.json` files.
 
+### Migration prerequisites
+
+Before adding a caller, set the repository's Actions workflow permissions to both:
+
+- `default_workflow_permissions=write` (`Settings` → `Actions` → `General` → `Workflow permissions` → `Read and write permissions`);
+- `can_approve_pull_request_reviews=true` (enable `Allow GitHub Actions to create and approve pull requests` in the same section).
+
+The second setting governs both pull-request creation and approval by `GITHUB_TOKEN`, despite the API field's approval-focused name. The closeout stage performs a best-effort policy preflight and maps GitHub's specific PR-creation denial to these setting names. Organization or enterprise policy may need to allow the repository override.
+
+Because the write default is repository-wide, every workflow should still declare an explicit least-privilege top-level or job-level `permissions` block. The example caller starts from `permissions: {}` and grants only the reusable release job's required scopes.
+
 See [`examples/release-go-cli-caller.yml`](examples/release-go-cli-caller.yml) for the complete thin caller.
 
 Inputs:
@@ -50,6 +61,8 @@ The CI gate merges required status checks from legacy branch protection and effe
 The first attempt, when no version tag exists, freezes the current protected default-branch head and creates an annotated tag there. On every retry, an existing exact annotated version tag takes precedence: its peeled commit becomes `target-sha`, even when the caller runs from a newer default-branch head. That frozen commit must still be reachable from the protected default branch; the workflow checks out that commit and evaluates its changelog, version metadata, and required CI signals. The tag is never moved or replaced. Lightweight tags, tags that do not peel directly to a commit, and tags outside protected-branch ancestry fail closed. The caller itself must still be dispatched at the current protected default-branch head.
 
 Binary authenticity does not trust the tag signature or annotation. Each architecture verifier has only `actions: read`; it downloads the draft job's immutable Actions artifact by its producer-exported name, never calls the draft Releases API, and independently enforces the exact commit, inventory, SHA-256 checksums, Apple certificate chain, hardened-runtime flag, timestamp, stable embedded designated requirement, Team ID, notarization requirement, and native plus universal architectures. Each verifier uploads an attestation containing its `verified` verdict, source artifact name, and exact `SHA256SUMS` bytes. Producer-bound names and 30-day artifact retention preserve this chain across GitHub's partial-job reruns, where consumer `run_attempt` values can differ.
+
+Validation extracts exactly one dated level-two changelog section for the requested version from the frozen commit and preserves it as `RELEASE-NOTES.md`. The draft includes that file in `ASSET-INVENTORY.json`, `SHA256SUMS`, and the immutable verification payload. Both architecture attestations carry its exact text. Publication requires both attestations and the API-downloaded draft asset to agree byte-for-byte, then installs those verified bytes as the release body in the same call that removes draft status.
 
 ### macOS verification matrix
 

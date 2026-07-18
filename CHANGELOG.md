@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.0.0-alpha.11 - 2026-07-18
+
+- Publish the exact dated changelog section as a verifier-attested, checksum-bound release body, and diagnose closeout PR failures with the required repository Actions workflow-permission settings.
+
 ## v1.0.0-alpha.10 - 2026-07-18
 
 - Stop applying app-bundle `spctl --type execute` policy to bare Mach-O CLIs; retain strict signature, designated-requirement, hardened-runtime, and online notarization checks, with `spctl` guarded for future `.app` artifacts.

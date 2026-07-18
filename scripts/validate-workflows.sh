@@ -13,6 +13,7 @@ done < <(find .github/workflows examples -type f \( -name '*.yml' -o -name '*.ya
 actionlint "${workflow_files[@]}"
 
 node scripts/test-release-target-resolution.mjs
+node scripts/test-release-notes-extraction.mjs
 node scripts/test-draft-binding.mjs
 scripts/test-signature-assertions.sh
 
@@ -61,9 +62,11 @@ for forbidden_verify_release_access in [
         raise SystemExit(f'verify job must not access draft releases: {forbidden_verify_release_access}')
 for required_verify_attestation_control in [
     'needs.draft.outputs.verification-artifact-name',
+    '--rawfile releaseNotes RELEASE-NOTES.md',
     '--rawfile sha256sums SHA256SUMS',
     'verdict:"verified"',
     'payloadArtifact:$payloadArtifact',
+    'releaseNotes:$releaseNotes',
     'verified-inventory-${{ matrix.arch }}-${{ needs.draft.outputs.verification-artifact-name }}',
     'retention-days: 30',
 ]:
@@ -87,6 +90,15 @@ publish = workflow.split('\n  publish:\n', 1)[1].split('\n  handoff:\n', 1)[0]
 draft = workflow.split('\n  draft:\n', 1)[1].split('\n  verify:\n', 1)[0]
 if 'verification-artifact-name:' not in draft or 'retention-days: 30' not in draft:
     raise SystemExit('draft must export and retain its verification payload for the retry window')
+for required_release_notes_control in [
+    'needs.validate.outputs.release-notes-artifact-name',
+    'cp validated-release-notes/RELEASE-NOTES.md release-assets/RELEASE-NOTES.md',
+    "names.includes('RELEASE-NOTES.md')",
+]:
+    if required_release_notes_control not in draft:
+        raise SystemExit(f'draft does not bind release notes: {required_release_notes_control}')
+if 'Fleet draft. Publication requires' in draft:
+    raise SystemExit('draft must not use placeholder release notes')
 for required_publish_binding_control in [
     'actions: read',
     'contents: write',
@@ -96,7 +108,10 @@ for required_publish_binding_control in [
     "accept: 'application/octet-stream'",
     "crypto.createHash('sha256')",
     'draft SHA256SUMS bytes differ from verified attestation',
+    'verified release notes differ between arm64 and x86_64 attestations',
+    'draft RELEASE-NOTES.md bytes differ from verified attestation',
     'draft asset inventory mismatch',
+    'body: verifiedReleaseNotes',
 ]:
     if required_publish_binding_control not in publish:
         raise SystemExit(f'missing publisher draft-binding control: {required_publish_binding_control}')
@@ -132,6 +147,15 @@ for job_name, section in [('sign', sign), ('verify', verify)]:
             )
 
 validate = workflow.split('\n  validate:\n', 1)[1].split('\n  tag:\n', 1)[0]
+for required_notes_extraction_control in [
+    'release-notes-artifact-name:',
+    'exactly one dated level-two section',
+    'Path(output).write_bytes(section.encode("utf-8"))',
+    'Upload frozen release notes',
+    'release-notes-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT',
+]:
+    if required_notes_extraction_control not in validate:
+        raise SystemExit(f'validate does not freeze exact release notes: {required_notes_extraction_control}')
 for required_retry_control in [
     "existingTag.data.object.type !== 'tag'",
     'targetSha = tagObject.data.object.sha',
@@ -141,6 +165,15 @@ for required_retry_control in [
 ]:
     if required_retry_control not in validate:
         raise SystemExit(f'missing immutable retry control: {required_retry_control}')
+
+closeout = workflow.split('\n  closeout:\n', 1)[1]
+for required_closeout_diagnostic in [
+    'can_approve_pull_request_reviews=true',
+    'Allow GitHub Actions to create and approve pull requests',
+    'not permitted to create or approve pull requests',
+]:
+    if required_closeout_diagnostic not in closeout:
+        raise SystemExit(f'missing closeout permission diagnostic: {required_closeout_diagnostic}')
 
 all_workflows = '\n'.join(path.read_text() for path in workflow_paths)
 unpinned = re.findall(r'^\s*uses:\s+(?:actions|goreleaser)/[^@\n]+@(v\d+|main|master)\s*(?:#.*)?$', all_workflows, re.MULTILINE)
