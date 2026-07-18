@@ -15,6 +15,7 @@ actionlint "${workflow_files[@]}"
 node scripts/test-release-target-resolution.mjs
 node scripts/test-release-notes-extraction.mjs
 node scripts/test-draft-binding.mjs
+node scripts/test-homebrew-handoff.mjs
 scripts/test-signature-assertions.sh
 
 ruby -e '
@@ -36,7 +37,7 @@ for job in required_jobs:
     if not re.search(rf'^  {re.escape(job)}:\s*$', workflow, re.MULTILINE):
         raise SystemExit(f'missing required job: {job}')
 
-required_inputs = ['version', 'repository-type', 'homebrew-formula', 'extra-packages', 'strict-checks']
+required_inputs = ['version', 'repository-type', 'homebrew-tap', 'homebrew-formula', 'extra-packages', 'strict-checks']
 for name in required_inputs:
     if not re.search(rf'^      {re.escape(name)}:\s*$', workflow, re.MULTILINE):
         raise SystemExit(f'missing workflow_call input: {name}')
@@ -117,6 +118,48 @@ for required_publish_binding_control in [
         raise SystemExit(f'missing publisher draft-binding control: {required_publish_binding_control}')
 if publish.index("crypto.createHash('sha256')") > publish.index('updateRelease'):
     raise SystemExit('publisher must hash draft assets before undrafting')
+
+handoff = workflow.split('\n  handoff:\n', 1)[1].split('\n  closeout:\n', 1)[0]
+for forbidden_handoff_contract in [
+    'source_repository:',
+    'version:',
+    'release_id:',
+    'correlation_id:',
+    'inputs.repository-type',
+]:
+    if forbidden_handoff_contract in handoff:
+        raise SystemExit(f'handoff retains an unsupported or coupled tap field: {forbidden_handoff_contract}')
+for required_handoff_control in [
+    'needs.validate.outputs.homebrew-tap',
+    'verified-inventory-arm64-${{ needs.draft.outputs.verification-artifact-name }}',
+    'verified-inventory-x86_64-${{ needs.draft.outputs.verification-artifact-name }}',
+    "inputs: {\n                formula: process.env.FORMULA,\n                tag: process.env.TAG,\n                repository,\n              }",
+    'TAP_TOKEN cannot access configured Homebrew tap',
+    'verified SHA256SUMS differs between arm64 and x86_64 attestations',
+    'runsBeforeDispatch',
+    'priorRunIds',
+    'run.display_title === expectedRunTitle',
+    "run.actor?.login?.toLowerCase() === tapActor.data.login.toLowerCase()",
+    "tapRun.conclusion !== 'success'",
+    'SOURCE_DEFAULT_BRANCH: ${{ needs.validate.outputs.default-branch }}',
+    "['-rripper', '-rjson', '-e', analyzerProgram]",
+    'formula must contain one class',
+    'unsupported load-time formula statement',
+    'formula head is not the exact source repository default branch',
+    'return nil if value.match?(/[\\\\\\x00-\\x1f\\x7f]/)',
+    "const rawComponents = url.pathname.split('/')",
+    "const decodedSeparator = components.some((component) => component.includes('/') || component.includes('\\\\'))",
+    "url.username || url.password || rawComponents.length !== 7",
+    "components[5] !== process.env.TAG",
+    'url.port ||',
+    'formula sha256 mismatch for ${asset}',
+    'Formula/${process.env.FORMULA}.rb',
+    'HOMEBREW_POLL_TIMEOUT_MS ?? 900000',
+]:
+    if required_handoff_control not in handoff:
+        raise SystemExit(f'missing Homebrew handoff control: {required_handoff_control}')
+if not re.search(r'permissions:\s*\n\s*actions: read\s*$', handoff, re.MULTILINE):
+    raise SystemExit('handoff source token must grant only actions: read')
 
 sign = workflow.split('\n  sign:\n', 1)[1].split('\n  draft:\n', 1)[0]
 for required_signing_control in [

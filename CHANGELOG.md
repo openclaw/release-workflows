@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.0.0-alpha.12 - 2026-07-18
+
+- Decouple Homebrew tap selection from signing identity, use the live three-field dispatcher contract, wait for its newly observed run, and require parser-validated formula release-asset hashes to match both verifier attestations.
+
 ## v1.0.0-alpha.11 - 2026-07-18
 
 - Publish the exact dated changelog section as a verifier-attested, checksum-bound release body, and diagnose closeout PR failures with the required repository Actions workflow-permission settings.

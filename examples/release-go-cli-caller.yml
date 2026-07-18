@@ -22,6 +22,8 @@ jobs:
     with:
       version: ${{ inputs.version }}
       repository-type: openclaw
+      # Tap ownership is independent from the Foundation signing identity.
+      homebrew-tap: steipete/homebrew-tap
       homebrew-formula: example-cli
       extra-packages: '[]'
       strict-checks: false

@@ -8,11 +8,16 @@ on:
         required: true
         type: string
       repository-type:
-        description: Signing and Homebrew ownership policy
+        description: Signing identity and stable identifier policy
         required: true
         type: string
+      homebrew-tap:
+        description: Homebrew tap owner/repo; empty defaults by repository-type
+        required: false
+        default: ''
+        type: string
       homebrew-formula:
-        description: Formula name to hand to the matching fleet tap; empty disables handoff
+        description: Formula name to hand to the configured tap; empty disables handoff
         required: false
         default: ''
         type: string
@@ -68,6 +73,7 @@ jobs:
       statuses: read
     outputs:
       default-branch: ${{ steps.repository.outputs.default-branch }}
+      homebrew-tap: ${{ steps.inputs.outputs.homebrew-tap }}
       release-notes-artifact-name: ${{ steps.metadata.outputs.release-notes-artifact-name }}
       release-version: ${{ steps.inputs.outputs.release-version }}
       tag: ${{ steps.inputs.outputs.tag }}
@@ -77,6 +83,8 @@ jobs:
         id: inputs
         env:
           EXTRA_PACKAGES: ${{ inputs.extra-packages }}
+          HOMEBREW_FORMULA: ${{ inputs.homebrew-formula }}
+          HOMEBREW_TAP: ${{ inputs.homebrew-tap }}
           REPOSITORY_TYPE: ${{ inputs.repository-type }}
           VERSION: ${{ inputs.version }}
         run: |
@@ -90,6 +98,23 @@ jobs:
             echo "repository-type must be openclaw or personal" >&2
             exit 1
           fi
+          homebrew_tap=$HOMEBREW_TAP
+          if [[ -z "$homebrew_tap" ]]; then
+            if [[ "$REPOSITORY_TYPE" == openclaw ]]; then
+              homebrew_tap=openclaw/homebrew-tap
+            else
+              homebrew_tap=steipete/homebrew-tap
+            fi
+          fi
+          if [[ ! "$homebrew_tap" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]+$ ]] ||
+             [[ "$homebrew_tap" == */. || "$homebrew_tap" == */.. ]]; then
+            echo "homebrew-tap must be an owner/repo name" >&2
+            exit 1
+          fi
+          if [[ -n "$HOMEBREW_FORMULA" && ! "$HOMEBREW_FORMULA" =~ ^[A-Za-z0-9][A-Za-z0-9+_.@-]*$ ]]; then
+            echo "homebrew-formula must be a formula filename stem" >&2
+            exit 1
+          fi
           jq -e '
             type == "array" and
             all(.[];
@@ -99,8 +124,11 @@ jobs:
             ) and
             ([.[] | split("/")[-1]] | length == (unique | length))
           ' <<<"$EXTRA_PACKAGES" >/dev/null
-          echo "release-version=$release_version" >>"$GITHUB_OUTPUT"
-          echo "tag=v$release_version" >>"$GITHUB_OUTPUT"
+          {
+            echo "release-version=$release_version"
+            echo "tag=v$release_version"
+            echo "homebrew-tap=$homebrew_tap"
+          } >>"$GITHUB_OUTPUT"
 
       - name: Resolve protected release target
         id: repository
@@ -1375,16 +1403,28 @@ jobs:
     needs: [validate, draft, publish]
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      actions: read
     steps:
-      - name: Dispatch matching tap and wait
+      - name: Download arm64 verification attestation
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: verified-inventory-arm64-${{ needs.draft.outputs.verification-artifact-name }}
+          path: verified-inventory-attestations/arm64
+      - name: Download x86_64 verification attestation
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: verified-inventory-x86_64-${{ needs.draft.outputs.verification-artifact-name }}
+          path: verified-inventory-attestations/x86_64
+      - name: Dispatch configured tap and verify formula hashes
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
           FORMULA: ${{ inputs.homebrew-formula }}
-          RELEASE_ID: ${{ needs.draft.outputs.release-id }}
-          REPOSITORY_TYPE: ${{ inputs.repository-type }}
+          HOMEBREW_TAP: ${{ needs.validate.outputs.homebrew-tap }}
+          SOURCE_DEFAULT_BRANCH: ${{ needs.validate.outputs.default-branch }}
+          TAG: ${{ needs.validate.outputs.tag }}
           TAP_TOKEN_PRESENT: ${{ secrets.TAP_TOKEN != '' }}
-          VERSION: ${{ needs.validate.outputs.release-version }}
+          TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
+          VERIFICATION_PAYLOAD_ARTIFACT: ${{ needs.draft.outputs.verification-artifact-name }}
         with:
           github-token: ${{ secrets.TAP_TOKEN }}
           script: |
@@ -1392,51 +1432,423 @@ jobs:
               core.setFailed('TAP_TOKEN is required when homebrew-formula is set');
               return;
             }
-            const owner = process.env.REPOSITORY_TYPE === 'openclaw' ? 'openclaw' : 'steipete';
-            const repo = 'homebrew-tap';
+
+            const fs = require('fs');
+            const { execFileSync } = require('child_process');
+            const repository = `${context.repo.owner}/${context.repo.repo}`;
+            const expectedAttestation = {
+              repository,
+              runId: String(context.runId),
+              payloadArtifact: process.env.VERIFICATION_PAYLOAD_ARTIFACT,
+              tag: process.env.TAG,
+              commit: process.env.TARGET_SHA,
+              verdict: 'verified',
+            };
+            const attestations = Object.fromEntries(['arm64', 'x86_64'].map((architecture) => {
+              const attestation = JSON.parse(fs.readFileSync(
+                `verified-inventory-attestations/${architecture}/verified-inventory-attestation.json`,
+                'utf8',
+              ));
+              for (const [field, value] of Object.entries({ ...expectedAttestation, architecture })) {
+                if (attestation[field] !== value) {
+                  throw new Error(`${architecture} attestation ${field} mismatch`);
+                }
+              }
+              if (attestation.schemaVersion !== 1 || typeof attestation.sha256sums !== 'string') {
+                throw new Error(`${architecture} attestation schema or SHA256SUMS is invalid`);
+              }
+              return [architecture, attestation];
+            }));
+            if (attestations.arm64.sha256sums !== attestations.x86_64.sha256sums) {
+              throw new Error('verified SHA256SUMS differs between arm64 and x86_64 attestations');
+            }
+
+            const expectedDigests = new Map();
+            const checksumLines = attestations.arm64.sha256sums.trimEnd().split('\n');
+            for (const line of checksumLines) {
+              const match = line.match(/^([0-9a-f]{64})  ([^\r\n]+)$/);
+              if (!match) throw new Error(`invalid verified SHA256SUMS line: ${JSON.stringify(line)}`);
+              const [, digest, name] = match;
+              if (expectedDigests.has(name)) throw new Error(`duplicate verified checksum name: ${name}`);
+              expectedDigests.set(name, digest);
+            }
+            if (expectedDigests.size === 0) throw new Error('verified SHA256SUMS is empty');
+
+            const [owner, repo] = process.env.HOMEBREW_TAP.split('/');
             const workflowId = 'update-formula.yml';
-            const started = new Date(Date.now() - 5000).toISOString();
-            const correlationId = `${context.repo.owner}/${context.repo.repo}:${process.env.VERSION}:${context.runId}`;
+            let tapRepository;
+            try {
+              tapRepository = await github.rest.repos.get({ owner, repo });
+            } catch (error) {
+              throw new Error(`TAP_TOKEN cannot access configured Homebrew tap ${process.env.HOMEBREW_TAP} (HTTP ${error.status || 'unknown'})`);
+            }
+            if (tapRepository.data.full_name.toLowerCase() !== process.env.HOMEBREW_TAP.toLowerCase()) {
+              throw new Error(`TAP_TOKEN resolved an unexpected Homebrew tap: ${tapRepository.data.full_name}`);
+            }
+            let tapWorkflow;
+            try {
+              tapWorkflow = await github.rest.actions.getWorkflow({ owner, repo, workflow_id: workflowId });
+            } catch (error) {
+              throw new Error(`TAP_TOKEN cannot read ${workflowId} in configured Homebrew tap ${process.env.HOMEBREW_TAP} (HTTP ${error.status || 'unknown'})`);
+            }
+            if (tapWorkflow.data.state !== 'active') {
+              throw new Error(`${process.env.HOMEBREW_TAP}/${workflowId} is not active`);
+            }
+
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const pollIntervalMs = Number(process.env.HOMEBREW_POLL_INTERVAL_MS ?? 15000);
+            const pollTimeoutMs = Number(process.env.HOMEBREW_POLL_TIMEOUT_MS ?? 900000);
+            if (!Number.isFinite(pollIntervalMs) || pollIntervalMs < 0 ||
+                !Number.isFinite(pollTimeoutMs) || pollTimeoutMs < 0) {
+              throw new Error('invalid Homebrew poll timing');
+            }
+            const deadline = Date.now() + pollTimeoutMs;
+            const tapActor = await github.rest.users.getAuthenticated();
+            const expectedRunTitle = `Update ${process.env.FORMULA} for ${process.env.TAG}`;
+            const runsBeforeDispatch = await github.rest.actions.listWorkflowRuns({
+              owner,
+              repo,
+              workflow_id: workflowId,
+              event: 'workflow_dispatch',
+              per_page: 100,
+            });
+            const priorRunIds = new Set(runsBeforeDispatch.data.workflow_runs.map((run) => run.id));
+
             await github.rest.actions.createWorkflowDispatch({
               owner,
               repo,
               workflow_id: workflowId,
-              ref: 'main',
+              ref: tapRepository.data.default_branch,
               inputs: {
                 formula: process.env.FORMULA,
-                source_repository: context.repo.owner + '/' + context.repo.repo,
-                version: process.env.VERSION,
-                release_id: process.env.RELEASE_ID,
-                correlation_id: correlationId,
+                tag: process.env.TAG,
+                repository,
               },
             });
-            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-            let run;
-            for (let attempt = 0; attempt < 30 && !run; attempt += 1) {
-              await sleep(10000);
-              const runs = await github.rest.actions.listWorkflowRuns({
+
+            const matchingNewRuns = async () => {
+              const response = await github.rest.actions.listWorkflowRuns({
                 owner,
                 repo,
                 workflow_id: workflowId,
                 event: 'workflow_dispatch',
-                created: `>=${started}`,
-                per_page: 20,
+                per_page: 100,
               });
-              run = runs.data.workflow_runs.find((candidate) => candidate.display_title?.includes(correlationId));
+              return response.data.workflow_runs.filter((run) =>
+                !priorRunIds.has(run.id) &&
+                run.display_title === expectedRunTitle &&
+                run.actor?.login?.toLowerCase() === tapActor.data.login.toLowerCase()
+              );
+            };
+            let tapRun;
+            do {
+              const candidates = await matchingNewRuns();
+              if (candidates.length > 1) {
+                throw new Error(`multiple new ${expectedRunTitle} runs from ${tapActor.data.login}; dispatch correlation is ambiguous`);
+              }
+              [tapRun] = candidates;
+              if (tapRun || Date.now() >= deadline) break;
+              await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - Date.now())));
+            } while (Date.now() <= deadline);
+            if (!tapRun) {
+              throw new Error(`Homebrew handoff timed out waiting for a new ${expectedRunTitle} run in ${process.env.HOMEBREW_TAP}`);
             }
-            if (!run) {
-              core.setFailed('tap workflow run did not appear');
-              return;
+            while (tapRun.status !== 'completed') {
+              if (Date.now() >= deadline) {
+                throw new Error(`Homebrew handoff timed out waiting for ${tapRun.html_url}`);
+              }
+              await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - Date.now())));
+              tapRun = (await github.rest.actions.getWorkflowRun({ owner, repo, run_id: tapRun.id })).data;
             }
-            while (run.status !== 'completed') {
-              await sleep(20000);
-              run = (await github.rest.actions.getWorkflowRun({ owner, repo, run_id: run.id })).data;
+            if (tapRun.conclusion !== 'success') {
+              throw new Error(`tap workflow ${tapRun.html_url} concluded ${tapRun.conclusion}`);
             }
-            if (run.conclusion !== 'success') {
-              core.setFailed(`tap workflow ${run.html_url} concluded ${run.conclusion}`);
-            } else {
-              core.info(`tap workflow succeeded: ${run.html_url}`);
+            const postCompletionMatches = await matchingNewRuns();
+            if (postCompletionMatches.some((run) => run.id !== tapRun.id)) {
+              throw new Error(`another new ${expectedRunTitle} run appeared; dispatch correlation is ambiguous`);
             }
+            core.info(`tap workflow succeeded: ${tapRun.html_url}`);
+            let lastMismatch = 'formula not observed';
+
+            const verifyFormula = (source) => {
+              const analyzerProgram = String.raw`
+                def fail_grammar(message)
+                  raise ArgumentError, message
+                end
+
+                def token_name(node, type)
+                  return nil unless node.is_a?(Array) && node[0] == type && node[1].is_a?(String)
+                  node[1]
+                end
+
+                def literal_string(node)
+                  return nil unless node.is_a?(Array) && node[0] == :string_literal
+                  content = node[1]
+                  return nil unless content.is_a?(Array) && content[0] == :string_content
+                  parts = content.drop(1)
+                  return "" if parts.empty?
+                  return nil unless parts.all? { |part| part.is_a?(Array) && part[0] == :@tstring_content }
+                  value = parts.map { |part| part[1] }.join
+                  return nil if value.match?(/[\\\x00-\x1f\x7f]/)
+                  value
+                end
+
+                def literal_symbol(node)
+                  return nil unless node.is_a?(Array) && node[0] == :symbol_literal
+                  symbol = node[1]
+                  return nil unless symbol.is_a?(Array) && symbol[0] == :symbol
+                  token_name(symbol[1], :@ident) || token_name(symbol[1], :@op) || token_name(symbol[1], :@kw)
+                end
+
+                def static_assoc?(node)
+                  return false unless node.is_a?(Array) && node[0] == :assoc_new
+                  key = node[1]
+                  key_static = token_name(key, :@label) || literal_string(key) || literal_symbol(key)
+                  !key_static.nil? && static_literal?(node[2])
+                end
+
+                def static_literal?(node)
+                  return true unless literal_string(node).nil?
+                  return true unless literal_symbol(node).nil?
+                  return false unless node.is_a?(Array)
+                  case node[0]
+                  when :bare_assoc_hash
+                    Array(node[1]).all? { |entry| static_assoc?(entry) }
+                  when :array
+                    elements = node[1]
+                    elements.nil? || (elements[0] == :args_add_block && elements[2] == false && Array(elements[1]).all? { |entry| static_literal?(entry) })
+                  else
+                    false
+                  end
+                end
+
+                def command_parts(node)
+                  return nil unless node.is_a?(Array) && node[0] == :command
+                  name = token_name(node[1], :@ident)
+                  arguments = node[2]
+                  return nil if name.nil? || !arguments.is_a?(Array) || arguments[0] != :args_add_block || arguments[2] != false
+                  values = arguments[1]
+                  return nil unless values.is_a?(Array)
+                  [name, values]
+                end
+
+                def zero_arg_fcall?(node, name)
+                  node.is_a?(Array) && node[0] == :method_add_arg &&
+                    node[1].is_a?(Array) && node[1][0] == :fcall && token_name(node[1][1], :@ident) == name &&
+                    node[2] == []
+                end
+
+                def clean_bodystmt(node)
+                  return nil unless node.is_a?(Array) && node[0] == :bodystmt && node[2..4] == [nil, nil, nil]
+                  node[1] || []
+                end
+
+                def cpu_arm_condition?(node)
+                  return false unless node.is_a?(Array) && node[0] == :call && token_name(node[3], :@ident) == "arm?"
+                  receiver = node[1]
+                  receiver.is_a?(Array) && receiver[0] == :const_path_ref &&
+                    receiver[1].is_a?(Array) && receiver[1][0] == :var_ref && token_name(receiver[1][1], :@const) == "Hardware" &&
+                    token_name(receiver[2], :@const) == "CPU"
+                end
+
+                def build_head_condition?(node)
+                  return false unless node.is_a?(Array) && node[0] == :call && token_name(node[3], :@ident) == "head?"
+                  receiver = node[1]
+                  receiver.is_a?(Array) && receiver[0] == :vcall && token_name(receiver[1], :@ident) == "build"
+                end
+
+                def fetch_pair(statements, index)
+                  url_command = command_parts(statements[index])
+                  sha_command = command_parts(statements[index + 1])
+                  return nil unless url_command&.first == "url"
+                  fail_grammar("url must be followed by sha256") unless sha_command&.first == "sha256"
+                  fail_grammar("url must have one literal string") unless url_command[1].length == 1 && (url = literal_string(url_command[1][0]))
+                  fail_grammar("sha256 must have one literal string") unless sha_command[1].length == 1 && (sha = literal_string(sha_command[1][0]))
+                  fail_grammar("sha256 must be lowercase hexadecimal") unless sha.match?(/\A[0-9a-f]{64}\z/)
+                  [{ "url" => url, "sha256" => sha }, index + 2]
+                end
+
+                def validate_fetch_statements(statements, fetches)
+                  index = 0
+                  while index < statements.length
+                    if (pair = fetch_pair(statements, index))
+                      fetches << pair[0]
+                      index = pair[1]
+                      next
+                    end
+                    statement = statements[index]
+                    if statement.is_a?(Array) && statement[0] == :if && cpu_arm_condition?(statement[1])
+                      alternate = statement[3]
+                      fail_grammar("CPU branch requires else") unless alternate.is_a?(Array) && alternate[0] == :else
+                      validate_fetch_statements(statement[2] || [], fetches)
+                      validate_fetch_statements(alternate[1] || [], fetches)
+                      index += 1
+                      next
+                    end
+                    fail_grammar("unsupported fetch statement #{statement&.first}")
+                  end
+                end
+
+                def parse_head(arguments)
+                  fail_grammar("head requires literal URL") unless (1..2).cover?(arguments.length) && (url = literal_string(arguments[0]))
+                  branch = nil
+                  if arguments.length == 2
+                    options = arguments[1]
+                    fail_grammar("head options must be a static hash") unless options.is_a?(Array) && options[0] == :bare_assoc_hash
+                    entries = Array(options[1])
+                    fail_grammar("head permits only branch") unless entries.length == 1 && entries[0][0] == :assoc_new && token_name(entries[0][1], :@label) == "branch:"
+                    branch = literal_string(entries[0][2])
+                    fail_grammar("head branch must be literal") if branch.nil?
+                  end
+                  { "url" => url, "branch" => branch }
+                end
+
+                source = STDIN.read
+                tree = Ripper.sexp(source)
+                fail_grammar("invalid Ruby syntax") if tree.nil?
+                program = tree[1]
+                fail_grammar("formula must contain one class") unless program.is_a?(Array) && program.length == 1
+                klass = program[0]
+                fail_grammar("formula root must be a class") unless klass.is_a?(Array) && klass[0] == :class
+                class_name = klass.dig(1, 1)
+                superclass = klass[2]
+                fail_grammar("formula must inherit Formula") unless klass[1]&.first == :const_ref && token_name(class_name, :@const) &&
+                  superclass.is_a?(Array) && superclass[0] == :var_ref && token_name(superclass[1], :@const) == "Formula"
+                statements = clean_bodystmt(klass[3])
+                fail_grammar("formula class body may not rescue or ensure") if statements.nil?
+
+                fetches = []
+                head = nil
+                index = 0
+                while index < statements.length
+                  if (pair = fetch_pair(statements, index))
+                    fetches << pair[0]
+                    index = pair[1]
+                    next
+                  end
+                  statement = statements[index]
+                  command = command_parts(statement)
+                  if command && %w[desc homepage version license].include?(command[0])
+                    fail_grammar("#{command[0]} requires one literal string") unless command[1].length == 1 && !literal_string(command[1][0]).nil?
+                  elsif command && command[0] == "depends_on"
+                    fail_grammar("depends_on requires static arguments") if command[1].empty? || !command[1].all? { |argument| static_literal?(argument) }
+                  elsif command && command[0] == "head"
+                    fail_grammar("multiple head declarations") unless head.nil?
+                    head = parse_head(command[1])
+                  elsif statement.is_a?(Array) && statement[0] == :if_mod && build_head_condition?(statement[1])
+                    dependency = command_parts(statement[2])
+                    fail_grammar("only static depends_on may use build.head?") unless dependency&.first == "depends_on" && dependency[1].all? { |argument| static_literal?(argument) }
+                  elsif statement.is_a?(Array) && statement[0] == :method_add_block &&
+                        %w[on_macos on_linux].any? { |name| zero_arg_fcall?(statement[1], name) }
+                    block = statement[2]
+                    nested = block.is_a?(Array) && block[0] == :do_block && block[1].nil? ? clean_bodystmt(block[2]) : nil
+                    fail_grammar("platform block must be a plain do block") if nested.nil?
+                    validate_fetch_statements(nested, fetches)
+                  elsif statement.is_a?(Array) && statement[0] == :def
+                    method_name = token_name(statement[1], :@ident)
+                    fail_grammar("only install and caveats methods are allowed") unless %w[install caveats].include?(method_name)
+                    fail_grammar("formula methods may not take parameters") unless statement[2] == [:params, nil, nil, nil, nil, nil, nil, nil]
+                  elsif statement.is_a?(Array) && statement[0] == :method_add_block && zero_arg_fcall?(statement[1], "test")
+                    block = statement[2]
+                    fail_grammar("test must be a plain do block") unless block.is_a?(Array) && block[0] == :do_block && block[1].nil?
+                  else
+                    fail_grammar("unsupported load-time formula statement #{statement&.first}")
+                  end
+                  index += 1
+                end
+
+                fail_grammar("formula has no stable fetches") if fetches.empty?
+                puts JSON.generate({ "fetches" => fetches, "head" => head })
+              `;
+              let analysis;
+              try {
+                analysis = JSON.parse(execFileSync(
+                  'ruby',
+                  ['-rripper', '-rjson', '-e', analyzerProgram],
+                  {
+                    encoding: 'utf8',
+                    env: { PATH: process.env.PATH },
+                    input: source,
+                    stdio: ['pipe', 'pipe', 'pipe'],
+                  },
+                ));
+              } catch (error) {
+                const detail = error.stderr?.toString().trim().split('\n')[0];
+                return { ok: false, reason: `formula violates closed load-time grammar${detail ? `: ${detail}` : ''}` };
+              }
+
+              if (analysis.head !== null) {
+                const expectedHead = `https://github.com/${repository}.git`;
+                if (analysis.head.url !== expectedHead ||
+                    (analysis.head.branch !== null && analysis.head.branch !== process.env.SOURCE_DEFAULT_BRANCH)) {
+                  return { ok: false, reason: 'formula head is not the exact source repository default branch' };
+                }
+              }
+
+              const seenAssets = new Set();
+              for (const binding of analysis.fetches) {
+                let url;
+                try {
+                  url = new URL(binding.url);
+                } catch {
+                  return { ok: false, reason: `formula URL is invalid: ${binding.url}` };
+                }
+                const rawComponents = url.pathname.split('/');
+                let components;
+                try {
+                  components = rawComponents.map((component) => decodeURIComponent(component));
+                } catch {
+                  return { ok: false, reason: `formula URL has invalid path encoding: ${binding.url}` };
+                }
+                const asset = components[6] || '';
+                const decodedSeparator = components.some((component) => component.includes('/') || component.includes('\\'));
+                if (url.protocol !== 'https:' || url.hostname !== 'github.com' || url.port ||
+                    url.username || url.password || rawComponents.length !== 7 || rawComponents[0] !== '' ||
+                    decodedSeparator || components[1].toLowerCase() !== context.repo.owner.toLowerCase() ||
+                    components[2].toLowerCase() !== context.repo.repo.toLowerCase() ||
+                    components[3] !== 'releases' || components[4] !== 'download' ||
+                    components[5] !== process.env.TAG || !asset || url.search || url.hash) {
+                  return { ok: false, reason: `formula URL is not an exact ${repository}@${process.env.TAG} release asset: ${binding.url}` };
+                }
+                if (seenAssets.has(asset)) return { ok: false, reason: `formula repeats release asset ${asset}` };
+                seenAssets.add(asset);
+                const expectedDigest = expectedDigests.get(asset);
+                if (!expectedDigest) return { ok: false, reason: `formula asset ${asset} is absent from verified SHA256SUMS` };
+                if (binding.sha256.toLowerCase() !== expectedDigest) {
+                  return { ok: false, reason: `formula sha256 mismatch for ${asset}` };
+                }
+              }
+              return { ok: true, assets: [...seenAssets].sort() };
+            };
+
+            do {
+              try {
+                const response = await github.rest.repos.getContent({
+                  owner,
+                  repo,
+                  path: `Formula/${process.env.FORMULA}.rb`,
+                  ref: tapRepository.data.default_branch,
+                });
+                if (Array.isArray(response.data) || response.data.type !== 'file' || response.data.encoding !== 'base64') {
+                  lastMismatch = 'formula path is not a base64 file';
+                } else {
+                  const source = Buffer.from(response.data.content.replace(/\s/g, ''), 'base64').toString('utf8');
+                  const result = verifyFormula(source);
+                  if (result.ok) {
+                    core.info(`verified ${process.env.HOMEBREW_TAP}/Formula/${process.env.FORMULA}.rb assets: ${result.assets.join(', ')}`);
+                    return;
+                  }
+                  lastMismatch = result.reason;
+                }
+              } catch (error) {
+                if (error.status !== 404) throw error;
+                lastMismatch = 'formula file not found';
+              }
+              if (Date.now() >= deadline) break;
+              await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - Date.now())));
+            } while (Date.now() <= deadline);
+
+            throw new Error(`Homebrew handoff timed out waiting for ${process.env.HOMEBREW_TAP}/Formula/${process.env.FORMULA}.rb: ${lastMismatch}`);
 
   closeout:
     name: 8 · Open next Unreleased PR
