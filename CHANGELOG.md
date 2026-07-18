@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.0.0-alpha.7
+- Extend notarization-ticket propagation wait to 15 minutes with exponential backoff (Apple CDN propagation regularly exceeds the previous 60s window).
+
 ## v1.0.0-alpha.6
 - Normalize codesign's `/* exists */` display annotation in designated-requirement comparisons (both sign and verify normalizers).
 

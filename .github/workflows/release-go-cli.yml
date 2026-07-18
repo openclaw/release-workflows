@@ -726,14 +726,18 @@ jobs:
               --issuer "$ASC_ISSUER_ID" --no-s3-acceleration --wait --output-format json >"$submission.json"
             [[ "$(jq -r '.status' "$submission.json")" == Accepted ]]
             ready=0
-            for _ in {1..12}; do
+            delay=5
+            deadline=$(( SECONDS + 900 ))
+            while (( SECONDS < deadline )); do
               if codesign --verify --strict --check-notarization -R=notarized --verbose=2 "$candidate"; then
                 ready=1
                 break
               fi
-              sleep 5
+              echo "notarization ticket not yet propagated for $candidate; retrying in ${delay}s"
+              sleep "$delay"
+              (( delay < 60 )) && delay=$(( delay * 2 ))
             done
-            (( ready == 1 )) || { echo "notarization ticket unavailable for $candidate" >&2; exit 1; }
+            (( ready == 1 )) || { echo "notarization ticket unavailable for $candidate after 15m" >&2; exit 1; }
             jq -n --arg path "${candidate#dist/}" --arg identifier "$identifier" \
               --arg architecture "$(lipo -archs "$candidate")" --arg authority "$AUTHORITY" \
               --arg teamId "$TEAM_ID" --arg requirement "$requirement" \
