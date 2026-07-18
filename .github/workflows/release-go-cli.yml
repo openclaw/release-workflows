@@ -1,0 +1,855 @@
+name: Release Go CLI
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: SemVer release version, with or without a leading v
+        required: true
+        type: string
+      repository-type:
+        description: Signing and Homebrew ownership policy
+        required: true
+        type: string
+      homebrew-formula:
+        description: Formula name to hand to the matching fleet tap; empty disables handoff
+        required: false
+        default: ''
+        type: string
+      extra-packages:
+        description: JSON array of additional repo-relative files or directories to package
+        required: false
+        default: '[]'
+        type: string
+    secrets:
+      MACOS_SIGNING_P12:
+        description: Base64-encoded Developer ID Application certificate and private key
+        required: true
+      MACOS_SIGNING_P12_PASSWORD:
+        description: Password for MACOS_SIGNING_P12
+        required: true
+      ASC_KEY_ID:
+        description: App Store Connect API key ID
+        required: true
+      ASC_ISSUER_ID:
+        description: App Store Connect issuer ID
+        required: true
+      ASC_PRIVATE_KEY_P8:
+        description: App Store Connect API private key contents
+        required: true
+      TAP_TOKEN:
+        description: Token with Actions access to the matching Homebrew tap
+        required: false
+    outputs:
+      release-id:
+        description: Numeric GitHub release ID
+        value: ${{ jobs.draft.outputs.release-id }}
+      release-url:
+        description: Published GitHub release URL
+        value: ${{ jobs.publish.outputs.release-url }}
+
+concurrency:
+  group: release-go-cli-${{ github.repository }}-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: 1 · Validate frozen source
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      statuses: read
+    outputs:
+      default-branch: ${{ steps.repository.outputs.default-branch }}
+      release-version: ${{ steps.inputs.outputs.release-version }}
+      tag: ${{ steps.inputs.outputs.tag }}
+      target-sha: ${{ steps.repository.outputs.target-sha }}
+    steps:
+      - name: Validate inputs
+        id: inputs
+        env:
+          EXTRA_PACKAGES: ${{ inputs.extra-packages }}
+          REPOSITORY_TYPE: ${{ inputs.repository-type }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          release_version=${VERSION#v}
+          if [[ ! "$release_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo "version must be SemVer, with optional leading v" >&2
+            exit 1
+          fi
+          if [[ "$REPOSITORY_TYPE" != openclaw && "$REPOSITORY_TYPE" != personal ]]; then
+            echo "repository-type must be openclaw or personal" >&2
+            exit 1
+          fi
+          jq -e '
+            type == "array" and
+            all(.[];
+              type == "string" and length > 0 and
+              (startswith("/") | not) and
+              (split("/") | all(. != ".."))
+            ) and
+            ([.[] | split("/")[-1]] | length == (unique | length))
+          ' <<<"$EXTRA_PACKAGES" >/dev/null
+          echo "release-version=$release_version" >>"$GITHUB_OUTPUT"
+          echo "tag=v$release_version" >>"$GITHUB_OUTPUT"
+
+      - name: Resolve protected default branch
+        id: repository
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const repo = await github.rest.repos.get(context.repo);
+            const branchName = repo.data.default_branch;
+            const branch = await github.rest.repos.getBranch({
+              ...context.repo,
+              branch: branchName,
+            });
+            if (!branch.data.protected) {
+              core.setFailed(`default branch ${branchName} is not protected`);
+              return;
+            }
+            const sha = branch.data.commit.sha;
+            if (context.ref !== `refs/heads/${branchName}` || context.sha !== sha) {
+              core.setFailed(`caller must run at protected ${branchName} head ${sha}; got ${context.ref}@${context.sha}`);
+              return;
+            }
+            core.setOutput('default-branch', branchName);
+            core.setOutput('target-sha', sha);
+
+      - name: Check out exact protected head
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ steps.repository.outputs.target-sha }}
+
+      - name: Validate release metadata
+        env:
+          EXTRA_PACKAGES: ${{ inputs.extra-packages }}
+          RELEASE_VERSION: ${{ steps.inputs.outputs.release-version }}
+        run: |
+          set -euo pipefail
+          [[ -f CHANGELOG.md ]] || { echo "CHANGELOG.md is required" >&2; exit 1; }
+          [[ -f go.mod ]] || { echo "go.mod is required" >&2; exit 1; }
+          [[ -f .goreleaser.yml || -f .goreleaser.yaml ]] || {
+            echo ".goreleaser.yml or .goreleaser.yaml is required" >&2
+            exit 1
+          }
+
+          awk -v version="$RELEASE_VERSION" '
+            /^## / && index($0, version) && $0 ~ /[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/ { found = 1 }
+            END { exit(found ? 0 : 1) }
+          ' CHANGELOG.md || {
+            echo "CHANGELOG.md needs a dated level-two section for $RELEASE_VERSION" >&2
+            exit 1
+          }
+
+          version_files=(.release-version VERSION version.txt)
+          for version_file in "${version_files[@]}"; do
+            [[ -f "$version_file" ]] || continue
+            actual=$(tr -d '[:space:]' <"$version_file")
+            actual=${actual#v}
+            [[ "$actual" == "$RELEASE_VERSION" ]] || {
+              echo "$version_file contains $actual, expected $RELEASE_VERSION" >&2
+              exit 1
+            }
+          done
+
+          package_files=()
+          [[ -f package.json ]] && package_files+=(package.json)
+          while IFS= read -r path; do
+            [[ -d "$path" && -f "$path/package.json" ]] && package_files+=("$path/package.json")
+          done < <(jq -r '.[]' <<<"$EXTRA_PACKAGES")
+          for package_file in "${package_files[@]}"; do
+            actual=$(jq -er '.version' "$package_file")
+            actual=${actual#v}
+            [[ "$actual" == "$RELEASE_VERSION" ]] || {
+              echo "$package_file version $actual does not match $RELEASE_VERSION" >&2
+              exit 1
+            }
+          done
+
+          while IFS= read -r path; do
+            [[ -e "$path" ]] || { echo "extra package path does not exist: $path" >&2; exit 1; }
+            [[ ! -L "$path" ]] || { echo "extra package path cannot be a symlink: $path" >&2; exit 1; }
+            [[ -z "$(find "$path" -type l -print -quit)" ]] || {
+              echo "extra package trees cannot contain symlinks: $path" >&2
+              exit 1
+            }
+          done < <(jq -r '.[]' <<<"$EXTRA_PACKAGES")
+
+      - name: Require independent CI green on exact head
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          TARGET_SHA: ${{ steps.repository.outputs.target-sha }}
+        with:
+          script: |
+            const checks = await github.paginate(github.rest.checks.listForRef, {
+              ...context.repo,
+              ref: process.env.TARGET_SHA,
+              per_page: 100,
+              filter: 'latest',
+            });
+            const currentRunMarker = `/actions/runs/${context.runId}`;
+            const independent = checks.filter((check) => !check.details_url?.includes(currentRunMarker));
+            const badChecks = independent.filter((check) =>
+              check.status !== 'completed' || !['success', 'neutral', 'skipped'].includes(check.conclusion)
+            );
+            const statuses = await github.rest.repos.getCombinedStatusForRef({
+              ...context.repo,
+              ref: process.env.TARGET_SHA,
+              per_page: 100,
+            });
+            const hasStatuses = statuses.data.statuses.length > 0;
+            if (independent.length === 0 && !hasStatuses) {
+              core.setFailed('exact head has no independent CI check or commit status');
+              return;
+            }
+            if (badChecks.length > 0) {
+              core.setFailed(`non-green checks: ${badChecks.map((check) => `${check.name}=${check.status}/${check.conclusion}`).join(', ')}`);
+              return;
+            }
+            if (hasStatuses && statuses.data.state !== 'success') {
+              core.setFailed(`combined commit status is ${statuses.data.state}`);
+            }
+
+  tag:
+    name: 2 · Freeze annotated tag
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create immutable annotated tag
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          REPOSITORY_TYPE: ${{ inputs.repository-type }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
+        with:
+          script: |
+            try {
+              const existing = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
+              if (existing.data.object.type !== 'tag') {
+                core.setFailed(`existing tag is lightweight, not signed or annotated: ${process.env.TAG}`);
+                return;
+              }
+              const tagObject = await github.rest.git.getTag({ ...context.repo, tag_sha: existing.data.object.sha });
+              if (tagObject.data.object.type !== 'commit' || tagObject.data.object.sha !== process.env.TARGET_SHA) {
+                core.setFailed(`existing tag does not freeze ${process.env.TARGET_SHA}`);
+                return;
+              }
+              core.info(`reusing exact signed or annotated tag ${process.env.TAG}`);
+              return;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            const tagObject = await github.rest.git.createTag({
+              ...context.repo,
+              tag: process.env.TAG,
+              message: `Release ${process.env.TAG}\n\nFleet policy: ${process.env.REPOSITORY_TYPE}; annotated by openclaw/release-workflows.`,
+              object: process.env.TARGET_SHA,
+              type: 'commit',
+              tagger: {
+                name: 'github-actions[bot]',
+                email: '41898282+github-actions[bot]@users.noreply.github.com',
+                date: new Date().toISOString(),
+              },
+            });
+            await github.rest.git.createRef({
+              ...context.repo,
+              ref: `refs/tags/${process.env.TAG}`,
+              sha: tagObject.data.sha,
+            });
+
+  build:
+    name: 3a · GoReleaser cross-build matrix
+    needs: [validate, tag]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out frozen tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.tag }}
+          fetch-depth: 0
+      - name: Verify tag target
+        env:
+          TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$TARGET_SHA" ]]
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build configured GoReleaser matrix
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: build --clean --timeout 60m
+      - name: Add extra package payloads
+        env:
+          EXTRA_PACKAGES: ${{ inputs.extra-packages }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/extra-package-payload
+          while IFS= read -r path; do
+            [[ -n "$path" ]] || continue
+            cp -R "$path" dist/extra-package-payload/
+          done < <(jq -r '.[]' <<<"$EXTRA_PACKAGES")
+          if [[ -z "$(find dist/extra-package-payload -mindepth 1 -print -quit)" ]]; then
+            rmdir dist/extra-package-payload
+          fi
+          tar -czf raw-goreleaser-dist.tar.gz dist
+      - name: Upload raw matrix
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: raw-goreleaser-dist-${{ github.run_id }}
+          path: raw-goreleaser-dist.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  sign:
+    name: 3b · Sign, notarize, and package macOS
+    needs: [validate, build]
+    runs-on: macos-14
+    permissions:
+      contents: read
+    steps:
+      - name: Download raw matrix
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: raw-goreleaser-dist-${{ github.run_id }}
+      - name: Restore raw matrix
+        run: tar -xzf raw-goreleaser-dist.tar.gz
+      - name: Import policy signer into ephemeral keychain
+        id: signer
+        env:
+          P12_BASE64: ${{ secrets.MACOS_SIGNING_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+          REPOSITORY_TYPE: ${{ inputs.repository-type }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/release-signing.keychain-db"
+          keychain_password=$(openssl rand -hex 32)
+          p12="$RUNNER_TEMP/release-signing.p12"
+          printf '%s' "$P12_BASE64" | base64 --decode >"$p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$p12" -k "$keychain" -P "$P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
+
+          if [[ "$REPOSITORY_TYPE" == openclaw ]]; then
+            team_id=FWJYW4S8P8
+            authority="Developer ID Application: OpenClaw Foundation ($team_id)"
+            identifier_prefix=org.openclaw
+          else
+            team_id=Y5PE65HELJ
+            authority="Developer ID Application: Peter Steinberger ($team_id)"
+            identifier_prefix=com.steipete
+          fi
+          security find-identity -v -p codesigning "$keychain" | grep -F "\"$authority\"" >/dev/null || {
+            echo "required signing identity not present: $authority" >&2
+            exit 1
+          }
+          {
+            echo "authority=$authority"
+            echo "identifier-prefix=$identifier_prefix"
+            echo "keychain=$keychain"
+            echo "team-id=$team_id"
+          } >>"$GITHUB_OUTPUT"
+          rm -f "$p12"
+
+      - name: Build universal binaries, sign, and notarize every macOS binary
+        env:
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_PRIVATE_KEY_P8: ${{ secrets.ASC_PRIVATE_KEY_P8 }}
+          AUTHORITY: ${{ steps.signer.outputs.authority }}
+          IDENTIFIER_PREFIX: ${{ steps.signer.outputs.identifier-prefix }}
+          KEYCHAIN: ${{ steps.signer.outputs.keychain }}
+          REPOSITORY_NAME: ${{ github.event.repository.name }}
+          TEAM_ID: ${{ steps.signer.outputs.team-id }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          work="$RUNNER_TEMP/macos-release"
+          mkdir -p "$work/submissions" dist/universal_darwin_all
+          p8="$work/AuthKey_${ASC_KEY_ID}.p8"
+          printf '%s' "$ASC_PRIVATE_KEY_P8" >"$p8"
+          chmod 600 "$p8"
+          trap 'security delete-keychain "$KEYCHAIN" >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
+
+          : >"$work/macho.tsv"
+          while IFS= read -r -d '' candidate; do
+            if file "$candidate" | grep -q 'Mach-O'; then
+              archs=$(lipo -archs "$candidate")
+              printf '%s\t%s\t%s\n' "$archs" "$candidate" "$(basename "$candidate")" >>"$work/macho.tsv"
+            fi
+          done < <(find dist -type f -perm -111 -print0)
+          [[ -s "$work/macho.tsv" ]] || { echo "GoReleaser produced no macOS executable" >&2; exit 1; }
+
+          pair_count=0
+          while IFS= read -r binary_name; do
+            [[ -n "$binary_name" ]] || continue
+            intel_paths=()
+            while IFS= read -r path; do
+              [[ -n "$path" ]] && intel_paths+=("$path")
+            done < <(awk -F '\t' -v name="$binary_name" '$1 == "x86_64" && $3 == name { print $2 }' "$work/macho.tsv")
+            arm_paths=()
+            while IFS= read -r path; do
+              [[ -n "$path" ]] && arm_paths+=("$path")
+            done < <(awk -F '\t' -v name="$binary_name" '$1 == "arm64" && $3 == name { print $2 }' "$work/macho.tsv")
+            if (( ${#intel_paths[@]} == 1 && ${#arm_paths[@]} == 1 )); then
+              lipo -create "${intel_paths[0]}" "${arm_paths[0]}" -output "dist/universal_darwin_all/$binary_name"
+              chmod +x "dist/universal_darwin_all/$binary_name"
+              pair_count=$((pair_count + 1))
+            elif (( ${#intel_paths[@]} > 0 || ${#arm_paths[@]} > 0 )); then
+              echo "cannot form one stable universal pair for $binary_name" >&2
+              exit 1
+            fi
+          done < <(awk -F '\t' '{ print $3 }' "$work/macho.tsv" | LC_ALL=C sort -u)
+          (( pair_count > 0 )) || { echo "at least one x86_64 + arm64 pair is required" >&2; exit 1; }
+
+          : >"$work/signing-manifest.jsonl"
+          while IFS= read -r -d '' candidate; do
+            file "$candidate" | grep -q 'Mach-O' || continue
+            binary_slug=$(basename "$candidate" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9.-]+/-/g; s/^-+|-+$//g')
+            repo_slug=$(printf '%s' "$REPOSITORY_NAME" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9.-]+/-/g; s/^-+|-+$//g')
+            identifier="$IDENTIFIER_PREFIX.$repo_slug.$binary_slug"
+            requirement="identifier \"$identifier\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$TEAM_ID\""
+            codesign --force --options runtime --timestamp --identifier "$identifier" \
+              --requirements "=designated => $requirement" --keychain "$KEYCHAIN" --sign "$AUTHORITY" "$candidate"
+            codesign --verify --strict -R="$requirement" --verbose=2 "$candidate"
+            signature=$(codesign -dvvv "$candidate" 2>&1)
+            grep -Fx "Identifier=$identifier" <<<"$signature" >/dev/null
+            grep -Fx "Authority=$AUTHORITY" <<<"$signature" >/dev/null
+            grep -Fx "TeamIdentifier=$TEAM_ID" <<<"$signature" >/dev/null
+            grep -E '^CodeDirectory .*flags=.*\(runtime\)' <<<"$signature" >/dev/null
+            grep -E '^Timestamp=' <<<"$signature" >/dev/null
+            embedded=$(codesign -d -r- "$candidate" 2>&1)
+            grep -Fqx "designated => $requirement" <<<"$embedded"
+
+            submission="$work/submissions/$(printf '%s' "$identifier" | tr '.' '-')-$(shasum -a 256 <<<"$candidate" | cut -c1-10).zip"
+            ditto -c -k --keepParent "$candidate" "$submission"
+            xcrun notarytool submit "$submission" --key "$p8" --key-id "$ASC_KEY_ID" \
+              --issuer "$ASC_ISSUER_ID" --no-s3-acceleration --wait --output-format json >"$submission.json"
+            [[ "$(jq -r '.status' "$submission.json")" == Accepted ]]
+            ready=0
+            for _ in {1..12}; do
+              if codesign --verify --strict --check-notarization -R=notarized --verbose=2 "$candidate"; then
+                ready=1
+                break
+              fi
+              sleep 5
+            done
+            (( ready == 1 )) || { echo "notarization ticket unavailable for $candidate" >&2; exit 1; }
+            jq -n --arg path "${candidate#dist/}" --arg identifier "$identifier" \
+              --arg architecture "$(lipo -archs "$candidate")" --arg authority "$AUTHORITY" \
+              --arg teamId "$TEAM_ID" --arg requirement "$requirement" \
+              '{path:$path,identifier:$identifier,architecture:$architecture,authority:$authority,teamId:$teamId,designatedRequirement:$requirement,hardenedRuntime:true,notarized:true}' \
+              >>"$work/signing-manifest.jsonl"
+          done < <(find dist -type f -perm -111 -print0)
+
+          mkdir -p release-assets
+          jq -s --arg repository "$GITHUB_REPOSITORY" '{schemaVersion:1,repository:$repository,binaries:.}' \
+            "$work/signing-manifest.jsonl" >release-assets/SIGNING-MANIFEST.json
+          while IFS= read -r directory; do
+            target=$(basename "$directory" | sed -E 's/[^A-Za-z0-9._-]+/-/g')
+            archive="release-assets/${REPOSITORY_NAME}_${{ needs.validate.outputs.release-version }}_${target}.tar.gz"
+            tar -czf "$archive" -C "$directory" .
+          done < <(find dist -mindepth 1 -maxdepth 1 -type d | LC_ALL=C sort)
+          [[ -n "$(find release-assets -type f -name '*.tar.gz' -print -quit)" ]]
+          tar -czf signed-release-assets.tar.gz release-assets
+      - name: Upload signed release payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: signed-release-assets-${{ github.run_id }}
+          path: signed-release-assets.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  draft:
+    name: 4 · Create exact draft
+    needs: [validate, sign]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      release-id: ${{ steps.release.outputs.release-id }}
+    steps:
+      - name: Download signed payload
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: signed-release-assets-${{ github.run_id }}
+      - name: Create frozen inventory and checksums
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+          TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
+        run: |
+          set -euo pipefail
+          tar -xzf signed-release-assets.tar.gz
+          cd release-assets
+          : >"$RUNNER_TEMP/inventory.jsonl"
+          while IFS= read -r file; do
+            jq -n --arg name "$(basename "$file")" --arg sha256 "$(sha256sum "$file" | awk '{print $1}')" \
+              --argjson size "$(stat -c %s "$file")" '{name:$name,size:$size,sha256:$sha256}' \
+              >>"$RUNNER_TEMP/inventory.jsonl"
+          done < <(find . -mindepth 1 -maxdepth 1 -type f | LC_ALL=C sort)
+          inventory="$RUNNER_TEMP/ASSET-INVENTORY.json"
+          checksums="$RUNNER_TEMP/SHA256SUMS"
+          jq -s --arg repository "$GITHUB_REPOSITORY" --arg tag "$TAG" --arg commit "$TARGET_SHA" \
+            '{schemaVersion:1,repository:$repository,tag:$tag,commit:$commit,payloads:.}' \
+            "$RUNNER_TEMP/inventory.jsonl" >"$inventory"
+          cp "$inventory" ASSET-INVENTORY.json
+          find . -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort | xargs sha256sum >"$checksums"
+          mv "$checksums" SHA256SUMS
+
+      - name: Create draft and upload exact assets
+        id: release
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.release-version }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const directory = 'release-assets';
+            const names = fs.readdirSync(directory).sort();
+            if (!names.includes('ASSET-INVENTORY.json') || !names.includes('SHA256SUMS')) {
+              core.setFailed('release controls missing');
+              return;
+            }
+            const release = await github.rest.repos.createRelease({
+              ...context.repo,
+              tag_name: process.env.TAG,
+              target_commitish: process.env.TARGET_SHA,
+              name: process.env.TAG,
+              body: `Fleet draft. Publication requires independent verification of the exact ASSET-INVENTORY.json and SHA256SUMS payload.`,
+              draft: true,
+              prerelease: process.env.RELEASE_VERSION.includes('-'),
+            });
+            for (const name of names) {
+              const file = path.join(directory, name);
+              const data = fs.readFileSync(file);
+              await github.rest.repos.uploadReleaseAsset({
+                ...context.repo,
+                release_id: release.data.id,
+                name,
+                data,
+                headers: {
+                  'content-type': 'application/octet-stream',
+                  'content-length': data.length,
+                },
+              });
+            }
+            core.setOutput('release-id', String(release.data.id));
+
+  verify:
+    name: 5 · Independent verify (${{ matrix.arch }})
+    needs: [validate, draft]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-14
+          - arch: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+      - name: Download draft assets by numeric ID
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          RELEASE_ID: ${{ needs.draft.outputs.release-id }}
+        with:
+          script: |
+            const fs = require('fs');
+            const releaseId = Number(process.env.RELEASE_ID);
+            const release = await github.rest.repos.getRelease({ ...context.repo, release_id: releaseId });
+            if (!release.data.draft) {
+              core.setFailed('release is not a draft during verification');
+              return;
+            }
+            fs.mkdirSync('draft-assets', { recursive: true });
+            for (const asset of release.data.assets) {
+              const response = await github.request('GET /repos/{owner}/{repo}/releases/assets/{asset_id}', {
+                ...context.repo,
+                asset_id: asset.id,
+                headers: { accept: 'application/octet-stream' },
+              });
+              fs.writeFileSync(`draft-assets/${asset.name}`, Buffer.from(response.data));
+            }
+
+      - name: Verify exact inventory, signatures, DR, and notarization
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+          RELEASE_ID: ${{ needs.draft.outputs.release-id }}
+          REPOSITORY_NAME: ${{ github.event.repository.name }}
+          REPOSITORY_TYPE: ${{ inputs.repository-type }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN ASC_KEY_ID ASC_ISSUER_ID ASC_PRIVATE_KEY_P8 MACOS_SIGNING_P12 MACOS_SIGNING_P12_PASSWORD TAP_TOKEN
+          cd draft-assets
+          [[ -f ASSET-INVENTORY.json && -f SHA256SUMS && -f SIGNING-MANIFEST.json ]]
+          [[ "$(jq -r '.repository' ASSET-INVENTORY.json)" == "$GITHUB_REPOSITORY" ]]
+          [[ "$(jq -r '.tag' ASSET-INVENTORY.json)" == "$TAG" ]]
+          [[ "$(jq -r '.commit' ASSET-INVENTORY.json)" == "$TARGET_SHA" ]]
+
+          expected_names=$(jq -r '.payloads[].name, "ASSET-INVENTORY.json", "SHA256SUMS"' ASSET-INVENTORY.json | LC_ALL=C sort)
+          actual_names=$(find . -mindepth 1 -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort)
+          [[ "$actual_names" == "$expected_names" ]] || {
+            diff -u <(printf '%s\n' "$expected_names") <(printf '%s\n' "$actual_names") >&2 || true
+            exit 1
+          }
+          checksum_names=$(awk 'NF == 2 { sub(/^\*/, "", $2); print $2 }' SHA256SUMS | LC_ALL=C sort)
+          expected_checksum_names=$(printf '%s\n' "$actual_names" | grep -v '^SHA256SUMS$')
+          [[ "$checksum_names" == "$expected_checksum_names" ]]
+          shasum -a 256 -c SHA256SUMS
+          while IFS=$'\t' read -r name size digest; do
+            [[ "$(stat -f %z "$name")" == "$size" ]]
+            [[ "$(shasum -a 256 "$name" | awk '{print $1}')" == "$digest" ]]
+          done < <(jq -r '.payloads[] | [.name,.size,.sha256] | @tsv' ASSET-INVENTORY.json)
+
+          if [[ "$REPOSITORY_TYPE" == openclaw ]]; then
+            team_id=FWJYW4S8P8
+            authority="Developer ID Application: OpenClaw Foundation ($team_id)"
+            identifier_prefix=org.openclaw
+          else
+            team_id=Y5PE65HELJ
+            authority="Developer ID Application: Peter Steinberger ($team_id)"
+            identifier_prefix=com.steipete
+          fi
+
+          work="$RUNNER_TEMP/verify-$RELEASE_ID-$EXPECTED_ARCH"
+          mkdir -p "$work"
+          native_count=0
+          universal_count=0
+          verified_count=0
+          for archive in *.tar.gz; do
+            extract="$work/${archive%.tar.gz}"
+            mkdir -p "$extract"
+            tar -xzf "$archive" -C "$extract"
+            while IFS= read -r -d '' candidate; do
+              file "$candidate" | grep -q 'Mach-O' || continue
+              binary_slug=$(basename "$candidate" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9.-]+/-/g; s/^-+|-+$//g')
+              repo_slug=$(printf '%s' "$REPOSITORY_NAME" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9.-]+/-/g; s/^-+|-+$//g')
+              identifier="$identifier_prefix.$repo_slug.$binary_slug"
+              requirement="identifier \"$identifier\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$team_id\""
+              codesign --verify --strict -R="$requirement" --verbose=2 "$candidate"
+              signature=$(codesign -dvvv "$candidate" 2>&1)
+              grep -Fx "Identifier=$identifier" <<<"$signature" >/dev/null
+              grep -Fx "Authority=$authority" <<<"$signature" >/dev/null
+              grep -Fx 'Authority=Developer ID Certification Authority' <<<"$signature" >/dev/null
+              grep -Fx 'Authority=Apple Root CA' <<<"$signature" >/dev/null
+              grep -Fx "TeamIdentifier=$team_id" <<<"$signature" >/dev/null
+              grep -E '^CodeDirectory .*flags=.*\(runtime\)' <<<"$signature" >/dev/null
+              grep -E '^Timestamp=' <<<"$signature" >/dev/null
+              embedded=$(codesign -d -r- "$candidate" 2>&1)
+              grep -Fqx "designated => $requirement" <<<"$embedded"
+              ready=0
+              for _ in {1..12}; do
+                if codesign --verify --strict --check-notarization -R=notarized --verbose=2 "$candidate"; then
+                  ready=1
+                  break
+                fi
+                sleep 5
+              done
+              (( ready == 1 )) || { echo "notarization ticket unavailable: $candidate" >&2; exit 1; }
+              spctl --assess --type execute --verbose=2 "$candidate"
+              archs=" $(lipo -archs "$candidate") "
+              [[ "$archs" == *" $EXPECTED_ARCH "* ]] && native_count=$((native_count + 1))
+              [[ "$archs" == *' arm64 '* && "$archs" == *' x86_64 '* ]] && universal_count=$((universal_count + 1))
+              jq -e --arg identifier "$identifier" --arg authority "$authority" --arg team "$team_id" \
+                '.binaries[] | select(.identifier == $identifier and .authority == $authority and .teamId == $team and .hardenedRuntime == true and .notarized == true)' \
+                SIGNING-MANIFEST.json >/dev/null
+              verified_count=$((verified_count + 1))
+            done < <(find "$extract" -type f -perm -111 -print0)
+          done
+          (( verified_count > 0 && native_count > 0 && universal_count > 0 )) || {
+            echo "missing verified macOS payload for $EXPECTED_ARCH or universal architecture" >&2
+            exit 1
+          }
+
+  publish:
+    name: 6 · Publish verified draft
+    needs: [validate, draft, verify]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      release-url: ${{ steps.publish.outputs.release-url }}
+    steps:
+      - name: Undraft exact release
+        id: publish
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          RELEASE_ID: ${{ needs.draft.outputs.release-id }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
+        with:
+          script: |
+            const releaseId = Number(process.env.RELEASE_ID);
+            const before = await github.rest.repos.getRelease({ ...context.repo, release_id: releaseId });
+            const ref = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
+            if (ref.data.object.type !== 'tag') {
+              core.setFailed('release tag is no longer annotated or signed');
+              return;
+            }
+            const tagObject = await github.rest.git.getTag({ ...context.repo, tag_sha: ref.data.object.sha });
+            if (!before.data.draft || before.data.tag_name !== process.env.TAG ||
+                tagObject.data.object.type !== 'commit' || tagObject.data.object.sha !== process.env.TARGET_SHA) {
+              core.setFailed('draft identity changed before publication');
+              return;
+            }
+            const published = await github.rest.repos.updateRelease({
+              ...context.repo,
+              release_id: releaseId,
+              draft: false,
+            });
+            if (published.data.draft || !published.data.published_at) {
+              core.setFailed('release did not become published');
+              return;
+            }
+            core.setOutput('release-url', published.data.html_url);
+      - name: Verify public release state
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          response=$(curl --fail --silent --show-error \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$TAG")
+          [[ "$(jq -r '.draft' <<<"$response")" == false ]]
+          [[ "$(jq -r '.tag_name' <<<"$response")" == "$TAG" ]]
+          [[ "$(jq -r '.published_at' <<<"$response")" != null ]]
+
+  handoff:
+    name: 7 · Homebrew handoff
+    if: inputs.homebrew-formula != ''
+    needs: [validate, draft, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Dispatch matching tap and wait
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          FORMULA: ${{ inputs.homebrew-formula }}
+          RELEASE_ID: ${{ needs.draft.outputs.release-id }}
+          REPOSITORY_TYPE: ${{ inputs.repository-type }}
+          TAP_TOKEN_PRESENT: ${{ secrets.TAP_TOKEN != '' }}
+          VERSION: ${{ needs.validate.outputs.release-version }}
+        with:
+          github-token: ${{ secrets.TAP_TOKEN }}
+          script: |
+            if (process.env.TAP_TOKEN_PRESENT !== 'true') {
+              core.setFailed('TAP_TOKEN is required when homebrew-formula is set');
+              return;
+            }
+            const owner = process.env.REPOSITORY_TYPE === 'openclaw' ? 'openclaw' : 'steipete';
+            const repo = 'homebrew-tap';
+            const workflowId = 'update-formula.yml';
+            const started = new Date(Date.now() - 5000).toISOString();
+            const correlationId = `${context.repo.owner}/${context.repo.repo}:${process.env.VERSION}:${context.runId}`;
+            await github.rest.actions.createWorkflowDispatch({
+              owner,
+              repo,
+              workflow_id: workflowId,
+              ref: 'main',
+              inputs: {
+                formula: process.env.FORMULA,
+                source_repository: context.repo.owner + '/' + context.repo.repo,
+                version: process.env.VERSION,
+                release_id: process.env.RELEASE_ID,
+                correlation_id: correlationId,
+              },
+            });
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            let run;
+            for (let attempt = 0; attempt < 30 && !run; attempt += 1) {
+              await sleep(10000);
+              const runs = await github.rest.actions.listWorkflowRuns({
+                owner,
+                repo,
+                workflow_id: workflowId,
+                event: 'workflow_dispatch',
+                created: `>=${started}`,
+                per_page: 20,
+              });
+              run = runs.data.workflow_runs.find((candidate) => candidate.display_title?.includes(correlationId));
+            }
+            if (!run) {
+              core.setFailed('tap workflow run did not appear');
+              return;
+            }
+            while (run.status !== 'completed') {
+              await sleep(20000);
+              run = (await github.rest.actions.getWorkflowRun({ owner, repo, run_id: run.id })).data;
+            }
+            if (run.conclusion !== 'success') {
+              core.setFailed(`tap workflow ${run.html_url} concluded ${run.conclusion}`);
+            } else {
+              core.info(`tap workflow succeeded: ${run.html_url}`);
+            }
+
+  closeout:
+    name: 8 · Open next Unreleased PR
+    if: always() && needs.publish.result == 'success' && (needs.handoff.result == 'success' || needs.handoff.result == 'skipped')
+    needs: [validate, publish, handoff]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out current default branch
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.validate.outputs.default-branch }}
+      - name: Add Unreleased section and open PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if grep -Eq '^## \[?Unreleased\]?' CHANGELOG.md; then
+            echo "CHANGELOG.md already has an Unreleased section"
+            exit 0
+          fi
+          ruby -e '
+            path = "CHANGELOG.md"
+            text = File.read(path)
+            marker = text.index(/^## /) || text.length
+            prefix = text[0...marker].rstrip
+            suffix = text[marker..]
+            File.write(path, "#{prefix}\n\n## Unreleased\n\n#{suffix}")
+          '
+          branch="release/next-unreleased-${TAG#v}-$GITHUB_RUN_ID"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git switch -c "$branch"
+          git add CHANGELOG.md
+          git commit -m "chore: open next unreleased section"
+          git push origin "$branch"
+          body_file="$RUNNER_TEMP/closeout-pr.md"
+          cat >"$body_file" <<'EOF'
+          Opens the next Unreleased changelog section after the verified release.
+
+          Created by the fleet release closeout stage.
+          EOF
+          gh pr create --base "${{ needs.validate.outputs.default-branch }}" --head "$branch" \
+            --title "chore: open next Unreleased section" --body-file "$body_file"
