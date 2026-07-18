@@ -51,6 +51,19 @@ The first attempt, when no version tag exists, freezes the current protected def
 
 Binary authenticity does not trust the tag signature or annotation. Each architecture verifier has only `actions: read`; it downloads the draft job's immutable Actions artifact by its producer-exported name, never calls the draft Releases API, and independently enforces the exact commit, inventory, SHA-256 checksums, Apple certificate chain, hardened-runtime flag, timestamp, stable embedded designated requirement, Team ID, notarization requirement, and native plus universal architectures. Each verifier uploads an attestation containing its `verified` verdict, source artifact name, and exact `SHA256SUMS` bytes. Producer-bound names and 30-day artifact retention preserve this chain across GitHub's partial-job reruns, where consumer `run_attempt` values can differ.
 
+### macOS verification matrix
+
+| Control | Bare Mach-O CLI | Future `.app` bundle |
+| --- | --- | --- |
+| SHA-256 inventory and exact draft binding | Required | Required |
+| `codesign --verify --strict` plus stable identifier-based designated requirement | Required | Required |
+| Developer ID chain, Team ID, trusted timestamp, and hardened runtime | Required | Required |
+| Online notarization ticket via `codesign --verify --strict --check-notarization -R=notarized` | Required | Required |
+| Native-runner and universal architecture checks | Required | Artifact-specific |
+| `spctl --assess --type execute` | Not applicable; SecAssessment rejects valid raw CLIs because they are not app bundles | Required behind the `.app` type condition |
+
+Bare CLI archives cannot carry a stapled ticket: `stapler` supports disk images, installer packages, and certain signed executable bundles, not raw Mach-O files. The online `codesign --check-notarization` requirement is therefore the CLI ticket-presence proof. `spctl` remains reserved for app-bundle artifacts and never gates a raw CLI.
+
 The publisher is the only post-draft job with `contents: write`. After both verifiers pass, it requires byte-identical checksum attestations, lists and API-downloads every unpublished draft asset, rejects duplicate, extra, missing, or renamed assets, compares the draft's `SHA256SUMS` bytes exactly, and hashes every remaining asset. It un-drafts only when the draft names and digests equal the write-free verification conclusion. Thus draft-read access remains coupled to publication authority without extending that authority to either verifier.
 
 The Homebrew handoff dispatches `update-formula.yml` in the matching tap with `formula`, `source_repository`, `version`, numeric `release_id`, and a unique `correlation_id`. The tap workflow must include `correlation_id` in its `run-name`; the release waits for that exact run to succeed. The final stage opens a PR adding the next `## Unreleased` section.

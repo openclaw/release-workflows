@@ -1089,7 +1089,12 @@ jobs:
                 sleep 5
               done
               (( ready == 1 )) || { echo "notarization ticket unavailable: $candidate" >&2; exit 1; }
-              spctl --assess --type execute --verbose=2 "$candidate"
+              # SecAssessment's execute policy classifies app bundles. It rejects
+              # valid bare Mach-O CLIs as "not an app", so the codesign online
+              # notarization check above is the CLI distribution-policy proof.
+              if [[ -d "$candidate" && "$candidate" == *.app ]]; then
+                spctl --assess --type execute --verbose=2 "$candidate"
+              fi
               archs=" $(lipo -archs "$candidate") "
               [[ "$archs" == *" $EXPECTED_ARCH "* ]] && native_count=$((native_count + 1))
               [[ "$archs" == *' arm64 '* && "$archs" == *' x86_64 '* ]] && universal_count=$((universal_count + 1))

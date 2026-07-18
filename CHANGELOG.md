@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.0.0-alpha.10 - 2026-07-18
+
+- Stop applying app-bundle `spctl --type execute` policy to bare Mach-O CLIs; retain strict signature, designated-requirement, hardened-runtime, and online notarization checks, with `spctl` guarded for future `.app` artifacts.
+
 ## v1.0.0-alpha.9 - 2026-07-18
 
 - Move independent verification to the run's immutable Actions artifact with `actions: read` only, then bind every unpublished draft asset name and digest to both architecture attestations immediately before publication.
