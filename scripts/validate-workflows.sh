@@ -44,6 +44,17 @@ for secret in ['MACOS_SIGNING_P12', 'MACOS_SIGNING_P12_PASSWORD', 'ASC_KEY_ID', 
 if 'macos-14' not in verify or 'macos-15-intel' not in verify:
     raise SystemExit('verify matrix must cover arm64 and Intel macOS runners')
 
+sign = workflow.split('\n  sign:\n', 1)[1].split('\n  draft:\n', 1)[0]
+for required_signing_control in [
+    'echo "identity-hash=$identity_hash"',
+    '--sign "$SIGNING_IDENTITY_HASH"',
+    'security list-keychains -d user -s "${signing_search[@]}"',
+    'if: always()',
+    'security list-keychains -d user -s "${original_keychains[@]}"',
+]:
+    if required_signing_control not in sign:
+        raise SystemExit(f'missing signing keychain control: {required_signing_control}')
+
 all_workflows = '\n'.join(path.read_text() for path in workflow_paths)
 unpinned = re.findall(r'^\s*uses:\s+(?:actions|goreleaser)/[^@\n]+@(v\d+|main|master)\s*(?:#.*)?$', all_workflows, re.MULTILINE)
 if unpinned:

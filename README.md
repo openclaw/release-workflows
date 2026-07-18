@@ -64,7 +64,7 @@ Provision secrets per caller repository. Do not centralize one credential across
 | `ASC_PRIVATE_KEY_P8` | Full raw contents of the matching `AuthKey_*.p8`. |
 | `TAP_TOKEN` | Optional fine-grained token able to dispatch and read Actions runs in the matching tap. Required only with `homebrew-formula`. |
 
-The signing job imports the `.p12` into a unique ephemeral keychain and writes the `.p8` only inside runner temporary storage. Cleanup deletes both. The verifier jobs receive only `contents: read`; their proof step explicitly removes GitHub, Apple, signing, and tap token names from the environment.
+The signing job imports the `.p12` into a unique ephemeral keychain, adds that keychain to the scoped user search list, validates the policy identity, and signs by its SHA-1 hash. An `always()` cleanup restores the original search list and deletes the temporary keychain; the `.p8` exists only inside runner temporary storage. The verifier jobs receive only `contents: read`; their proof step explicitly removes GitHub, Apple, signing, and tap token names from the environment.
 
 ## Versioning policy
 

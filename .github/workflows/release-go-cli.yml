@@ -471,10 +471,6 @@ jobs:
             authority="Developer ID Application: Peter Steinberger ($team_id)"
             identifier_prefix=com.steipete
           fi
-          security find-identity -v -p codesigning "$keychain" | grep -F "\"$authority\"" >/dev/null || {
-            echo "required signing identity not present: $authority" >&2
-            exit 1
-          }
           {
             echo "authority=$authority"
             echo "identifier-prefix=$identifier_prefix"
@@ -482,6 +478,38 @@ jobs:
             echo "team-id=$team_id"
           } >>"$GITHUB_OUTPUT"
           rm -f "$p12"
+
+      - name: Scope keychain and validate signing identity
+        id: signing_identity
+        env:
+          AUTHORITY: ${{ steps.signer.outputs.authority }}
+          KEYCHAIN: ${{ steps.signer.outputs.keychain }}
+        run: |
+          set -euo pipefail
+          search_list_file="$RUNNER_TEMP/release-original-user-keychains.txt"
+          security list-keychains -d user \
+            | sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//' \
+            >"$search_list_file"
+
+          signing_search=("$KEYCHAIN")
+          while IFS= read -r existing_keychain; do
+            [[ -n "$existing_keychain" && "$existing_keychain" != "$KEYCHAIN" ]] \
+              && signing_search+=("$existing_keychain")
+          done <"$search_list_file"
+          security list-keychains -d user -s "${signing_search[@]}"
+
+          identities=$(security find-identity -v -p codesigning "$KEYCHAIN")
+          identity_hash=$(awk -v authority="$AUTHORITY" '
+            index($0, "\"" authority "\"") && $2 ~ /^[0-9A-Fa-f]{40}$/ {
+              print toupper($2)
+              exit
+            }
+          ' <<<"$identities")
+          [[ "$identity_hash" =~ ^[0-9A-F]{40}$ ]] || {
+            echo "required signing identity not present: $AUTHORITY" >&2
+            exit 1
+          }
+          echo "identity-hash=$identity_hash" >>"$GITHUB_OUTPUT"
 
       - name: Build universal binaries, sign, and notarize every macOS binary
         env:
@@ -492,6 +520,7 @@ jobs:
           IDENTIFIER_PREFIX: ${{ steps.signer.outputs.identifier-prefix }}
           KEYCHAIN: ${{ steps.signer.outputs.keychain }}
           REPOSITORY_NAME: ${{ github.event.repository.name }}
+          SIGNING_IDENTITY_HASH: ${{ steps.signing_identity.outputs.identity-hash }}
           TEAM_ID: ${{ steps.signer.outputs.team-id }}
         run: |
           set -euo pipefail
@@ -501,7 +530,7 @@ jobs:
           p8="$work/AuthKey_${ASC_KEY_ID}.p8"
           printf '%s' "$ASC_PRIVATE_KEY_P8" >"$p8"
           chmod 600 "$p8"
-          trap 'security delete-keychain "$KEYCHAIN" >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
+          trap 'rm -rf "$work"' EXIT
 
           : >"$work/macho.tsv"
           while IFS= read -r -d '' candidate; do
@@ -542,7 +571,8 @@ jobs:
             identifier="$IDENTIFIER_PREFIX.$repo_slug.$binary_slug"
             requirement="identifier \"$identifier\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$TEAM_ID\""
             codesign --force --options runtime --timestamp --identifier "$identifier" \
-              --requirements "=designated => $requirement" --keychain "$KEYCHAIN" --sign "$AUTHORITY" "$candidate"
+              --requirements "=designated => $requirement" --keychain "$KEYCHAIN" \
+              --sign "$SIGNING_IDENTITY_HASH" "$candidate"
             codesign --verify --strict -R="$requirement" --verbose=2 "$candidate"
             signature=$(codesign -dvvv "$candidate" 2>&1)
             grep -Fx "Identifier=$identifier" <<<"$signature" >/dev/null
@@ -591,6 +621,32 @@ jobs:
           path: signed-release-assets.tar.gz
           if-no-files-found: error
           retention-days: 1
+      - name: Restore user keychain search list
+        if: always()
+        env:
+          KEYCHAIN: ${{ steps.signer.outputs.keychain }}
+        run: |
+          set -euo pipefail
+          cleanup_failed=0
+          search_list_file="$RUNNER_TEMP/release-original-user-keychains.txt"
+          original_keychains=()
+          if [[ -f "$search_list_file" ]]; then
+            while IFS= read -r existing_keychain; do
+              [[ -n "$existing_keychain" ]] && original_keychains+=("$existing_keychain")
+            done <"$search_list_file"
+            if ! security list-keychains -d user -s "${original_keychains[@]}"; then
+              echo "could not restore user keychain search list" >&2
+              cleanup_failed=1
+            fi
+          fi
+
+          keychain=${KEYCHAIN:-"$RUNNER_TEMP/release-signing.keychain-db"}
+          if [[ -e "$keychain" ]] && ! security delete-keychain "$keychain"; then
+            echo "could not delete ephemeral signing keychain" >&2
+            cleanup_failed=1
+          fi
+          rm -f "$search_list_file" "$RUNNER_TEMP/release-signing.p12"
+          exit "$cleanup_failed"
 
   draft:
     name: 4 · Create exact draft
