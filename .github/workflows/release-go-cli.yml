@@ -842,10 +842,24 @@ jobs:
               core.setFailed('release controls missing');
               return;
             }
+            // The frozen annotated tag already exists (freeze stage), so GitHub
+            // resolves the release commit from the tag. target_commitish with a
+            // raw SHA is rejected (403) for the Actions integration token, and
+            // would be ignored for an existing tag anyway. We assert the tag's
+            // peeled commit below instead.
+            const tagRef = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
+            let peeled = tagRef.data.object.sha;
+            if (tagRef.data.object.type === 'tag') {
+              const tagObj = await github.rest.git.getTag({ ...context.repo, tag_sha: peeled });
+              peeled = tagObj.data.object.sha;
+            }
+            if (peeled !== process.env.TARGET_SHA) {
+              core.setFailed(`frozen tag ${process.env.TAG} peels to ${peeled}, expected ${process.env.TARGET_SHA}`);
+              return;
+            }
             const release = await github.rest.repos.createRelease({
               ...context.repo,
               tag_name: process.env.TAG,
-              target_commitish: process.env.TARGET_SHA,
               name: process.env.TAG,
               body: `Fleet draft. Publication requires independent verification of the exact ASSET-INVENTORY.json and SHA256SUMS payload.`,
               draft: true,

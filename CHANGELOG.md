@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.0.0-alpha.8
+- Drop `target_commitish` from draft creation (Actions token rejects raw SHAs with 403); assert the frozen tag's peeled commit instead — same trust property, working API call.
+
 ## v1.0.0-alpha.7
 - Extend notarization-ticket propagation wait to 15 minutes with exponential backoff (Apple CDN propagation regularly exceeds the previous 60s window).
 
