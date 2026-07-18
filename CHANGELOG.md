@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.0.0-alpha.6
+- Normalize codesign's `/* exists */` display annotation in designated-requirement comparisons (both sign and verify normalizers).
+
 ## 1.0.0-alpha.5 - 2026-07-17
 
 - Add labeled sanitized macOS signature diagnostics and normalize codesign's designated-requirement quote and `Executable=` display differences in both signing and independent verification.
