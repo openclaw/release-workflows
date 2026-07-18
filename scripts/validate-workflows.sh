@@ -12,6 +12,8 @@ done < <(find .github/workflows examples -type f \( -name '*.yml' -o -name '*.ya
 
 actionlint "${workflow_files[@]}"
 
+node scripts/test-release-target-resolution.mjs
+
 ruby -e '
   require "psych"
   ARGV.each do |path|
@@ -54,6 +56,17 @@ for required_signing_control in [
 ]:
     if required_signing_control not in sign:
         raise SystemExit(f'missing signing keychain control: {required_signing_control}')
+
+validate = workflow.split('\n  validate:\n', 1)[1].split('\n  tag:\n', 1)[0]
+for required_retry_control in [
+    "existingTag.data.object.type !== 'tag'",
+    'targetSha = tagObject.data.object.sha',
+    'basehead: `${targetSha}...${branchHead}`',
+    "!['ahead', 'identical'].includes(comparison.data.status)",
+    "core.setOutput('target-sha', targetSha)",
+]:
+    if required_retry_control not in validate:
+        raise SystemExit(f'missing immutable retry control: {required_retry_control}')
 
 all_workflows = '\n'.join(path.read_text() for path in workflow_paths)
 unpinned = re.findall(r'^\s*uses:\s+(?:actions|goreleaser)/[^@\n]+@(v\d+|main|master)\s*(?:#.*)?$', all_workflows, re.MULTILINE)

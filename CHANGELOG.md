@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.0-alpha.4 - 2026-07-17
+
+- Make retries reuse the existing annotated version tag's reachable peeled commit as the immutable validation and release target instead of trying to retarget it to a newer default-branch head.
+
 ## 1.0.0-alpha.3 - 2026-07-17
 
 - Make macOS signing resolve the validated certificate by SHA-1 hash while temporarily scoping the ephemeral keychain into the user search list and restoring the original list on every exit path.

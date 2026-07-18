@@ -2,7 +2,7 @@
 
 Fleet-standard reusable release pipelines. Every archetype follows one trust boundary:
 
-1. freeze a protected, green default-branch head;
+1. freeze a protected-branch commit, reusing an immutable annotated tag on retries;
 2. build and create an unpublished draft;
 3. independently verify the exact draft without signing credentials;
 4. publish only after every verifier passes.
@@ -20,7 +20,7 @@ jobs:
 `release-go-cli.yml` is the first fleet archetype. It requires:
 
 - a protected default branch and a caller dispatched at its exact head;
-- every branch-protection or effective-ruleset required status context green on that head;
+- every branch-protection or effective-ruleset required status context green on the frozen target commit;
 - `CHANGELOG.md` with a dated `##` section containing the requested version;
 - `go.mod` and `.goreleaser.yml` or `.goreleaser.yaml`;
 - a GoReleaser build matrix containing both `darwin/amd64` and `darwin/arm64` for every macOS binary name;
@@ -45,9 +45,11 @@ Repository policies:
 | `openclaw` | `Developer ID Application: OpenClaw Foundation` | `FWJYW4S8P8` | `org.openclaw.<repo>.<binary>` | `openclaw/homebrew-tap` |
 | `personal` | `Developer ID Application: Peter Steinberger` | `Y5PE65HELJ` | `com.steipete.<repo>.<binary>` | `steipete/homebrew-tap` |
 
-The CI gate merges required status checks from legacy branch protection and effective branch rules, including any required GitHub App binding. With the default `strict-checks: false`, unrelated optional or dynamic failures do not block a release. Required checks must still be present and green. Repositories without required contexts fall back to requiring all independent checks/statuses completed and non-failed. Set `strict-checks: true` to request that stricter all-check behavior even when required contexts exist.
+The CI gate merges required status checks from legacy branch protection and effective branch rules, including any required GitHub App binding. With the default `strict-checks: false`, unrelated optional or dynamic failures do not block a release. Required checks must still be present and green on the frozen target commit. Repositories without required contexts fall back to requiring all independent checks/statuses completed and non-failed. Set `strict-checks: true` to request that stricter all-check behavior even when required contexts exist.
 
-The tag stage creates an annotated tag at the validated SHA. A safe retry may reuse an existing signed or annotated tag only when its peeled commit is that exact SHA; lightweight or mismatched tags fail closed. Binary authenticity does not trust the tag signature or annotation: the draft verifier independently enforces the exact commit, inventory, SHA-256 checksums, Apple certificate chain, hardened-runtime flag, timestamp, stable embedded designated requirement, Team ID, notarization requirement, and native plus universal architectures.
+The first attempt, when no version tag exists, freezes the current protected default-branch head and creates an annotated tag there. On every retry, an existing exact annotated version tag takes precedence: its peeled commit becomes `target-sha`, even when the caller runs from a newer default-branch head. That frozen commit must still be reachable from the protected default branch; the workflow checks out that commit and evaluates its changelog, version metadata, and required CI signals. The tag is never moved or replaced. Lightweight tags, tags that do not peel directly to a commit, and tags outside protected-branch ancestry fail closed. The caller itself must still be dispatched at the current protected default-branch head.
+
+Binary authenticity does not trust the tag signature or annotation: the draft verifier independently enforces the exact commit, inventory, SHA-256 checksums, Apple certificate chain, hardened-runtime flag, timestamp, stable embedded designated requirement, Team ID, notarization requirement, and native plus universal architectures.
 
 The Homebrew handoff dispatches `update-formula.yml` in the matching tap with `formula`, `source_repository`, `version`, numeric `release_id`, and a unique `correlation_id`. The tap workflow must include `correlation_id` in its `run-name`; the release waits for that exact run to succeed. The final stage opens a PR adding the next `## Unreleased` section.
 

@@ -101,9 +101,11 @@ jobs:
           echo "release-version=$release_version" >>"$GITHUB_OUTPUT"
           echo "tag=v$release_version" >>"$GITHUB_OUTPUT"
 
-      - name: Resolve protected default branch
+      - name: Resolve protected release target
         id: repository
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          TAG: ${{ steps.inputs.outputs.tag }}
         with:
           script: |
             const repo = await github.rest.repos.get(context.repo);
@@ -116,15 +118,58 @@ jobs:
               core.setFailed(`default branch ${branchName} is not protected`);
               return;
             }
-            const sha = branch.data.commit.sha;
-            if (context.ref !== `refs/heads/${branchName}` || context.sha !== sha) {
-              core.setFailed(`caller must run at protected ${branchName} head ${sha}; got ${context.ref}@${context.sha}`);
+            const branchHead = branch.data.commit.sha;
+            if (context.ref !== `refs/heads/${branchName}` || context.sha !== branchHead) {
+              core.setFailed(`caller must run at protected ${branchName} head ${branchHead}; got ${context.ref}@${context.sha}`);
               return;
             }
-            core.setOutput('default-branch', branchName);
-            core.setOutput('target-sha', sha);
 
-      - name: Check out exact protected head
+            let targetSha = branchHead;
+            let targetSource = 'protected-head';
+            let existingTag = null;
+            try {
+              existingTag = await github.rest.git.getRef({
+                ...context.repo,
+                ref: `tags/${process.env.TAG}`,
+              });
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+
+            if (existingTag !== null) {
+              if (existingTag.data.object.type !== 'tag') {
+                core.setFailed(`existing tag is lightweight, not annotated: ${process.env.TAG}`);
+                return;
+              }
+              const tagObject = await github.rest.git.getTag({
+                ...context.repo,
+                tag_sha: existingTag.data.object.sha,
+              });
+              if (tagObject.data.object.type !== 'commit') {
+                core.setFailed(`annotated tag does not peel directly to a commit: ${process.env.TAG}`);
+                return;
+              }
+              targetSha = tagObject.data.object.sha;
+              targetSource = 'annotated-tag';
+
+              const comparison = await github.rest.repos.compareCommitsWithBasehead({
+                ...context.repo,
+                basehead: `${targetSha}...${branchHead}`,
+                per_page: 1,
+              });
+              if (!['ahead', 'identical'].includes(comparison.data.status)) {
+                core.setFailed(`tag commit ${targetSha} is not reachable from protected ${branchName} head ${branchHead}`);
+                return;
+              }
+              core.info(`retry target frozen by annotated tag ${process.env.TAG} at ${targetSha}`);
+            } else {
+              core.info(`first-attempt target is protected ${branchName} head ${branchHead}`);
+            }
+            core.setOutput('default-branch', branchName);
+            core.setOutput('target-sha', targetSha);
+            core.setOutput('target-source', targetSource);
+
+      - name: Check out exact release target
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           persist-credentials: false
@@ -185,7 +230,7 @@ jobs:
             }
           done < <(jq -r '.[]' <<<"$EXTRA_PACKAGES")
 
-      - name: Require independent CI green on exact head
+      - name: Require independent CI green on frozen target
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
           DEFAULT_BRANCH: ${{ steps.repository.outputs.default-branch }}
@@ -315,7 +360,7 @@ jobs:
 
             core.info(`CI gate mode: ${strictChecks ? 'strict all-checks' : 'all-check fallback (no required contexts)'}`);
             if (checkRuns.length === 0 && latestStatuses.size === 0) {
-              core.setFailed('exact head has no independent CI check or commit status');
+              core.setFailed('frozen target has no independent CI check or commit status');
               return;
             }
             const badChecks = checkRuns.filter((check) =>
