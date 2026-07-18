@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.0-alpha.5 - 2026-07-17
+
+- Add labeled sanitized macOS signature diagnostics and normalize codesign's designated-requirement quote and `Executable=` display differences in both signing and independent verification.
+
 ## 1.0.0-alpha.4 - 2026-07-17
 
 - Make retries reuse the existing annotated version tag's reachable peeled commit as the immutable validation and release target instead of trying to retarget it to a newer default-branch head.

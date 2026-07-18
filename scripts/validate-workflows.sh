@@ -13,6 +13,7 @@ done < <(find .github/workflows examples -type f \( -name '*.yml' -o -name '*.ya
 actionlint "${workflow_files[@]}"
 
 node scripts/test-release-target-resolution.mjs
+scripts/test-signature-assertions.sh
 
 ruby -e '
   require "psych"
@@ -56,6 +57,23 @@ for required_signing_control in [
 ]:
     if required_signing_control not in sign:
         raise SystemExit(f'missing signing keychain control: {required_signing_control}')
+
+for job_name, section in [('sign', sign), ('verify', verify)]:
+    for required_signature_assertion in [
+        'signature assertion failed [%s]',
+        'expected (public metadata): %s',
+        'observed (public metadata): %s',
+        'normalize_designated_requirement',
+        "sed -E '/^[[:space:]]*Executable=/d'",
+        's/ Executable=.*$//',
+        'observed_authorities=$(codesign_display_values Authority',
+        'observed_timestamp=$(codesign_display_value Timestamp',
+        'assert_signature_equal "designated-requirement"',
+    ]:
+        if required_signature_assertion not in section:
+            raise SystemExit(
+                f'missing labeled signature assertion in {job_name}: {required_signature_assertion}'
+            )
 
 validate = workflow.split('\n  validate:\n', 1)[1].split('\n  tag:\n', 1)[0]
 for required_retry_control in [

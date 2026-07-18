@@ -586,6 +586,91 @@ jobs:
           done < <(find dist -type f -perm -111 -print0)
           [[ -s "$work/macho.tsv" ]] || { echo "GoReleaser produced no macOS executable" >&2; exit 1; }
 
+          # signature-assertion-helpers-begin
+          signature_diagnostic_value() {
+            local value=$1
+            value=$(printf '%s' "$value" | tr '\r\n\t' '   ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+            [[ -n "$value" ]] || value='<missing>'
+            printf '%s' "$value"
+          }
+
+          fail_signature_assertion() {
+            local label=$1
+            local expected=$2
+            local observed=$3
+            local subject=$4
+            expected=$(signature_diagnostic_value "$expected")
+            observed=$(signature_diagnostic_value "$observed")
+            printf 'signature assertion failed [%s] for %s\n' "$label" "$subject" >&2
+            printf '  expected (public metadata): %s\n' "$expected" >&2
+            printf '  observed (public metadata): %s\n' "$observed" >&2
+            return 1
+          }
+
+          codesign_display_value() {
+            local key=$1
+            local display=$2
+            awk -v key="$key" '
+              index($0, key "=") == 1 {
+                print substr($0, length(key) + 2)
+                exit
+              }
+            ' <<<"$display"
+          }
+
+          codesign_display_values() {
+            local key=$1
+            local display=$2
+            awk -v key="$key" '
+              index($0, key "=") == 1 {
+                print substr($0, length(key) + 2)
+              }
+            ' <<<"$display"
+          }
+
+          normalize_designated_requirement() {
+            local value=$1
+            printf '%s\n' "$value" \
+              | sed -E '/^[[:space:]]*Executable=/d' \
+              | tr '\r\n\t' '   ' \
+              | sed -E 's/[[:space:]]+/ /g; s/"([A-Za-z0-9.]+)"/\1/g; s/ Executable=.*$//; s/^ //; s/ $//'
+          }
+
+          assert_signature_equal() {
+            local label=$1
+            local expected=$2
+            local observed=$3
+            local subject=$4
+            [[ "$observed" == "$expected" ]] \
+              || fail_signature_assertion "$label" "$expected" "$observed" "$subject"
+          }
+
+          assert_signature_line_present() {
+            local label=$1
+            local expected=$2
+            local observed=$3
+            local subject=$4
+            awk -v expected="$expected" '$0 == expected { found = 1 } END { exit(found ? 0 : 1) }' <<<"$observed" \
+              || fail_signature_assertion "$label" "$expected" "$observed" "$subject"
+          }
+
+          assert_signature_runtime() {
+            local label=$1
+            local observed=$2
+            local subject=$3
+            [[ "$observed" == *flags=* && "$observed" == *'(runtime)'* ]] \
+              || fail_signature_assertion "$label" 'CodeDirectory flags containing (runtime)' "$observed" "$subject"
+          }
+
+          assert_signature_timestamp() {
+            local label=$1
+            local observed=$2
+            local subject=$3
+            [[ -n "$observed" && "$observed" != none ]] \
+              || fail_signature_assertion "$label" 'nonempty trusted timestamp' "$observed" "$subject"
+          }
+          # signature-assertion-helpers-end
+
           pair_count=0
           while IFS= read -r binary_name; do
             [[ -n "$binary_name" ]] || continue
@@ -620,13 +705,20 @@ jobs:
               --sign "$SIGNING_IDENTITY_HASH" "$candidate"
             codesign --verify --strict -R="$requirement" --verbose=2 "$candidate"
             signature=$(codesign -dvvv "$candidate" 2>&1)
-            grep -Fx "Identifier=$identifier" <<<"$signature" >/dev/null
-            grep -Fx "Authority=$AUTHORITY" <<<"$signature" >/dev/null
-            grep -Fx "TeamIdentifier=$TEAM_ID" <<<"$signature" >/dev/null
-            grep -E '^CodeDirectory .*flags=.*\(runtime\)' <<<"$signature" >/dev/null
-            grep -E '^Timestamp=' <<<"$signature" >/dev/null
+            observed_identifier=$(codesign_display_value Identifier "$signature")
+            observed_authorities=$(codesign_display_values Authority "$signature")
+            observed_team_id=$(codesign_display_value TeamIdentifier "$signature")
+            observed_code_directory=$(awk '/^CodeDirectory / { print; exit }' <<<"$signature")
+            observed_timestamp=$(codesign_display_value Timestamp "$signature")
+            assert_signature_equal "identifier" "$identifier" "$observed_identifier" "$candidate"
+            assert_signature_line_present "authority-name" "$AUTHORITY" "$observed_authorities" "$candidate"
+            assert_signature_equal "team-id" "$TEAM_ID" "$observed_team_id" "$candidate"
+            assert_signature_runtime "hardened-runtime" "$observed_code_directory" "$candidate"
+            assert_signature_timestamp "trusted-timestamp" "$observed_timestamp" "$candidate"
             embedded=$(codesign -d -r- "$candidate" 2>&1)
-            grep -Fqx "designated => $requirement" <<<"$embedded"
+            expected_requirement=$(normalize_designated_requirement "designated => $requirement")
+            observed_requirement=$(normalize_designated_requirement "$embedded")
+            assert_signature_equal "designated-requirement" "$expected_requirement" "$observed_requirement" "$candidate"
 
             submission="$work/submissions/$(printf '%s' "$identifier" | tr '.' '-')-$(shasum -a 256 <<<"$candidate" | cut -c1-10).zip"
             ditto -c -k --keepParent "$candidate" "$submission"
@@ -826,6 +918,91 @@ jobs:
           [[ "$(jq -r '.tag' ASSET-INVENTORY.json)" == "$TAG" ]]
           [[ "$(jq -r '.commit' ASSET-INVENTORY.json)" == "$TARGET_SHA" ]]
 
+          # signature-assertion-helpers-begin
+          signature_diagnostic_value() {
+            local value=$1
+            value=$(printf '%s' "$value" | tr '\r\n\t' '   ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+            [[ -n "$value" ]] || value='<missing>'
+            printf '%s' "$value"
+          }
+
+          fail_signature_assertion() {
+            local label=$1
+            local expected=$2
+            local observed=$3
+            local subject=$4
+            expected=$(signature_diagnostic_value "$expected")
+            observed=$(signature_diagnostic_value "$observed")
+            printf 'signature assertion failed [%s] for %s\n' "$label" "$subject" >&2
+            printf '  expected (public metadata): %s\n' "$expected" >&2
+            printf '  observed (public metadata): %s\n' "$observed" >&2
+            return 1
+          }
+
+          codesign_display_value() {
+            local key=$1
+            local display=$2
+            awk -v key="$key" '
+              index($0, key "=") == 1 {
+                print substr($0, length(key) + 2)
+                exit
+              }
+            ' <<<"$display"
+          }
+
+          codesign_display_values() {
+            local key=$1
+            local display=$2
+            awk -v key="$key" '
+              index($0, key "=") == 1 {
+                print substr($0, length(key) + 2)
+              }
+            ' <<<"$display"
+          }
+
+          normalize_designated_requirement() {
+            local value=$1
+            printf '%s\n' "$value" \
+              | sed -E '/^[[:space:]]*Executable=/d' \
+              | tr '\r\n\t' '   ' \
+              | sed -E 's/[[:space:]]+/ /g; s/"([A-Za-z0-9.]+)"/\1/g; s/ Executable=.*$//; s/^ //; s/ $//'
+          }
+
+          assert_signature_equal() {
+            local label=$1
+            local expected=$2
+            local observed=$3
+            local subject=$4
+            [[ "$observed" == "$expected" ]] \
+              || fail_signature_assertion "$label" "$expected" "$observed" "$subject"
+          }
+
+          assert_signature_line_present() {
+            local label=$1
+            local expected=$2
+            local observed=$3
+            local subject=$4
+            awk -v expected="$expected" '$0 == expected { found = 1 } END { exit(found ? 0 : 1) }' <<<"$observed" \
+              || fail_signature_assertion "$label" "$expected" "$observed" "$subject"
+          }
+
+          assert_signature_runtime() {
+            local label=$1
+            local observed=$2
+            local subject=$3
+            [[ "$observed" == *flags=* && "$observed" == *'(runtime)'* ]] \
+              || fail_signature_assertion "$label" 'CodeDirectory flags containing (runtime)' "$observed" "$subject"
+          }
+
+          assert_signature_timestamp() {
+            local label=$1
+            local observed=$2
+            local subject=$3
+            [[ -n "$observed" && "$observed" != none ]] \
+              || fail_signature_assertion "$label" 'nonempty trusted timestamp' "$observed" "$subject"
+          }
+          # signature-assertion-helpers-end
+
           expected_names=$(jq -r '.payloads[].name, "ASSET-INVENTORY.json", "SHA256SUMS"' ASSET-INVENTORY.json | LC_ALL=C sort)
           actual_names=$(find . -mindepth 1 -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort)
           [[ "$actual_names" == "$expected_names" ]] || {
@@ -868,15 +1045,22 @@ jobs:
               requirement="identifier \"$identifier\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$team_id\""
               codesign --verify --strict -R="$requirement" --verbose=2 "$candidate"
               signature=$(codesign -dvvv "$candidate" 2>&1)
-              grep -Fx "Identifier=$identifier" <<<"$signature" >/dev/null
-              grep -Fx "Authority=$authority" <<<"$signature" >/dev/null
-              grep -Fx 'Authority=Developer ID Certification Authority' <<<"$signature" >/dev/null
-              grep -Fx 'Authority=Apple Root CA' <<<"$signature" >/dev/null
-              grep -Fx "TeamIdentifier=$team_id" <<<"$signature" >/dev/null
-              grep -E '^CodeDirectory .*flags=.*\(runtime\)' <<<"$signature" >/dev/null
-              grep -E '^Timestamp=' <<<"$signature" >/dev/null
+              observed_identifier=$(codesign_display_value Identifier "$signature")
+              observed_authorities=$(codesign_display_values Authority "$signature")
+              observed_team_id=$(codesign_display_value TeamIdentifier "$signature")
+              observed_code_directory=$(awk '/^CodeDirectory / { print; exit }' <<<"$signature")
+              observed_timestamp=$(codesign_display_value Timestamp "$signature")
+              assert_signature_equal "identifier" "$identifier" "$observed_identifier" "$candidate"
+              assert_signature_line_present "authority-application" "$authority" "$observed_authorities" "$candidate"
+              assert_signature_line_present "authority-developer-id-ca" 'Developer ID Certification Authority' "$observed_authorities" "$candidate"
+              assert_signature_line_present "authority-apple-root-ca" 'Apple Root CA' "$observed_authorities" "$candidate"
+              assert_signature_equal "team-id" "$team_id" "$observed_team_id" "$candidate"
+              assert_signature_runtime "hardened-runtime" "$observed_code_directory" "$candidate"
+              assert_signature_timestamp "trusted-timestamp" "$observed_timestamp" "$candidate"
               embedded=$(codesign -d -r- "$candidate" 2>&1)
-              grep -Fqx "designated => $requirement" <<<"$embedded"
+              expected_requirement=$(normalize_designated_requirement "designated => $requirement")
+              observed_requirement=$(normalize_designated_requirement "$embedded")
+              assert_signature_equal "designated-requirement" "$expected_requirement" "$observed_requirement" "$candidate"
               ready=0
               for _ in {1..12}; do
                 if codesign --verify --strict --check-notarization -R=notarized --verbose=2 "$candidate"; then
