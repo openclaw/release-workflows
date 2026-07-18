@@ -42,12 +42,18 @@ const runId = '29640000000';
 const runAttempt = '1';
 const verificationPayloadArtifact = `release-verification-payload-${runId}-${runAttempt}`;
 const artifactData = new Map([
-  ['spogo_1.2.3_darwin_amd64.tar.gz', Buffer.from('darwin-amd64')],
-  ['spogo_1.2.3_darwin_arm64.tar.gz', Buffer.from('darwin-arm64')],
+  ['spogo_1.2.3_spogo_darwin_darwin_amd64_v1.tar.gz', Buffer.from('darwin-amd64')],
+  ['spogo_1.2.3_spogo_darwin_darwin_arm64_v8.0.tar.gz', Buffer.from('darwin-arm64')],
   ['spogo_1.2.3_darwin+debug.tar.gz', Buffer.from('darwin-debug')],
-  ['spogo_1.2.3_linux_amd64.tar.gz', Buffer.from('linux-amd64')],
-  ['spogo_1.2.3_linux_arm64.tar.gz', Buffer.from('linux-arm64')],
+  ['spogo_1.2.3_spogo_linux_amd64_v1.tar.gz', Buffer.from('linux-amd64')],
+  ['spogo_1.2.3_spogo_linux_arm64_v8.0.tar.gz', Buffer.from('linux-arm64')],
 ]);
+const targetNames = {
+  darwin_amd64: 'spogo_1.2.3_spogo_darwin_darwin_amd64_v1.tar.gz',
+  darwin_arm64: 'spogo_1.2.3_spogo_darwin_darwin_arm64_v8.0.tar.gz',
+  linux_amd64: 'spogo_1.2.3_spogo_linux_amd64_v1.tar.gz',
+  linux_arm64: 'spogo_1.2.3_spogo_linux_arm64_v8.0.tar.gz',
+};
 
 function digest(data) {
   return createHash('sha256').update(data).digest('hex');
@@ -57,6 +63,22 @@ const sha256sums = [...artifactData]
   .sort(([left], [right]) => left.localeCompare(right))
   .map(([name, data]) => `${digest(data)}  ${name}\n`)
   .join('');
+const assetInventory = `${JSON.stringify({
+  schemaVersion: 1,
+  repository,
+  tag,
+  commit: targetSha,
+  payloads: [...artifactData].map(([name, data]) => ({
+    name,
+    size: data.length,
+    sha256: digest(data),
+    ...Object.fromEntries(Object.entries(targetNames).filter(([, targetName]) => targetName === name).map(([target]) => ['target', target])),
+  })),
+}, null, 2)}\n`;
+const dispatchedAssets = Object.fromEntries(Object.entries(targetNames).map(([target, name]) => [target, {
+  name,
+  sha256: digest(artifactData.get(name)),
+}]));
 
 function resolveInputs({ repositoryType, homebrewTap = '', formula = 'spogo' }) {
   const fixtureRoot = mkdtempSync(join(tmpdir(), 'release-homebrew-inputs-'));
@@ -103,21 +125,21 @@ function platformMatrixFormula() {
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/${repository}/releases/download/${tag}/spogo_1.2.3_darwin_arm64.tar.gz"
-      sha256 "${sha('spogo_1.2.3_darwin_arm64.tar.gz')}"
+      url "https://github.com/${repository}/releases/download/${tag}/${targetNames.darwin_arm64}"
+      sha256 "${sha(targetNames.darwin_arm64)}"
     else
-      url "https://github.com/${repository}/releases/download/${tag}/spogo_1.2.3_darwin_amd64.tar.gz"
-      sha256 "${sha('spogo_1.2.3_darwin_amd64.tar.gz')}"
+      url "https://github.com/${repository}/releases/download/${tag}/${targetNames.darwin_amd64}"
+      sha256 "${sha(targetNames.darwin_amd64)}"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
-      url "https://github.com/${repository}/releases/download/${tag}/spogo_1.2.3_linux_arm64.tar.gz"
-      sha256 "${sha('spogo_1.2.3_linux_arm64.tar.gz')}"
+      url "https://github.com/${repository}/releases/download/${tag}/${targetNames.linux_arm64}"
+      sha256 "${sha(targetNames.linux_arm64)}"
     else
-      url "https://github.com/${repository}/releases/download/${tag}/spogo_1.2.3_linux_amd64.tar.gz"
-      sha256 "${sha('spogo_1.2.3_linux_amd64.tar.gz')}"
+      url "https://github.com/${repository}/releases/download/${tag}/${targetNames.linux_amd64}"
+      sha256 "${sha(targetNames.linux_amd64)}"
     end
   end
 
@@ -145,6 +167,7 @@ function baseAttestations() {
     commit: targetSha,
     architecture,
     verdict: 'verified',
+    assetInventory,
     releaseNotes: '## v1.2.3 - 2026-07-18\n',
     sha256sums,
   }]));
@@ -299,7 +322,7 @@ for (const [name, fixture, expectedError] of [
     repo: 'homebrew-tap',
     workflow_id: 'update-formula.yml',
     ref: 'main',
-    inputs: { formula: 'spogo', tag, repository },
+    inputs: { formula: 'spogo', tag, repository, assets: JSON.stringify(dispatchedAssets) },
   });
   assert.ok(result.info.some((message) => /verified steipete\/homebrew-tap\/Formula\/spogo\.rb assets/.test(message)));
   console.log('PASS exact live dispatch contract and verified formula');
@@ -410,8 +433,8 @@ for (const [name, fixture, expectedError] of [
 
 {
   const encodedSeparator = formulaFor().replace(
-    '/spogo_1.2.3_darwin_amd64.tar.gz',
-    '/nested%2Fspogo_1.2.3_darwin_amd64.tar.gz',
+    `/${targetNames.darwin_amd64}`,
+    `/nested%2F${targetNames.darwin_amd64}`,
   );
   const result = await runHandoff({ formulas: [encodedSeparator] });
   assert.match(result.thrown?.message, /timed out.*not an exact .* release asset/);
@@ -438,6 +461,34 @@ for (const [name, fixture, expectedError] of [
 }
 
 {
+  const result = await runHandoff({
+    mutateAttestations: (attestations) => {
+      const changed = JSON.parse(attestations.x86_64.assetInventory);
+      changed.payloads[0].target = 'linux_amd64';
+      attestations.x86_64.assetInventory = `${JSON.stringify(changed)}\n`;
+    },
+  });
+  assert.match(result.thrown?.message, /asset inventory differs between arm64 and x86_64/);
+  assert.equal(result.dispatches.length, 0);
+  console.log('PASS architecture inventory disagreement blocks dispatch');
+}
+
+{
+  const result = await runHandoff({
+    mutateAttestations: (attestations) => {
+      for (const attestation of Object.values(attestations)) {
+        const changed = JSON.parse(attestation.assetInventory);
+        delete changed.payloads.find((payload) => payload.target === 'linux_arm64').target;
+        attestation.assetInventory = `${JSON.stringify(changed)}\n`;
+      }
+    },
+  });
+  assert.match(result.thrown?.message, /lacks Homebrew assets: linux_arm64/);
+  assert.equal(result.dispatches.length, 0);
+  console.log('PASS incomplete explicit-assets inventory blocks dispatch');
+}
+
+{
   const denied = Object.assign(new Error('not found'), { status: 404 });
   const result = await runHandoff({ repositoryError: denied });
   assert.match(result.thrown?.message, /TAP_TOKEN cannot access configured Homebrew tap steipete\/homebrew-tap \(HTTP 404\)/);
@@ -452,4 +503,4 @@ for (const [name, fixture, expectedError] of [
   console.log('PASS missing TAP_TOKEN fails before tap access');
 }
 
-console.log(`Homebrew handoff tests passed (${inputMatrix.length + 21} scenarios)`);
+console.log(`Homebrew handoff tests passed (${inputMatrix.length + 23} scenarios)`);

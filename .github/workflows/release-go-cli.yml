@@ -317,7 +317,7 @@ jobs:
           echo "release-notes-artifact-name=release-notes-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >>"$GITHUB_OUTPUT"
 
       - name: Upload frozen release notes
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: ${{ steps.metadata.outputs.release-notes-artifact-name }}
           path: ${{ runner.temp }}/RELEASE-NOTES.md
@@ -563,7 +563,7 @@ jobs:
           fi
           tar -czf raw-goreleaser-dist.tar.gz dist
       - name: Upload raw matrix
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: raw-goreleaser-dist-${{ github.run_id }}
           path: raw-goreleaser-dist.tar.gz
@@ -578,7 +578,7 @@ jobs:
       contents: read
     steps:
       - name: Download raw matrix
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
           name: raw-goreleaser-dist-${{ github.run_id }}
       - name: Restore raw matrix
@@ -842,15 +842,48 @@ jobs:
           mkdir -p release-assets
           jq -s --arg repository "$GITHUB_REPOSITORY" '{schemaVersion:1,repository:$repository,binaries:.}' \
             "$work/signing-manifest.jsonl" >release-assets/SIGNING-MANIFEST.json
+          jq -e 'type == "array"' dist/artifacts.json >/dev/null
+          : >"$work/asset-targets.jsonl"
           while IFS= read -r directory; do
             target=$(basename "$directory" | sed -E 's/[^A-Za-z0-9._-]+/-/g')
             archive="release-assets/${REPOSITORY_NAME}_${{ needs.validate.outputs.release-version }}_${target}.tar.gz"
             tar -czf "$archive" -C "$directory" .
+            canonical_target=
+            if [[ "$directory" == dist/universal_darwin_all ]]; then
+              canonical_target=darwin_universal
+            else
+              target_platforms=()
+              while IFS= read -r platform; do
+                [[ -n "$platform" ]] && target_platforms+=("$platform")
+              done < <(jq -r --arg prefix "$directory/" \
+                '[.[] | select(.type == "Binary" and (.path | startswith($prefix))) | [.goos,.goarch] | @tsv] | unique[]' \
+                dist/artifacts.json)
+              if (( ${#target_platforms[@]} > 1 )); then
+                echo "release archive mixes GoReleaser platforms: $directory" >&2
+                exit 1
+              fi
+              if (( ${#target_platforms[@]} == 1 )); then
+                IFS=$'\t' read -r goos goarch <<<"${target_platforms[0]}"
+                case "$goos/$goarch" in
+                  darwin/amd64) canonical_target=darwin_amd64 ;;
+                  darwin/arm64) canonical_target=darwin_arm64 ;;
+                  linux/amd64) canonical_target=linux_amd64 ;;
+                  linux/arm64) canonical_target=linux_arm64 ;;
+                  windows/amd64) canonical_target=windows_amd64 ;;
+                  windows/arm64) canonical_target=windows_arm64 ;;
+                esac
+              fi
+            fi
+            if [[ -n "$canonical_target" ]]; then
+              jq -n --arg name "$(basename "$archive")" --arg target "$canonical_target" \
+                '{name:$name,target:$target}' >>"$work/asset-targets.jsonl"
+            fi
           done < <(find dist -mindepth 1 -maxdepth 1 -type d | LC_ALL=C sort)
+          jq -s . "$work/asset-targets.jsonl" >release-assets/.ASSET-TARGETS.json
           [[ -n "$(find release-assets -type f -name '*.tar.gz' -print -quit)" ]]
           tar -czf signed-release-assets.tar.gz release-assets
       - name: Upload signed release payload
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: signed-release-assets-${{ github.run_id }}
           path: signed-release-assets.tar.gz
@@ -894,16 +927,17 @@ jobs:
       verification-artifact-name: ${{ steps.verification-payload.outputs.artifact-name }}
     steps:
       - name: Download frozen release notes
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
           name: ${{ needs.validate.outputs.release-notes-artifact-name }}
           path: validated-release-notes
       - name: Download signed payload
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
           name: signed-release-assets-${{ github.run_id }}
       - name: Create frozen inventory and checksums
         env:
+          HOMEBREW_FORMULA: ${{ inputs.homebrew-formula }}
           TAG: ${{ needs.validate.outputs.tag }}
           TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
         run: |
@@ -911,11 +945,35 @@ jobs:
           tar -xzf signed-release-assets.tar.gz
           [[ -s validated-release-notes/RELEASE-NOTES.md ]] || { echo "validated release notes missing" >&2; exit 1; }
           cp validated-release-notes/RELEASE-NOTES.md release-assets/RELEASE-NOTES.md
+          target_map="$RUNNER_TEMP/ASSET-TARGETS.json"
+          mv release-assets/.ASSET-TARGETS.json "$target_map"
+          jq -e '
+            type == "array" and
+            all(.[];
+              (.name | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9+@._-]*\\.tar\\.gz$")) and
+              (.target | type == "string" and test("^(darwin|linux|windows)_(amd64|arm64)$|^darwin_universal$"))) and
+            ((map(.name) | unique | length) == length) and
+            ((map(.target) | unique | length) == length)
+          ' "$target_map" >/dev/null
+          while IFS=$'\t' read -r name target; do
+            [[ -f "release-assets/$name" ]] || { echo "target map references missing archive: $name" >&2; exit 1; }
+          done < <(jq -r '.[] | [.name,.target] | @tsv' "$target_map")
+          if [[ -n "$HOMEBREW_FORMULA" ]]; then
+            for target in darwin_amd64 darwin_arm64 linux_amd64 linux_arm64; do
+              [[ "$(jq --arg target "$target" '[.[] | select(.target == $target)] | length' "$target_map")" == 1 ]] || {
+                echo "Homebrew handoff requires exactly one GoReleaser archive for $target" >&2
+                exit 1
+              }
+            done
+          fi
           cd release-assets
           : >"$RUNNER_TEMP/inventory.jsonl"
           while IFS= read -r file; do
-            jq -n --arg name "$(basename "$file")" --arg sha256 "$(sha256sum "$file" | awk '{print $1}')" \
-              --argjson size "$(stat -c %s "$file")" '{name:$name,size:$size,sha256:$sha256}' \
+            name=$(basename "$file")
+            target=$(jq -r --arg name "$name" '[.[] | select(.name == $name) | .target][0] // empty' "$target_map")
+            jq -n --arg name "$name" --arg sha256 "$(sha256sum "$file" | awk '{print $1}')" \
+              --argjson size "$(stat -c %s "$file")" --arg target "$target" \
+              '{name:$name,size:$size,sha256:$sha256} + if $target == "" then {} else {target:$target} end' \
               >>"$RUNNER_TEMP/inventory.jsonl"
           done < <(find . -mindepth 1 -maxdepth 1 -type f | LC_ALL=C sort)
           inventory="$RUNNER_TEMP/ASSET-INVENTORY.json"
@@ -934,7 +992,7 @@ jobs:
           tar -czf release-verification-payload.tar.gz release-assets
           echo "artifact-name=release-verification-payload-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >>"$GITHUB_OUTPUT"
       - name: Upload immutable verification payload
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: ${{ steps.verification-payload.outputs.artifact-name }}
           path: release-verification-payload.tar.gz
@@ -1013,7 +1071,7 @@ jobs:
       actions: read
     steps:
       - name: Download immutable verification payload
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
           name: ${{ needs.draft.outputs.verification-artifact-name }}
       - name: Extract immutable verification payload
@@ -1024,6 +1082,7 @@ jobs:
       - name: Verify exact inventory, signatures, DR, and notarization
         env:
           EXPECTED_ARCH: ${{ matrix.arch }}
+          HOMEBREW_FORMULA: ${{ inputs.homebrew-formula }}
           REPOSITORY_NAME: ${{ github.event.repository.name }}
           REPOSITORY_TYPE: ${{ inputs.repository-type }}
           TAG: ${{ needs.validate.outputs.tag }}
@@ -1138,6 +1197,43 @@ jobs:
             [[ "$(shasum -a 256 "$name" | awk '{print $1}')" == "$digest" ]]
           done < <(jq -r '.payloads[] | [.name,.size,.sha256] | @tsv' ASSET-INVENTORY.json)
 
+          if [[ -n "$HOMEBREW_FORMULA" ]]; then
+            for target in darwin_amd64 darwin_arm64 linux_amd64 linux_arm64; do
+              [[ "$(jq --arg target "$target" '[.payloads[] | select(.target == $target)] | length' ASSET-INVENTORY.json)" == 1 ]] || {
+                echo "verified inventory does not contain exactly one $target archive" >&2
+                exit 1
+              }
+            done
+            while IFS=$'\t' read -r archive target; do
+              target_extract="$RUNNER_TEMP/verify-target-$target"
+              rm -rf "$target_extract"
+              mkdir -p "$target_extract"
+              tar -xzf "$archive" -C "$target_extract"
+              target_matches=0
+              while IFS= read -r -d '' candidate; do
+                description=$(file "$candidate")
+                case "$target" in
+                  darwin_amd64)
+                    [[ "$description" == *Mach-O* && " $(lipo -archs "$candidate") " == *' x86_64 '* ]] && target_matches=$((target_matches + 1))
+                    ;;
+                  darwin_arm64)
+                    [[ "$description" == *Mach-O* && " $(lipo -archs "$candidate") " == *' arm64 '* ]] && target_matches=$((target_matches + 1))
+                    ;;
+                  linux_amd64)
+                    [[ "$description" == *ELF* && "$description" == *x86-64* ]] && target_matches=$((target_matches + 1))
+                    ;;
+                  linux_arm64)
+                    [[ "$description" == *ELF* && ( "$description" == *aarch64* || "$description" == *arm64* ) ]] && target_matches=$((target_matches + 1))
+                    ;;
+                esac
+              done < <(find "$target_extract" -type f -perm -111 -print0)
+              (( target_matches > 0 )) || {
+                echo "inventory target $target does not match archive contents: $archive" >&2
+                exit 1
+              }
+            done < <(jq -r '.payloads[] | select(.target == "darwin_amd64" or .target == "darwin_arm64" or .target == "linux_amd64" or .target == "linux_arm64") | [.name,.target] | @tsv' ASSET-INVENTORY.json)
+          fi
+
           if [[ "$REPOSITORY_TYPE" == openclaw ]]; then
             team_id=FWJYW4S8P8
             authority="Developer ID Application: OpenClaw Foundation ($team_id)"
@@ -1218,13 +1314,14 @@ jobs:
             --arg tag "$TAG" \
             --arg commit "$TARGET_SHA" \
             --arg architecture "$EXPECTED_ARCH" \
+            --rawfile assetInventory ASSET-INVENTORY.json \
             --rawfile releaseNotes RELEASE-NOTES.md \
             --rawfile sha256sums SHA256SUMS \
-            '{schemaVersion:1,repository:$repository,runId:$runId,verifierRunAttempt:$verifierRunAttempt,payloadArtifact:$payloadArtifact,tag:$tag,commit:$commit,architecture:$architecture,verdict:"verified",releaseNotes:$releaseNotes,sha256sums:$sha256sums}' \
+            '{schemaVersion:1,repository:$repository,runId:$runId,verifierRunAttempt:$verifierRunAttempt,payloadArtifact:$payloadArtifact,tag:$tag,commit:$commit,architecture:$architecture,verdict:"verified",assetInventory:$assetInventory,releaseNotes:$releaseNotes,sha256sums:$sha256sums}' \
             >"$RUNNER_TEMP/verified-inventory-attestation.json"
 
       - name: Upload verified inventory attestation
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: verified-inventory-${{ matrix.arch }}-${{ needs.draft.outputs.verification-artifact-name }}
           path: ${{ runner.temp }}/verified-inventory-attestation.json
@@ -1243,12 +1340,12 @@ jobs:
       release-url: ${{ steps.publish.outputs.release-url }}
     steps:
       - name: Download arm64 verified inventory attestation
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
           name: verified-inventory-arm64-${{ needs.draft.outputs.verification-artifact-name }}
           path: verified-inventory-attestations/arm64
       - name: Download x86_64 verified inventory attestation
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
           name: verified-inventory-x86_64-${{ needs.draft.outputs.verification-artifact-name }}
           path: verified-inventory-attestations/x86_64
@@ -1289,9 +1386,10 @@ jobs:
                   throw new Error(`${architecture} attestation ${field} mismatch: observed ${JSON.stringify(attestation[field])}, expected ${JSON.stringify(value)}`);
                 }
               }
-              if (attestation.schemaVersion !== 1 || typeof attestation.releaseNotes !== 'string' ||
+              if (attestation.schemaVersion !== 1 || typeof attestation.assetInventory !== 'string' ||
+                  attestation.assetInventory.length === 0 || typeof attestation.releaseNotes !== 'string' ||
                   attestation.releaseNotes.length === 0 || typeof attestation.sha256sums !== 'string') {
-                throw new Error(`${architecture} attestation schema, release notes, or SHA256SUMS is invalid`);
+                throw new Error(`${architecture} attestation schema, asset inventory, release notes, or SHA256SUMS is invalid`);
               }
               return [architecture, attestation];
             }));
@@ -1301,8 +1399,12 @@ jobs:
             if (attestations.arm64.releaseNotes !== attestations.x86_64.releaseNotes) {
               throw new Error('verified release notes differ between arm64 and x86_64 attestations');
             }
+            if (attestations.arm64.assetInventory !== attestations.x86_64.assetInventory) {
+              throw new Error('verified asset inventory differs between arm64 and x86_64 attestations');
+            }
 
             const verifiedSha256sums = attestations.arm64.sha256sums;
+            const verifiedAssetInventory = attestations.arm64.assetInventory;
             const verifiedReleaseNotes = attestations.arm64.releaseNotes;
             if (!verifiedSha256sums.endsWith('\n')) {
               throw new Error('verified SHA256SUMS must end with exactly one complete checksum line');
@@ -1365,6 +1467,10 @@ jobs:
                 !downloaded.get('RELEASE-NOTES.md').equals(Buffer.from(verifiedReleaseNotes, 'utf8'))) {
               throw new Error('draft RELEASE-NOTES.md bytes differ from verified attestation');
             }
+            if (!downloaded.has('ASSET-INVENTORY.json') ||
+                !downloaded.get('ASSET-INVENTORY.json').equals(Buffer.from(verifiedAssetInventory, 'utf8'))) {
+              throw new Error('draft ASSET-INVENTORY.json bytes differ from verified attestation');
+            }
 
             const ref = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
             if (ref.data.object.type !== 'tag') {
@@ -1406,12 +1512,12 @@ jobs:
       actions: read
     steps:
       - name: Download arm64 verification attestation
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
           name: verified-inventory-arm64-${{ needs.draft.outputs.verification-artifact-name }}
           path: verified-inventory-attestations/arm64
       - name: Download x86_64 verification attestation
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
           name: verified-inventory-x86_64-${{ needs.draft.outputs.verification-artifact-name }}
           path: verified-inventory-attestations/x86_64
@@ -1454,13 +1560,17 @@ jobs:
                   throw new Error(`${architecture} attestation ${field} mismatch`);
                 }
               }
-              if (attestation.schemaVersion !== 1 || typeof attestation.sha256sums !== 'string') {
-                throw new Error(`${architecture} attestation schema or SHA256SUMS is invalid`);
+              if (attestation.schemaVersion !== 1 || typeof attestation.assetInventory !== 'string' ||
+                  typeof attestation.sha256sums !== 'string') {
+                throw new Error(`${architecture} attestation schema, asset inventory, or SHA256SUMS is invalid`);
               }
               return [architecture, attestation];
             }));
             if (attestations.arm64.sha256sums !== attestations.x86_64.sha256sums) {
               throw new Error('verified SHA256SUMS differs between arm64 and x86_64 attestations');
+            }
+            if (attestations.arm64.assetInventory !== attestations.x86_64.assetInventory) {
+              throw new Error('verified asset inventory differs between arm64 and x86_64 attestations');
             }
 
             const expectedDigests = new Map();
@@ -1473,6 +1583,56 @@ jobs:
               expectedDigests.set(name, digest);
             }
             if (expectedDigests.size === 0) throw new Error('verified SHA256SUMS is empty');
+
+            let assetInventory;
+            try {
+              assetInventory = JSON.parse(attestations.arm64.assetInventory);
+            } catch (error) {
+              throw new Error(`verified ASSET-INVENTORY.json is invalid JSON: ${error.message}`);
+            }
+            if (assetInventory.schemaVersion !== 1 || assetInventory.repository !== repository ||
+                assetInventory.tag !== process.env.TAG || assetInventory.commit !== process.env.TARGET_SHA ||
+                !Array.isArray(assetInventory.payloads)) {
+              throw new Error('verified ASSET-INVENTORY.json identity or schema mismatch');
+            }
+            const inventoryNames = new Set();
+            const homebrewAssets = {};
+            const homebrewTargets = new Set(['darwin_amd64', 'darwin_arm64', 'linux_amd64', 'linux_arm64']);
+            const permittedTargets = new Set([...homebrewTargets, 'darwin_universal', 'windows_amd64', 'windows_arm64']);
+            for (const payload of assetInventory.payloads) {
+              if (!payload || typeof payload.name !== 'string' || !Number.isSafeInteger(payload.size) || payload.size < 0 ||
+                  typeof payload.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(payload.sha256) ||
+                  payload.name.includes('/') || payload.name.includes('\\') || inventoryNames.has(payload.name)) {
+                throw new Error('verified ASSET-INVENTORY.json contains an unsafe or duplicate payload');
+              }
+              inventoryNames.add(payload.name);
+              if (expectedDigests.get(payload.name) !== payload.sha256) {
+                throw new Error(`verified inventory/checksum mismatch for ${payload.name}`);
+              }
+              if (payload.target !== undefined) {
+                if (typeof payload.target !== 'string' || !permittedTargets.has(payload.target)) {
+                  throw new Error(`verified inventory has invalid target for ${payload.name}`);
+                }
+                if (homebrewTargets.has(payload.target)) {
+                  if (homebrewAssets[payload.target]) {
+                    throw new Error(`verified inventory has duplicate ${payload.target} assets`);
+                  }
+                  if (!/^[A-Za-z0-9][A-Za-z0-9+@._-]*\.tar\.gz$/.test(payload.name)) {
+                    throw new Error(`verified ${payload.target} asset has an unsafe filename`);
+                  }
+                  homebrewAssets[payload.target] = { name: payload.name, sha256: payload.sha256 };
+                }
+              }
+            }
+            const expectedInventoryNames = [...expectedDigests.keys()].filter((name) => name !== 'ASSET-INVENTORY.json').sort();
+            if (JSON.stringify([...inventoryNames].sort()) !== JSON.stringify(expectedInventoryNames)) {
+              throw new Error('verified inventory payload names differ from SHA256SUMS');
+            }
+            const missingHomebrewTargets = [...homebrewTargets].filter((target) => !homebrewAssets[target]);
+            if (missingHomebrewTargets.length > 0) {
+              throw new Error(`verified inventory lacks Homebrew assets: ${missingHomebrewTargets.join(', ')}`);
+            }
+            const homebrewAssetsJson = JSON.stringify(homebrewAssets);
 
             const [owner, repo] = process.env.HOMEBREW_TAP.split('/');
             const workflowId = 'update-formula.yml';
@@ -1523,6 +1683,7 @@ jobs:
                 formula: process.env.FORMULA,
                 tag: process.env.TAG,
                 repository,
+                assets: homebrewAssetsJson,
               },
             });
 

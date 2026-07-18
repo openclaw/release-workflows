@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.0.0-alpha.13 - 2026-07-18
+
+- Bind Homebrew handoff to GoReleaser target metadata in the independently verified asset inventory, dispatch exact per-platform filenames and SHA-256 values, require tap-side download re-hashing, and update artifact actions to Node 24 releases.
+
 ## v1.0.0-alpha.12 - 2026-07-18
 
 - Decouple Homebrew tap selection from signing identity, use the live three-field dispatcher contract, wait for its newly observed run, and require parser-validated formula release-asset hashes to match both verifier attestations.

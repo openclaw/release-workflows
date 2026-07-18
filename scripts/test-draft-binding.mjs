@@ -56,8 +56,9 @@ function replaceChecksum(sha256sums, name, data) {
 }
 
 function baseFixture() {
+  const assetInventory = '{"schemaVersion":1,"repository":"openclaw/fixture"}\n';
   const payloads = new Map([
-    ['ASSET-INVENTORY.json', Buffer.from('{"schemaVersion":1}\n')],
+    ['ASSET-INVENTORY.json', Buffer.from(assetInventory)],
     ['RELEASE-NOTES.md', Buffer.from(releaseNotes)],
     ['SIGNING-MANIFEST.json', Buffer.from('{"binaries":[]}\n')],
     ['fixture.tar.gz', Buffer.from('signed-notarized-binary-payload')],
@@ -78,6 +79,7 @@ function baseFixture() {
     commit: targetSha,
     architecture,
     verdict: 'verified',
+    assetInventory,
     releaseNotes,
     sha256sums,
   }]));
@@ -204,6 +206,13 @@ const tests = [
     assert.match(result.thrown?.message, /release notes differ between arm64 and x86_64/);
     assert.equal(result.updateCalls, 0);
   }],
+  ['architecture asset-inventory disagreement fails closed', async () => {
+    const result = await runScenario(({ attestations }) => {
+      attestations.x86_64.assetInventory = '{"schemaVersion":1,"repository":"other/fixture"}\n';
+    });
+    assert.match(result.thrown?.message, /asset inventory differs between arm64 and x86_64/);
+    assert.equal(result.updateCalls, 0);
+  }],
   ['draft notes must equal attested body even with consistent checksums', async () => {
     const result = await runScenario(({ attestations, draftAssets }) => {
       const changedNotes = Buffer.from(`${releaseNotes}- draft-only addition\n`);
@@ -221,6 +230,18 @@ const tests = [
       attestations.x86_64.sha256sums = attestations.x86_64.sha256sums.replace(/[0-9a-f]/, 'f');
     });
     assert.match(result.thrown?.message, /differs between arm64 and x86_64/);
+    assert.equal(result.updateCalls, 0);
+  }],
+  ['draft inventory must equal attested bytes even with consistent checksums', async () => {
+    const result = await runScenario(({ attestations, draftAssets }) => {
+      const changedInventory = Buffer.from('{"schemaVersion":1,"repository":"other/fixture"}\n');
+      draftAssets.set('ASSET-INVENTORY.json', changedInventory);
+      const changedChecksums = replaceChecksum(attestations.arm64.sha256sums, 'ASSET-INVENTORY.json', changedInventory);
+      draftAssets.set('SHA256SUMS', Buffer.from(changedChecksums));
+      attestations.arm64.sha256sums = changedChecksums;
+      attestations.x86_64.sha256sums = changedChecksums;
+    });
+    assert.match(result.thrown?.message, /ASSET-INVENTORY\.json bytes differ from verified attestation/);
     assert.equal(result.updateCalls, 0);
   }],
   ['non-verified verdict fails closed', async () => {
