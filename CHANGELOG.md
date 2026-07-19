@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1.1 - 2026-07-18
+
+- Accept the live taps' closed, static `Hardware::CPU.arm?`/`intel?` platform branches, including the 64-bit qualifier, while continuing to reject dynamic Ruby evaluation.
+
 ## v1.1.0 - 2026-07-18
 
 - Add auto-detected, overrideable nFPM `.deb`/`.rpm` assets with verifier-bound package metadata and checksums, plus an opt-in `macos-15` GoReleaser build host for native Darwin/CGO projects.

@@ -2077,12 +2077,27 @@ jobs:
                   node[1] || []
                 end
 
-                def cpu_arm_condition?(node)
-                  return false unless node.is_a?(Array) && node[0] == :call && token_name(node[3], :@ident) == "arm?"
+                def cpu_predicate(node)
+                  return nil unless node.is_a?(Array) && node[0] == :call
+                  return nil unless token_name(node[2], :@period) == "."
                   receiver = node[1]
-                  receiver.is_a?(Array) && receiver[0] == :const_path_ref &&
+                  return nil unless receiver.is_a?(Array) && receiver[0] == :const_path_ref &&
                     receiver[1].is_a?(Array) && receiver[1][0] == :var_ref && token_name(receiver[1][1], :@const) == "Hardware" &&
                     token_name(receiver[2], :@const) == "CPU"
+                  predicate = token_name(node[3], :@ident)
+                  %w[arm? intel? is_64_bit?].include?(predicate) ? predicate : nil
+                end
+
+                def static_cpu_architecture(node)
+                  predicate = cpu_predicate(node)
+                  return "arm64" if predicate == "arm?"
+                  return "amd64" if predicate == "intel?"
+                  return nil unless node.is_a?(Array) && node[0] == :binary && node[2] == :"&&"
+                  predicates = [cpu_predicate(node[1]), cpu_predicate(node[3])]
+                  return nil unless predicates.count("is_64_bit?") == 1
+                  return "arm64" if predicates.count("arm?") == 1
+                  return "amd64" if predicates.count("intel?") == 1
+                  nil
                 end
 
                 def build_head_condition?(node)
@@ -2102,20 +2117,26 @@ jobs:
                   [{ "url" => url, "sha256" => sha }, index + 2]
                 end
 
-                def validate_fetch_statements(statements, fetches)
+                def validate_fetch_statements(statements, fetches, platform, target = nil)
                   index = 0
                   while index < statements.length
                     if (pair = fetch_pair(statements, index))
+                      fail_grammar("platform fetches require a CPU branch") if target.nil?
+                      pair[0]["target"] = target unless target.nil?
                       fetches << pair[0]
                       index = pair[1]
                       next
                     end
                     statement = statements[index]
-                    if statement.is_a?(Array) && statement[0] == :if && cpu_arm_condition?(statement[1])
+                    if statement.is_a?(Array) && statement[0] == :if
+                      fail_grammar("nested CPU branches are not allowed") unless target.nil?
+                      architecture = static_cpu_architecture(statement[1])
+                      fail_grammar("CPU branch condition is not a whitelisted static Hardware::CPU predicate") if architecture.nil?
                       alternate = statement[3]
                       fail_grammar("CPU branch requires else") unless alternate.is_a?(Array) && alternate[0] == :else
-                      validate_fetch_statements(statement[2] || [], fetches)
-                      validate_fetch_statements(alternate[1] || [], fetches)
+                      alternate_architecture = architecture == "arm64" ? "amd64" : "arm64"
+                      validate_fetch_statements(statement[2] || [], fetches, platform, "#{platform}_#{architecture}")
+                      validate_fetch_statements(alternate[1] || [], fetches, platform, "#{platform}_#{alternate_architecture}")
                       index += 1
                       next
                     end
@@ -2156,9 +2177,7 @@ jobs:
                 index = 0
                 while index < statements.length
                   if (pair = fetch_pair(statements, index))
-                    fetches << pair[0]
-                    index = pair[1]
-                    next
+                    fail_grammar("stable fetches must be inside a platform CPU branch")
                   end
                   statement = statements[index]
                   command = command_parts(statement)
@@ -2174,10 +2193,11 @@ jobs:
                     fail_grammar("only static depends_on may use build.head?") unless dependency&.first == "depends_on" && dependency[1].all? { |argument| static_literal?(argument) }
                   elsif statement.is_a?(Array) && statement[0] == :method_add_block &&
                         %w[on_macos on_linux].any? { |name| zero_arg_fcall?(statement[1], name) }
+                    platform = zero_arg_fcall?(statement[1], "on_macos") ? "darwin" : "linux"
                     block = statement[2]
                     nested = block.is_a?(Array) && block[0] == :do_block && block[1].nil? ? clean_bodystmt(block[2]) : nil
                     fail_grammar("platform block must be a plain do block") if nested.nil?
-                    validate_fetch_statements(nested, fetches)
+                    validate_fetch_statements(nested, fetches, platform)
                   elsif statement.is_a?(Array) && statement[0] == :def
                     method_name = token_name(statement[1], :@ident)
                     fail_grammar("only install and caveats methods are allowed") unless %w[install caveats].include?(method_name)
@@ -2248,9 +2268,16 @@ jobs:
                 seenAssets.add(asset);
                 const expectedDigest = expectedDigests.get(asset);
                 if (!expectedDigest) return { ok: false, reason: `formula asset ${asset} is absent from verified SHA256SUMS` };
+                if (binding.target !== undefined && homebrewAssets[binding.target]?.name !== asset) {
+                  return { ok: false, reason: `formula ${binding.target} branch selects ${asset}` };
+                }
                 if (binding.sha256.toLowerCase() !== expectedDigest) {
                   return { ok: false, reason: `formula sha256 mismatch for ${asset}` };
                 }
+              }
+              const requiredFormulaAssets = Object.values(homebrewAssets).map((asset) => asset.name).sort();
+              if (JSON.stringify([...seenAssets].sort()) !== JSON.stringify(requiredFormulaAssets)) {
+                return { ok: false, reason: 'formula assets do not exactly cover all verified Homebrew targets' };
               }
               return { ok: true, assets: [...seenAssets].sort() };
             };

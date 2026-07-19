@@ -75,6 +75,14 @@ const assetInventory = `${JSON.stringify({
     ...Object.fromEntries(Object.entries(targetNames).filter(([, targetName]) => targetName === name).map(([target]) => ['target', target])),
   })),
 }, null, 2)}\n`;
+const defaultHandoffFixture = {
+  assetInventory,
+  repository,
+  sha256sums,
+  tag,
+  targetSha,
+  verificationPayloadArtifact,
+};
 const dispatchedAssets = Object.fromEntries(Object.entries(targetNames).map(([target, name]) => [target, {
   name,
   sha256: digest(artifactData.get(name)),
@@ -115,15 +123,26 @@ function resolveInputs({
 }
 
 function formulaFor(overrides = {}) {
-  const bindings = [...artifactData].map(([name, data]) => {
-    const observed = overrides[name] ?? digest(data);
-    return `  url "https://github.com/${repository}/releases/download/${tag}/${name}"\n  sha256 "${observed}"`;
-  });
-  return `class Spogo < Formula\n${bindings.join('\n')}\nend\n`;
+  return platformMatrixFormula('arm?', overrides);
 }
 
-function platformMatrixFormula() {
-  const sha = (name) => digest(artifactData.get(name));
+function platformMatrixFormula(cpuPredicate = 'arm?', overrides = {}) {
+  assert.ok(['arm?', 'intel?'].includes(cpuPredicate));
+  const sha = (name) => overrides[name] ?? digest(artifactData.get(name));
+  const primary = cpuPredicate === 'arm?' ? {
+    darwin: targetNames.darwin_arm64,
+    linux: targetNames.linux_arm64,
+  } : {
+    darwin: targetNames.darwin_amd64,
+    linux: targetNames.linux_amd64,
+  };
+  const alternate = cpuPredicate === 'arm?' ? {
+    darwin: targetNames.darwin_amd64,
+    linux: targetNames.linux_amd64,
+  } : {
+    darwin: targetNames.darwin_arm64,
+    linux: targetNames.linux_arm64,
+  };
   return `class Spogo < Formula
   desc "Fixture"
   homepage "https://github.com/${repository}"
@@ -132,22 +151,22 @@ function platformMatrixFormula() {
   head "https://github.com/${repository}.git", branch: "main"
 
   on_macos do
-    if Hardware::CPU.arm?
-      url "https://github.com/${repository}/releases/download/${tag}/${targetNames.darwin_arm64}"
-      sha256 "${sha(targetNames.darwin_arm64)}"
+    if Hardware::CPU.${cpuPredicate}
+      url "https://github.com/${repository}/releases/download/${tag}/${primary.darwin}"
+      sha256 "${sha(primary.darwin)}"
     else
-      url "https://github.com/${repository}/releases/download/${tag}/${targetNames.darwin_amd64}"
-      sha256 "${sha(targetNames.darwin_amd64)}"
+      url "https://github.com/${repository}/releases/download/${tag}/${alternate.darwin}"
+      sha256 "${sha(alternate.darwin)}"
     end
   end
 
   on_linux do
-    if Hardware::CPU.arm?
-      url "https://github.com/${repository}/releases/download/${tag}/${targetNames.linux_arm64}"
-      sha256 "${sha(targetNames.linux_arm64)}"
+    if Hardware::CPU.${cpuPredicate} && Hardware::CPU.is_64_bit?
+      url "https://github.com/${repository}/releases/download/${tag}/${primary.linux}"
+      sha256 "${sha(primary.linux)}"
     else
-      url "https://github.com/${repository}/releases/download/${tag}/${targetNames.linux_amd64}"
-      sha256 "${sha(targetNames.linux_amd64)}"
+      url "https://github.com/${repository}/releases/download/${tag}/${alternate.linux}"
+      sha256 "${sha(alternate.linux)}"
     end
   end
 
@@ -164,25 +183,161 @@ end
 `;
 }
 
-function baseAttestations() {
+function liveTapFixture(sourceRepository, sourceTag, assets) {
+  const payloads = Object.entries(assets).map(([target, asset]) => ({
+    name: asset.name,
+    size: 1,
+    sha256: asset.sha256,
+    target,
+  }));
+  return {
+    assetInventory: `${JSON.stringify({
+      schemaVersion: 1,
+      repository: sourceRepository,
+      tag: sourceTag,
+      commit: targetSha,
+      payloads,
+    }, null, 2)}\n`,
+    repository: sourceRepository,
+    sha256sums: payloads
+      .toSorted((left, right) => left.name.localeCompare(right.name))
+      .map((payload) => `${payload.sha256}  ${payload.name}\n`)
+      .join(''),
+    tag: sourceTag,
+    targetSha,
+    verificationPayloadArtifact,
+  };
+}
+
+const slacrawlFixture = liveTapFixture('openclaw/slacrawl', 'v0.7.8', {
+  darwin_arm64: {
+    name: 'slacrawl_0.7.8_darwin_arm64.tar.gz',
+    sha256: 'ce97a384d57c65664ef108f0b14042a153c1c23b3bf82c7b0e8ccc6f24906329',
+  },
+  darwin_amd64: {
+    name: 'slacrawl_0.7.8_darwin_amd64.tar.gz',
+    sha256: 'be2948b468d49e95a4d5201dc26070cbd67ce2dacd8f8d28cd055a4593e90672',
+  },
+  linux_arm64: {
+    name: 'slacrawl_0.7.8_linux_arm64.tar.gz',
+    sha256: 'b5223c348ae6fa8b4dac144366c8766a4e0bc52c7491468400701c7a56da0436',
+  },
+  linux_amd64: {
+    name: 'slacrawl_0.7.8_linux_amd64.tar.gz',
+    sha256: '1ad5b0e960b345e42c69b8cbdb9c65d7fce871c57c6c456d91fc0e21090f0f3c',
+  },
+});
+const slacrawlFormula = String.raw`class Slacrawl < Formula
+  desc "Go-based CLI for mirroring Slack workspace data into local SQLite"
+  homepage "https://github.com/openclaw/slacrawl"
+  version "0.7.8"
+  license "MIT"
+
+  on_macos do
+    if Hardware::CPU.arm?
+      url "https://github.com/openclaw/slacrawl/releases/download/v0.7.8/slacrawl_0.7.8_darwin_arm64.tar.gz"
+      sha256 "ce97a384d57c65664ef108f0b14042a153c1c23b3bf82c7b0e8ccc6f24906329"
+    else
+      url "https://github.com/openclaw/slacrawl/releases/download/v0.7.8/slacrawl_0.7.8_darwin_amd64.tar.gz"
+      sha256 "be2948b468d49e95a4d5201dc26070cbd67ce2dacd8f8d28cd055a4593e90672"
+    end
+  end
+
+  on_linux do
+    if Hardware::CPU.arm? && Hardware::CPU.is_64_bit?
+      url "https://github.com/openclaw/slacrawl/releases/download/v0.7.8/slacrawl_0.7.8_linux_arm64.tar.gz"
+      sha256 "b5223c348ae6fa8b4dac144366c8766a4e0bc52c7491468400701c7a56da0436"
+    else
+      url "https://github.com/openclaw/slacrawl/releases/download/v0.7.8/slacrawl_0.7.8_linux_amd64.tar.gz"
+      sha256 "1ad5b0e960b345e42c69b8cbdb9c65d7fce871c57c6c456d91fc0e21090f0f3c"
+    end
+  end
+
+  def install
+    bin.install "slacrawl"
+  end
+
+  test do
+    assert_match "Usage of slacrawl:", shell_output("#{bin}/slacrawl --help")
+  end
+end
+`;
+
+const graincrawlFixture = liveTapFixture('openclaw/graincrawl', 'v0.3.3', {
+  darwin_arm64: {
+    name: 'graincrawl_0.3.3_darwin_arm64.tar.gz',
+    sha256: '7936437622e6e9a1fa0da2e53ae88c76c5d3b1f4f461466616f28319d2fa3cf2',
+  },
+  darwin_amd64: {
+    name: 'graincrawl_0.3.3_darwin_amd64.tar.gz',
+    sha256: '7f21bc167c2e8fc26693c872ea7438d2a121b623d12fbff55c2bab39675e7912',
+  },
+  linux_arm64: {
+    name: 'graincrawl_0.3.3_linux_arm64.tar.gz',
+    sha256: '1d9ef648c317616f5e85d112a409d444baca07862aeb3d4c9f2fa64346d2ed04',
+  },
+  linux_amd64: {
+    name: 'graincrawl_0.3.3_linux_amd64.tar.gz',
+    sha256: '091405e9d56767e7f558254f8dde77b1bcbe90cbc8d0be260c28e4bb92b6a1f3',
+  },
+});
+const graincrawlFormula = String.raw`class Graincrawl < Formula
+  desc "Local-first Granola crawler into SQLite and Markdown"
+  homepage "https://github.com/openclaw/graincrawl"
+  version "0.3.3"
+  license "MIT"
+
+  on_macos do
+    if Hardware::CPU.arm?
+      url "https://github.com/openclaw/graincrawl/releases/download/v0.3.3/graincrawl_0.3.3_darwin_arm64.tar.gz"
+      sha256 "7936437622e6e9a1fa0da2e53ae88c76c5d3b1f4f461466616f28319d2fa3cf2"
+    else
+      url "https://github.com/openclaw/graincrawl/releases/download/v0.3.3/graincrawl_0.3.3_darwin_amd64.tar.gz"
+      sha256 "7f21bc167c2e8fc26693c872ea7438d2a121b623d12fbff55c2bab39675e7912"
+    end
+  end
+
+  on_linux do
+    if Hardware::CPU.arm? && Hardware::CPU.is_64_bit?
+      url "https://github.com/openclaw/graincrawl/releases/download/v0.3.3/graincrawl_0.3.3_linux_arm64.tar.gz"
+      sha256 "1d9ef648c317616f5e85d112a409d444baca07862aeb3d4c9f2fa64346d2ed04"
+    else
+      url "https://github.com/openclaw/graincrawl/releases/download/v0.3.3/graincrawl_0.3.3_linux_amd64.tar.gz"
+      sha256 "091405e9d56767e7f558254f8dde77b1bcbe90cbc8d0be260c28e4bb92b6a1f3"
+    end
+  end
+
+  def install
+    bin.install "graincrawl"
+  end
+
+  test do
+    assert_match "\"version\"", shell_output("#{bin}/graincrawl --json version")
+  end
+end
+`;
+
+function baseAttestations(fixture = defaultHandoffFixture) {
   return Object.fromEntries(['arm64', 'x86_64'].map((architecture) => [architecture, {
     schemaVersion: 1,
-    repository,
+    repository: fixture.repository,
     runId,
     verifierRunAttempt: runAttempt,
-    payloadArtifact: verificationPayloadArtifact,
-    tag,
-    commit: targetSha,
+    payloadArtifact: fixture.verificationPayloadArtifact,
+    tag: fixture.tag,
+    commit: fixture.targetSha,
     architecture,
     verdict: 'verified',
-    assetInventory,
-    releaseNotes: '## v1.2.3 - 2026-07-18\n',
-    sha256sums,
+    assetInventory: fixture.assetInventory,
+    releaseNotes: `## ${fixture.tag} - 2026-07-18\n`,
+    sha256sums: fixture.sha256sums,
   }]));
 }
 
 async function runHandoff({
   additionalMatchingRun = false,
+  fixture = defaultHandoffFixture,
+  formulaName = 'spogo',
   formulas = [formulaFor()],
   homebrewTap = 'steipete/homebrew-tap',
   mutateAttestations = () => {},
@@ -195,7 +350,7 @@ async function runHandoff({
 } = {}) {
   const fixtureRoot = mkdtempSync(join(tmpdir(), 'release-homebrew-handoff-'));
   const originalCwd = process.cwd();
-  const attestations = baseAttestations();
+  const attestations = baseAttestations(fixture);
   mutateAttestations(attestations);
   for (const architecture of ['arm64', 'x86_64']) {
     const directory = join(fixtureRoot, 'verified-inventory-attestations', architecture);
@@ -215,7 +370,7 @@ async function runHandoff({
   let tapRun = {
     actor: { login: 'steipete' },
     conclusion: runStartsQueued ? null : runConclusion,
-    display_title: `Update spogo for ${tag}`,
+    display_title: `Update ${formulaName} for ${fixture.tag}`,
     html_url: 'https://example.test/tap-run/42',
     id: 42,
     status: runStartsQueued ? 'queued' : 'completed',
@@ -266,7 +421,8 @@ async function runHandoff({
       },
     },
   };
-  const context = { repo: { owner: 'openclaw', repo: 'spogo' }, runId };
+  const [sourceOwner, sourceRepo] = fixture.repository.split('/');
+  const context = { repo: { owner: sourceOwner, repo: sourceRepo }, runId };
   const core = {
     info: (message) => info.push(message),
     setFailed: (message) => failures.push(message),
@@ -276,16 +432,16 @@ async function runHandoff({
     process.chdir(fixtureRoot);
     await executeHandoff(github, context, core, {
       env: {
-        FORMULA: 'spogo',
+        FORMULA: formulaName,
         HOMEBREW_POLL_INTERVAL_MS: '0',
         HOMEBREW_POLL_TIMEOUT_MS: formulas.length > 1 || runStartsQueued ? '5000' : '0',
         HOMEBREW_TAP: homebrewTap,
         PATH: process.env.PATH,
         SOURCE_DEFAULT_BRANCH: 'main',
-        TAG: tag,
+        TAG: fixture.tag,
         TAP_TOKEN_PRESENT: String(tapTokenPresent),
-        TARGET_SHA: targetSha,
-        VERIFICATION_PAYLOAD_ARTIFACT: verificationPayloadArtifact,
+        TARGET_SHA: fixture.targetSha,
+        VERIFICATION_PAYLOAD_ARTIFACT: fixture.verificationPayloadArtifact,
       },
     }, require);
   } catch (error) {
@@ -402,10 +558,7 @@ for (const [name, fixture, expectedError] of [
 }
 
 {
-  const withHead = formulaFor().replace(
-    'class Spogo < Formula\n',
-    `class Spogo < Formula\n  head "https://github.com/${repository}.git", branch: "main"\n`,
-  );
+  const withHead = formulaFor();
   const result = await runHandoff({ formulas: [withHead] });
   assert.equal(result.thrown, undefined);
   console.log('PASS exact source-repository head is accepted');
@@ -414,7 +567,103 @@ for (const [name, fixture, expectedError] of [
 {
   const result = await runHandoff({ formulas: [platformMatrixFormula()] });
   assert.equal(result.thrown, undefined);
-  console.log('PASS live platform-matrix grammar is accepted');
+  console.log('PASS static arm and arm-plus-64-bit platform grammar is accepted');
+}
+
+{
+  const intelFormula = platformMatrixFormula('intel?');
+  const result = await runHandoff({ formulas: [intelFormula] });
+  assert.equal(result.thrown, undefined);
+  console.log('PASS static intel and intel-plus-64-bit platform grammar is accepted');
+}
+
+{
+  const inverted = platformMatrixFormula().replaceAll('Hardware::CPU.arm?', 'Hardware::CPU.intel?');
+  const result = await runHandoff({ formulas: [inverted] });
+  assert.match(result.thrown?.message, /timed out.*branch selects/);
+  console.log('PASS architecture-inverted static branches fail closed');
+}
+
+for (const [formulaName, fixture, formula] of [
+  ['slacrawl', slacrawlFixture, slacrawlFormula],
+  ['graincrawl', graincrawlFixture, graincrawlFormula],
+]) {
+  const result = await runHandoff({
+    fixture,
+    formulaName,
+    formulas: [formula],
+    homebrewTap: 'openclaw/homebrew-tap',
+  });
+  assert.equal(result.thrown, undefined);
+  assert.equal(result.dispatches.length, 1);
+  console.log(`PASS live ${formulaName} formula fixture is accepted`);
+}
+
+for (const [name, formula] of [
+  [
+    'non-whitelisted CPU predicate fails closed',
+    platformMatrixFormula().replace('Hardware::CPU.arm?', 'Hardware::CPU.arm64?'),
+  ],
+  [
+    'alternate CPU receiver fails closed',
+    platformMatrixFormula().replace('Hardware::CPU.arm?', 'Attacker::CPU.arm?'),
+  ],
+  [
+    'CPU predicate arguments fail closed',
+    platformMatrixFormula().replace('Hardware::CPU.arm?', 'Hardware::CPU.arm?(ENV["ARCH"])'),
+  ],
+  [
+    'dynamic boolean CPU branch fails closed',
+    platformMatrixFormula().replace(
+      'Hardware::CPU.arm? && Hardware::CPU.is_64_bit?',
+      'Hardware::CPU.arm? || Kernel.system("false")',
+    ),
+  ],
+  [
+    'negated CPU predicate fails closed',
+    platformMatrixFormula().replace('Hardware::CPU.arm?', '!Hardware::CPU.arm?'),
+  ],
+]) {
+  const result = await runHandoff({ formulas: [formula] });
+  assert.match(result.thrown?.message, /timed out.*violates closed load-time grammar/);
+  console.log(`PASS ${name}`);
+}
+
+{
+  const name = targetNames.darwin_arm64;
+  const rootFetch = `class Spogo < Formula
+  url "https://github.com/${repository}/releases/download/${tag}/${name}"
+  sha256 "${digest(artifactData.get(name))}"
+end
+`;
+  const result = await runHandoff({ formulas: [rootFetch] });
+  assert.match(result.thrown?.message, /timed out.*violates closed load-time grammar/);
+  console.log('PASS class-root stable fetch fails closed');
+}
+
+{
+  const sha = (name) => digest(artifactData.get(name));
+  const unbranched = `class Spogo < Formula
+  on_macos do
+    url "https://github.com/${repository}/releases/download/${tag}/${targetNames.darwin_arm64}"
+    sha256 "${sha(targetNames.darwin_arm64)}"
+    url "https://github.com/${repository}/releases/download/${tag}/${targetNames.darwin_amd64}"
+    sha256 "${sha(targetNames.darwin_amd64)}"
+  end
+  on_linux do
+    if Hardware::CPU.arm? && Hardware::CPU.is_64_bit?
+      url "https://github.com/${repository}/releases/download/${tag}/${targetNames.linux_arm64}"
+      sha256 "${sha(targetNames.linux_arm64)}"
+    else
+      url "https://github.com/${repository}/releases/download/${tag}/${targetNames.linux_amd64}"
+      sha256 "${sha(targetNames.linux_amd64)}"
+    end
+  end
+end
+`;
+  const result = await runHandoff({ formulas: [unbranched] });
+  assert.match(result.thrown?.message, /timed out.*violates closed load-time grammar/);
+  console.log('PASS unbranched platform fetch pairs fail closed');
 }
 
 {
@@ -428,7 +677,10 @@ for (const [name, fixture, expectedError] of [
 }
 
 {
-  const customPort = formulaFor().replace('https://github.com/', 'https://github.com:444/');
+  const customPort = formulaFor().replace(
+    `https://github.com/${repository}/releases/download/`,
+    `https://github.com:444/${repository}/releases/download/`,
+  );
   const result = await runHandoff({ formulas: [customPort] });
   assert.match(result.thrown?.message, /timed out.*not an exact .* release asset/);
   console.log('PASS nonstandard GitHub URL authority fails closed');
@@ -453,8 +705,8 @@ for (const [name, fixture, expectedError] of [
 
 {
   const withBadHead = formulaFor().replace(
-    'class Spogo < Formula\n',
-    'class Spogo < Formula\n  head "https://attacker.invalid/spogo.git", branch: "main"\n',
+    `head "https://github.com/${repository}.git"`,
+    'head "https://attacker.invalid/spogo.git"',
   );
   const result = await runHandoff({ formulas: [withBadHead] });
   assert.match(result.thrown?.message, /timed out.*head is not the exact source repository default branch/);
@@ -513,4 +765,4 @@ for (const [name, fixture, expectedError] of [
   console.log('PASS missing TAP_TOKEN fails before tap access');
 }
 
-console.log(`Homebrew handoff tests passed (${inputMatrix.length + 23} scenarios)`);
+console.log(`Homebrew handoff tests passed (${inputMatrix.length + 34} scenarios)`);
