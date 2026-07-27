@@ -103,7 +103,9 @@ function resolveInputs({
       encoding: 'utf8',
       env: {
         ...process.env,
+        ARCHIVE_FILES: '[]',
         BUILD_RUNNER: buildRunner,
+        CHECKSUM_FILENAME: 'SHA256SUMS',
         DARWIN_UNIVERSAL: 'auto',
         EXTRA_PACKAGES: '[]',
         GITHUB_OUTPUT: githubOutput,
@@ -330,6 +332,7 @@ function baseAttestations(fixture = defaultHandoffFixture) {
     commit: fixture.targetSha,
     architecture,
     verdict: 'verified',
+    checksumFilename: 'SHA256SUMS',
     assetInventory: fixture.assetInventory,
     releaseNotes: `## ${fixture.tag} - 2026-07-18\n`,
     sha256sums: fixture.sha256sums,
@@ -434,6 +437,7 @@ async function runHandoff({
     process.chdir(fixtureRoot);
     await executeHandoff(github, context, core, {
       env: {
+        CHECKSUM_FILENAME: 'SHA256SUMS',
         FORMULA: formulaName,
         HOMEBREW_POLL_INTERVAL_MS: '0',
         HOMEBREW_POLL_TIMEOUT_MS: formulas.length > 1 || runStartsQueued ? '5000' : '0',

@@ -45,6 +45,7 @@ function runMetadata(changelog, version = '1.2.3') {
       encoding: 'utf8',
       env: {
         ...process.env,
+        ARCHIVE_FILES: '[]',
         EXTRA_PACKAGES: '[]',
         GITHUB_OUTPUT: githubOutput,
         GITHUB_RUN_ATTEMPT: '1',

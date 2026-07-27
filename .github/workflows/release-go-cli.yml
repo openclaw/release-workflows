@@ -26,6 +26,16 @@ on:
         required: false
         default: '[]'
         type: string
+      archive-files:
+        description: JSON array of repo-relative regular files to include in every platform archive
+        required: false
+        default: '[]'
+        type: string
+      checksum-filename:
+        description: Published checksum asset filename
+        required: false
+        default: SHA256SUMS
+        type: string
       nfpm:
         description: 'nFPM package mode: auto, enabled, or disabled'
         required: false
@@ -107,7 +117,9 @@ jobs:
       - name: Validate inputs
         id: inputs
         env:
+          ARCHIVE_FILES: ${{ inputs.archive-files }}
           BUILD_RUNNER: ${{ inputs.build-runner }}
+          CHECKSUM_FILENAME: ${{ inputs.checksum-filename }}
           DARWIN_UNIVERSAL: ${{ inputs.darwin-universal }}
           EXTRA_PACKAGES: ${{ inputs.extra-packages }}
           HOMEBREW_FORMULA: ${{ inputs.homebrew-formula }}
@@ -137,6 +149,25 @@ jobs:
           fi
           if [[ "$NFPM_MODE" != auto && "$NFPM_MODE" != enabled && "$NFPM_MODE" != disabled ]]; then
             echo "nfpm must be auto, enabled, or disabled" >&2
+            exit 1
+          fi
+          if [[ ! "$CHECKSUM_FILENAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$ ]]; then
+            echo "checksum-filename must be a safe filename without path separators or a leading dot" >&2
+            exit 1
+          fi
+          if [[ "$CHECKSUM_FILENAME" == *. ]]; then
+            echo "checksum-filename cannot end with a dot because GitHub renames that asset" >&2
+            exit 1
+          fi
+          checksum_windows_name=$(printf '%s' "$CHECKSUM_FILENAME" | tr '[:lower:]' '[:upper:]')
+          if [[ "$checksum_windows_name" =~ ^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?$ ]]; then
+            echo "checksum-filename is reserved on Windows" >&2
+            exit 1
+          fi
+          if [[ "$checksum_windows_name" == ASSET-INVENTORY.JSON ||
+                "$checksum_windows_name" == RELEASE-NOTES.MD ||
+                "$checksum_windows_name" == SIGNING-MANIFEST.JSON ]]; then
+            echo "checksum-filename collides with a reserved release control" >&2
             exit 1
           fi
           if [[ -n "$STABLE_IDENTIFIER" &&
@@ -170,6 +201,18 @@ jobs:
             ) and
             ([.[] | split("/")[-1]] | length == (unique | length))
           ' <<<"$EXTRA_PACKAGES" >/dev/null
+          jq -e '
+            type == "array" and
+            all(.[];
+              type == "string" and length > 0 and
+              test("^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$")
+            ) and
+            all(.[] | split("/")[-1];
+              (endswith(".") | not) and
+              (test("^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\\..*)?$"; "i") | not)
+            ) and
+            ([.[] | split("/")[-1] | ascii_downcase] | length == (unique | length))
+          ' <<<"$ARCHIVE_FILES" >/dev/null
           {
             echo "release-version=$release_version"
             echo "tag=v$release_version"
@@ -275,6 +318,7 @@ jobs:
       - name: Validate release metadata
         id: metadata
         env:
+          ARCHIVE_FILES: ${{ inputs.archive-files }}
           EXTRA_PACKAGES: ${{ inputs.extra-packages }}
           RELEASE_VERSION: ${{ steps.inputs.outputs.release-version }}
         run: |
@@ -391,6 +435,26 @@ jobs:
               exit 1
             }
           done < <(jq -r '.[]' <<<"$EXTRA_PACKAGES")
+
+          while IFS= read -r path; do
+            entry=$(git ls-tree HEAD -- "$path")
+            mode=${entry%% *}
+            entry_path=${entry#*$'\t'}
+            [[ "$entry_path" == "$path" && ( "$mode" == 100644 || "$mode" == 100755 ) ]] || {
+              echo "archive file must be a tracked regular file in the frozen source: $path" >&2
+              exit 1
+            }
+            name=${path##*/}
+            [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$ && "$name" != *. ]] || {
+              echo "archive file must have a safe basename: $path" >&2
+              exit 1
+            }
+            windows_name=$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')
+            [[ ! "$windows_name" =~ ^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?$ ]] || {
+              echo "archive file basename is reserved on Windows: $path" >&2
+              exit 1
+            }
+          done < <(jq -r '.[]' <<<"$ARCHIVE_FILES")
 
           echo "release-notes-artifact-name=release-notes-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >>"$GITHUB_OUTPUT"
 
@@ -678,8 +742,9 @@ jobs:
           distribution: goreleaser
           version: '~> v2'
           args: ${{ steps.build-mode.outputs.args }}
-      - name: Add extra package payloads
+      - name: Stage caller package and archive payloads
         env:
+          ARCHIVE_FILES: ${{ inputs.archive-files }}
           EXTRA_PACKAGES: ${{ inputs.extra-packages }}
         run: |
           set -euo pipefail
@@ -691,7 +756,23 @@ jobs:
           if [[ -z "$(find dist/extra-package-payload -mindepth 1 -print -quit)" ]]; then
             rmdir dist/extra-package-payload
           fi
-          tar -czf raw-goreleaser-dist.tar.gz dist
+          archive_stage="$RUNNER_TEMP/release-archive-files"
+          while IFS= read -r path; do
+            [[ -n "$path" ]] || continue
+            mkdir -p "$archive_stage"
+            mode=$(git ls-tree HEAD -- "$path" | awk '{ print $1 }')
+            git cat-file blob "HEAD:$path" >"$archive_stage/${path##*/}"
+            if [[ "$mode" == 100755 ]]; then
+              chmod 755 "$archive_stage/${path##*/}"
+            else
+              chmod 644 "$archive_stage/${path##*/}"
+            fi
+          done < <(jq -r '.[]' <<<"$ARCHIVE_FILES")
+          if [[ -d "$archive_stage" ]]; then
+            tar -czf raw-goreleaser-dist.tar.gz dist -C "$RUNNER_TEMP" release-archive-files
+          else
+            tar -czf raw-goreleaser-dist.tar.gz dist
+          fi
       - name: Upload raw matrix
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
@@ -982,6 +1063,7 @@ jobs:
 
       - name: Assemble signed archives and nFPM packages
         env:
+          ARCHIVE_FILES: ${{ inputs.archive-files }}
           NFPM_ENABLED: ${{ needs.build.outputs.nfpm-enabled }}
           RELEASE_VERSION: ${{ needs.validate.outputs.release-version }}
           REPOSITORY_NAME: ${{ github.event.repository.name }}
@@ -998,6 +1080,29 @@ jobs:
           const repositoryName = process.env.REPOSITORY_NAME;
           const releaseVersion = process.env.RELEASE_VERSION;
           const nfpmEnabled = process.env.NFPM_ENABLED === 'true';
+          const archiveFiles = JSON.parse(process.env.ARCHIVE_FILES);
+          if (!Array.isArray(archiveFiles)) throw new Error('archive-files must be an array');
+          const archiveFileNames = archiveFiles.map((file) => path.basename(file));
+          const canonicalArchiveFileNames = archiveFileNames.map((name) => name.toLowerCase());
+          if (new Set(canonicalArchiveFileNames).size !== canonicalArchiveFileNames.length) {
+            throw new Error('archive-files basenames must be unique without case distinctions');
+          }
+          const archiveFilesDirectory = path.resolve('release-archive-files');
+          if (archiveFileNames.length > 0) {
+            const stagedNames = fs.readdirSync(archiveFilesDirectory).sort();
+            if (JSON.stringify(stagedNames) !== JSON.stringify([...archiveFileNames].sort())) {
+              throw new Error('staged archive-files inventory mismatch');
+            }
+            for (const name of stagedNames) {
+              const staged = path.join(archiveFilesDirectory, name);
+              const stat = fs.lstatSync(staged);
+              if (!stat.isFile() || stat.isSymbolicLink()) {
+                throw new Error(`staged archive file is not a regular file: ${name}`);
+              }
+            }
+          } else if (fs.existsSync(archiveFilesDirectory)) {
+            throw new Error('unexpected staged archive-files directory');
+          }
           const artifactsPath = path.join(distDirectory, 'artifacts.json');
           if (!fs.existsSync(artifactsPath)) throw new Error('GoReleaser artifacts.json is missing');
           const artifacts = JSON.parse(fs.readFileSync(artifactsPath, 'utf8'));
@@ -1084,6 +1189,16 @@ jobs:
             }
             if (archiveNames.has(archiveName) || fs.existsSync(path.join(releaseDirectory, archiveName))) {
               throw new Error(`duplicate release archive name: ${archiveName}`);
+            }
+            for (const name of archiveFileNames) {
+              const source = path.join(archiveFilesDirectory, name);
+              const target = path.join(directory, name);
+              const existingNames = new Set(fs.readdirSync(directory).map((entryName) => entryName.toLowerCase()));
+              if (existingNames.has(name.toLowerCase())) {
+                throw new Error(`archive file collides with a built payload: ${name}`);
+              }
+              fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
+              fs.chmodSync(target, fs.statSync(source).mode & 0o777);
             }
             archiveNames.add(archiveName);
             const destination = path.join(releaseDirectory, archiveName);
@@ -1205,6 +1320,7 @@ jobs:
           name: signed-release-assets-${{ github.run_id }}
       - name: Create frozen inventory and checksums
         env:
+          CHECKSUM_FILENAME: ${{ inputs.checksum-filename }}
           HOMEBREW_FORMULA: ${{ inputs.homebrew-formula }}
           TAG: ${{ needs.validate.outputs.tag }}
           TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
@@ -1224,6 +1340,7 @@ jobs:
           const path = require('path');
 
           const releaseDirectory = path.resolve('release-assets');
+          const checksumFilename = process.env.CHECKSUM_FILENAME;
           const readJsonArray = (file, label) => {
             const value = JSON.parse(fs.readFileSync(file, 'utf8'));
             if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
@@ -1284,7 +1401,10 @@ jobs:
           }
 
           const names = fs.readdirSync(releaseDirectory).sort();
-          if (names.includes('ASSET-INVENTORY.json') || names.includes('SHA256SUMS')) {
+          const checksumKey = checksumFilename.toLowerCase();
+          if (names.includes('ASSET-INVENTORY.json') ||
+              names.some((name) => name.toLowerCase() === checksumKey) ||
+              checksumKey === 'asset-inventory.json') {
             throw new Error('release controls already exist before inventory creation');
           }
           for (const name of names) {
@@ -1322,7 +1442,7 @@ jobs:
           const checksums = checksumNames
             .map((name) => `${digest(path.join(releaseDirectory, name))}  ${name}\n`)
             .join('');
-          fs.writeFileSync(path.join(releaseDirectory, 'SHA256SUMS'), checksums);
+          fs.writeFileSync(path.join(releaseDirectory, checksumFilename), checksums);
           // asset-inventory-builder-end
           NODE
 
@@ -1344,6 +1464,7 @@ jobs:
         id: release
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
+          CHECKSUM_FILENAME: ${{ inputs.checksum-filename }}
           RELEASE_VERSION: ${{ needs.validate.outputs.release-version }}
           TAG: ${{ needs.validate.outputs.tag }}
           TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
@@ -1352,8 +1473,10 @@ jobs:
             const fs = require('fs');
             const path = require('path');
             const directory = 'release-assets';
+            const checksumFilename = process.env.CHECKSUM_FILENAME;
             const names = fs.readdirSync(directory).sort();
-            if (!names.includes('ASSET-INVENTORY.json') || !names.includes('RELEASE-NOTES.md') || !names.includes('SHA256SUMS')) {
+            if (!names.includes('ASSET-INVENTORY.json') || !names.includes('RELEASE-NOTES.md') ||
+                !names.includes(checksumFilename)) {
               core.setFailed('release controls missing');
               return;
             }
@@ -1422,6 +1545,7 @@ jobs:
 
       - name: Verify exact inventory, signatures, DR, and notarization
         env:
+          CHECKSUM_FILENAME: ${{ inputs.checksum-filename }}
           EXPECTED_ARCH: ${{ matrix.arch }}
           DARWIN_UNIVERSAL: ${{ inputs.darwin-universal }}
           HOMEBREW_FORMULA: ${{ inputs.homebrew-formula }}
@@ -1435,7 +1559,7 @@ jobs:
           set -euo pipefail
           unset GH_TOKEN GITHUB_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_RUNTIME_TOKEN ASC_KEY_ID ASC_ISSUER_ID ASC_PRIVATE_KEY_P8 MACOS_SIGNING_P12 MACOS_SIGNING_P12_PASSWORD TAP_TOKEN
           cd release-assets
-          [[ -f ASSET-INVENTORY.json && -s RELEASE-NOTES.md && -f SHA256SUMS && -f SIGNING-MANIFEST.json ]]
+          [[ -f ASSET-INVENTORY.json && -s RELEASE-NOTES.md && -f "$CHECKSUM_FILENAME" && -f SIGNING-MANIFEST.json ]]
           [[ "$(jq -r '.repository' ASSET-INVENTORY.json)" == "$GITHUB_REPOSITORY" ]]
           [[ "$(jq -r '.tag' ASSET-INVENTORY.json)" == "$TAG" ]]
           [[ "$(jq -r '.commit' ASSET-INVENTORY.json)" == "$TARGET_SHA" ]]
@@ -1525,16 +1649,16 @@ jobs:
           }
           # signature-assertion-helpers-end
 
-          expected_names=$(jq -r '.payloads[].name, "ASSET-INVENTORY.json", "SHA256SUMS"' ASSET-INVENTORY.json | LC_ALL=C sort)
+          expected_names=$(jq --arg checksum "$CHECKSUM_FILENAME" -r '.payloads[].name, "ASSET-INVENTORY.json", $checksum' ASSET-INVENTORY.json | LC_ALL=C sort)
           actual_names=$(find . -mindepth 1 -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort)
           [[ "$actual_names" == "$expected_names" ]] || {
             diff -u <(printf '%s\n' "$expected_names") <(printf '%s\n' "$actual_names") >&2 || true
             exit 1
           }
-          checksum_names=$(awk 'NF == 2 { sub(/^\*/, "", $2); print $2 }' SHA256SUMS | LC_ALL=C sort)
-          expected_checksum_names=$(printf '%s\n' "$actual_names" | grep -v '^SHA256SUMS$')
+          checksum_names=$(awk 'NF == 2 { sub(/^\*/, "", $2); print $2 }' "$CHECKSUM_FILENAME" | LC_ALL=C sort)
+          expected_checksum_names=$(printf '%s\n' "$actual_names" | grep -Fvx "$CHECKSUM_FILENAME")
           [[ "$checksum_names" == "$expected_checksum_names" ]]
-          shasum -a 256 -c SHA256SUMS
+          shasum -a 256 -c "$CHECKSUM_FILENAME"
           while IFS=$'\t' read -r name size digest; do
             [[ "$(stat -f %z "$name")" == "$size" ]]
             [[ "$(shasum -a 256 "$name" | awk '{print $1}')" == "$digest" ]]
@@ -1688,10 +1812,11 @@ jobs:
             --arg tag "$TAG" \
             --arg commit "$TARGET_SHA" \
             --arg architecture "$EXPECTED_ARCH" \
+            --arg checksumFilename "$CHECKSUM_FILENAME" \
             --rawfile assetInventory ASSET-INVENTORY.json \
             --rawfile releaseNotes RELEASE-NOTES.md \
-            --rawfile sha256sums SHA256SUMS \
-            '{schemaVersion:1,repository:$repository,runId:$runId,verifierRunAttempt:$verifierRunAttempt,payloadArtifact:$payloadArtifact,tag:$tag,commit:$commit,architecture:$architecture,verdict:"verified",assetInventory:$assetInventory,releaseNotes:$releaseNotes,sha256sums:$sha256sums}' \
+            --rawfile sha256sums "$CHECKSUM_FILENAME" \
+            '{schemaVersion:1,repository:$repository,runId:$runId,verifierRunAttempt:$verifierRunAttempt,payloadArtifact:$payloadArtifact,tag:$tag,commit:$commit,architecture:$architecture,verdict:"verified",checksumFilename:$checksumFilename,assetInventory:$assetInventory,releaseNotes:$releaseNotes,sha256sums:$sha256sums}' \
             >"$RUNNER_TEMP/verified-inventory-attestation.json"
 
       - name: Upload verified inventory attestation
@@ -1754,6 +1879,7 @@ jobs:
         id: publish
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
+          CHECKSUM_FILENAME: ${{ inputs.checksum-filename }}
           RELEASE_ID: ${{ needs.draft.outputs.release-id }}
           TAG: ${{ needs.validate.outputs.tag }}
           TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
@@ -1762,6 +1888,7 @@ jobs:
           script: |
             const crypto = require('crypto');
             const fs = require('fs');
+            const checksumFilename = process.env.CHECKSUM_FILENAME;
             const releaseId = Number(process.env.RELEASE_ID);
             if (!Number.isSafeInteger(releaseId) || releaseId <= 0) {
               throw new Error('invalid numeric release id');
@@ -1781,6 +1908,7 @@ jobs:
                 commit: process.env.TARGET_SHA,
                 architecture,
                 verdict: 'verified',
+                checksumFilename,
               };
               for (const [field, value] of Object.entries(expected)) {
                 if (attestation[field] !== value) {
@@ -1790,12 +1918,12 @@ jobs:
               if (attestation.schemaVersion !== 1 || typeof attestation.assetInventory !== 'string' ||
                   attestation.assetInventory.length === 0 || typeof attestation.releaseNotes !== 'string' ||
                   attestation.releaseNotes.length === 0 || typeof attestation.sha256sums !== 'string') {
-                throw new Error(`${architecture} attestation schema, asset inventory, release notes, or SHA256SUMS is invalid`);
+                throw new Error(`${architecture} attestation schema, asset inventory, release notes, or checksum manifest is invalid`);
               }
               return [architecture, attestation];
             }));
             if (attestations.arm64.sha256sums !== attestations.x86_64.sha256sums) {
-              throw new Error('verified SHA256SUMS differs between arm64 and x86_64 attestations');
+              throw new Error(`verified ${checksumFilename} differs between arm64 and x86_64 attestations`);
             }
             if (attestations.arm64.releaseNotes !== attestations.x86_64.releaseNotes) {
               throw new Error('verified release notes differ between arm64 and x86_64 attestations');
@@ -1808,19 +1936,19 @@ jobs:
             const verifiedAssetInventory = attestations.arm64.assetInventory;
             const verifiedReleaseNotes = attestations.arm64.releaseNotes;
             if (!verifiedSha256sums.endsWith('\n')) {
-              throw new Error('verified SHA256SUMS must end with exactly one complete checksum line');
+              throw new Error(`verified ${checksumFilename} must end with exactly one complete checksum line`);
             }
             const checksumLines = verifiedSha256sums.slice(0, -1).split('\n');
             if (checksumLines.length === 0 || checksumLines.some((line) => line.length === 0)) {
-              throw new Error('verified SHA256SUMS contains an empty line');
+              throw new Error(`verified ${checksumFilename} contains an empty line`);
             }
             const expectedDigests = new Map();
             for (const line of checksumLines) {
               const match = /^([0-9a-f]{64})  ([^\r\n]+)$/.exec(line);
-              if (!match) throw new Error(`invalid SHA256SUMS line: ${JSON.stringify(line)}`);
+              if (!match) throw new Error(`invalid ${checksumFilename} line: ${JSON.stringify(line)}`);
               const [, digest, name] = match;
-              if (name === 'SHA256SUMS' || name.includes('/') || name.includes('\\') || expectedDigests.has(name)) {
-                throw new Error(`unsafe or duplicate SHA256SUMS asset name: ${JSON.stringify(name)}`);
+              if (name === checksumFilename || name.includes('/') || name.includes('\\') || expectedDigests.has(name)) {
+                throw new Error(`unsafe or duplicate ${checksumFilename} asset name: ${JSON.stringify(name)}`);
               }
               expectedDigests.set(name, digest);
             }
@@ -1847,16 +1975,16 @@ jobs:
               downloaded.set(asset.name, Buffer.from(response.data));
             }
 
-            const expectedNames = [...expectedDigests.keys(), 'SHA256SUMS'].sort();
+            const expectedNames = [...expectedDigests.keys(), checksumFilename].sort();
             const observedNames = [...downloaded.keys()].sort();
             if (JSON.stringify(observedNames) !== JSON.stringify(expectedNames)) {
               const missing = expectedNames.filter((name) => !downloaded.has(name));
               const extra = observedNames.filter((name) => !expectedNames.includes(name));
               throw new Error(`draft asset inventory mismatch: missing=${JSON.stringify(missing)} extra=${JSON.stringify(extra)}`);
             }
-            const draftSha256sums = downloaded.get('SHA256SUMS').toString('utf8');
+            const draftSha256sums = downloaded.get(checksumFilename).toString('utf8');
             if (draftSha256sums !== verifiedSha256sums) {
-              throw new Error('draft SHA256SUMS bytes differ from verified attestation');
+              throw new Error(`draft ${checksumFilename} bytes differ from verified attestation`);
             }
             for (const [name, expectedDigest] of expectedDigests) {
               const observedDigest = crypto.createHash('sha256').update(downloaded.get(name)).digest('hex');
@@ -1925,6 +2053,7 @@ jobs:
       - name: Dispatch configured tap and verify formula hashes
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
+          CHECKSUM_FILENAME: ${{ inputs.checksum-filename }}
           FORMULA: ${{ inputs.homebrew-formula }}
           HOMEBREW_TAP: ${{ needs.validate.outputs.homebrew-tap }}
           SOURCE_DEFAULT_BRANCH: ${{ needs.validate.outputs.default-branch }}
@@ -1950,6 +2079,7 @@ jobs:
               tag: process.env.TAG,
               commit: process.env.TARGET_SHA,
               verdict: 'verified',
+              checksumFilename: process.env.CHECKSUM_FILENAME,
             };
             const attestations = Object.fromEntries(['arm64', 'x86_64'].map((architecture) => {
               const attestation = JSON.parse(fs.readFileSync(
@@ -1963,12 +2093,12 @@ jobs:
               }
               if (attestation.schemaVersion !== 1 || typeof attestation.assetInventory !== 'string' ||
                   typeof attestation.sha256sums !== 'string') {
-                throw new Error(`${architecture} attestation schema, asset inventory, or SHA256SUMS is invalid`);
+                throw new Error(`${architecture} attestation schema, asset inventory, or checksum manifest is invalid`);
               }
               return [architecture, attestation];
             }));
             if (attestations.arm64.sha256sums !== attestations.x86_64.sha256sums) {
-              throw new Error('verified SHA256SUMS differs between arm64 and x86_64 attestations');
+              throw new Error(`verified ${process.env.CHECKSUM_FILENAME} differs between arm64 and x86_64 attestations`);
             }
             if (attestations.arm64.assetInventory !== attestations.x86_64.assetInventory) {
               throw new Error('verified asset inventory differs between arm64 and x86_64 attestations');
@@ -1978,12 +2108,12 @@ jobs:
             const checksumLines = attestations.arm64.sha256sums.trimEnd().split('\n');
             for (const line of checksumLines) {
               const match = line.match(/^([0-9a-f]{64})  ([^\r\n]+)$/);
-              if (!match) throw new Error(`invalid verified SHA256SUMS line: ${JSON.stringify(line)}`);
+              if (!match) throw new Error(`invalid verified ${process.env.CHECKSUM_FILENAME} line: ${JSON.stringify(line)}`);
               const [, digest, name] = match;
               if (expectedDigests.has(name)) throw new Error(`duplicate verified checksum name: ${name}`);
               expectedDigests.set(name, digest);
             }
-            if (expectedDigests.size === 0) throw new Error('verified SHA256SUMS is empty');
+            if (expectedDigests.size === 0) throw new Error(`verified ${process.env.CHECKSUM_FILENAME} is empty`);
 
             let assetInventory;
             try {
@@ -2027,7 +2157,7 @@ jobs:
             }
             const expectedInventoryNames = [...expectedDigests.keys()].filter((name) => name !== 'ASSET-INVENTORY.json').sort();
             if (JSON.stringify([...inventoryNames].sort()) !== JSON.stringify(expectedInventoryNames)) {
-              throw new Error('verified inventory payload names differ from SHA256SUMS');
+              throw new Error(`verified inventory payload names differ from ${process.env.CHECKSUM_FILENAME}`);
             }
             const missingHomebrewTargets = [...homebrewTargets].filter((target) => !homebrewAssets[target]);
             if (missingHomebrewTargets.length > 0) {
@@ -2395,7 +2525,7 @@ jobs:
                 if (seenAssets.has(asset)) return { ok: false, reason: `formula repeats release asset ${asset}` };
                 seenAssets.add(asset);
                 const expectedDigest = expectedDigests.get(asset);
-                if (!expectedDigest) return { ok: false, reason: `formula asset ${asset} is absent from verified SHA256SUMS` };
+                if (!expectedDigest) return { ok: false, reason: `formula asset ${asset} is absent from verified ${process.env.CHECKSUM_FILENAME}` };
                 if (binding.target !== undefined && homebrewAssets[binding.target]?.name !== asset) {
                   return { ok: false, reason: `formula ${binding.target} branch selects ${asset}` };
                 }

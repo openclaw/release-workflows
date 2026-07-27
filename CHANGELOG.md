@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.3.0 - 2026-07-27
+
+- Preserve established checksum asset names and opt-in archive documentation files while keeping existing callers' release bytes unchanged by default.
+
 ## v1.2.0 - 2026-07-27
 
 - Preserve GoReleaser's allowlisted per-target archive formats, add optional stable-identifier and SSH-signed-tag policies, and make the universal Darwin artifact configurable without weakening signing, notarization, inventory, or provenance verification.
