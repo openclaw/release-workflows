@@ -115,7 +115,7 @@ for required_build_control in [
     "inputs.build-runner == 'macos' && 'macos-15' || 'ubuntu-latest'",
     'NFPM_MODE: ${{ inputs.nfpm }}',
     'nfpm-enabled:',
-    'release --config=$config --clean --timeout 60m --release-notes=/dev/null --skip=',
+    'release --config=$config --clean --timeout 60m --parallelism=2 --release-notes=/dev/null --skip=',
     'GORELEASER_CURRENT_TAG: ${{ needs.validate.outputs.tag }}',
     'goreleaser-version:',
 ]:

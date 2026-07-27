@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.4.1 - 2026-07-27
+
+- Bound primary and independent GoReleaser builds to two concurrent targets so memory-heavy callers can complete reliably with identical build scheduling.
+
 ## v1.4.0 - 2026-07-27
 
 - Add an opt-in, fail-closed reproducible rebuild gate that independently rebuilds staged Linux and Windows binaries, requires byte identity, and records both digests in the verifier-bound asset inventory.
