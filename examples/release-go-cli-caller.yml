@@ -29,6 +29,9 @@ jobs:
       # Optional defaults. Set build-runner to macos for native Darwin/CGO builds.
       # nfpm: auto
       # build-runner: ubuntu
+      # stable-identifier: ai.openclaw.example-cli
+      # require-signed-tag: false
+      # darwin-universal: auto
       strict-checks: false
     secrets:
       MACOS_SIGNING_P12: ${{ secrets.MACOS_SIGNING_P12 }}

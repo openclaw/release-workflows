@@ -36,6 +36,21 @@ on:
         required: false
         default: ubuntu
         type: string
+      stable-identifier:
+        description: Reverse-DNS signing identifier; empty derives the repository policy default
+        required: false
+        default: ''
+        type: string
+      require-signed-tag:
+        description: Require the release tag to have a valid SSH signature allowed by .github/release-allowed-signers
+        required: false
+        default: false
+        type: boolean
+      darwin-universal:
+        description: 'Universal Darwin archive mode: auto, enabled, or disabled'
+        required: false
+        default: auto
+        type: string
       strict-checks:
         description: Require every independent check green instead of only branch-required contexts
         required: false
@@ -93,11 +108,13 @@ jobs:
         id: inputs
         env:
           BUILD_RUNNER: ${{ inputs.build-runner }}
+          DARWIN_UNIVERSAL: ${{ inputs.darwin-universal }}
           EXTRA_PACKAGES: ${{ inputs.extra-packages }}
           HOMEBREW_FORMULA: ${{ inputs.homebrew-formula }}
           HOMEBREW_TAP: ${{ inputs.homebrew-tap }}
           NFPM_MODE: ${{ inputs.nfpm }}
           REPOSITORY_TYPE: ${{ inputs.repository-type }}
+          STABLE_IDENTIFIER: ${{ inputs.stable-identifier }}
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
@@ -114,8 +131,17 @@ jobs:
             echo "build-runner must be ubuntu or macos" >&2
             exit 1
           fi
+          if [[ "$DARWIN_UNIVERSAL" != auto && "$DARWIN_UNIVERSAL" != enabled && "$DARWIN_UNIVERSAL" != disabled ]]; then
+            echo "darwin-universal must be auto, enabled, or disabled" >&2
+            exit 1
+          fi
           if [[ "$NFPM_MODE" != auto && "$NFPM_MODE" != enabled && "$NFPM_MODE" != disabled ]]; then
             echo "nfpm must be auto, enabled, or disabled" >&2
+            exit 1
+          fi
+          if [[ -n "$STABLE_IDENTIFIER" &&
+                ! "$STABLE_IDENTIFIER" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]; then
+            echo "stable-identifier must be a reverse-DNS identifier" >&2
             exit 1
           fi
           homebrew_tap=$HOMEBREW_TAP
@@ -222,7 +248,29 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           persist-credentials: false
-          ref: ${{ steps.repository.outputs.target-sha }}
+          ref: ${{ inputs.require-signed-tag && steps.inputs.outputs.tag || steps.repository.outputs.target-sha }}
+
+      - name: Verify required SSH-signed tag
+        if: inputs.require-signed-tag
+        env:
+          TAG: ${{ steps.inputs.outputs.tag }}
+          TARGET_SHA: ${{ steps.repository.outputs.target-sha }}
+        run: |
+          set -euo pipefail
+          policy=.github/release-allowed-signers
+          [[ -f "$policy" && ! -L "$policy" && -s "$policy" ]] || {
+            echo "$policy must be a nonempty regular file when require-signed-tag is enabled" >&2
+            exit 1
+          }
+          [[ "$(git cat-file -t "refs/tags/$TAG")" == tag ]] || {
+            echo "$TAG must be an annotated SSH-signed tag" >&2
+            exit 1
+          }
+          [[ "$(git rev-parse "refs/tags/$TAG^{}")" == "$TARGET_SHA" ]] || {
+            echo "$TAG does not peel to the frozen target" >&2
+            exit 1
+          }
+          git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile="$policy" verify-tag "$TAG"
 
       - name: Validate release metadata
         id: metadata
@@ -614,9 +662,9 @@ jobs:
             disabled) nfpm_enabled=false ;;
           esac
           if [[ "$nfpm_enabled" == true ]]; then
-            args="release --config=$config --clean --timeout 60m --release-notes=/dev/null --skip=announce,archive,aur,aur-source,chocolatey,docker,flatpak,homebrew,ko,makeself,mcp,nix,notarize,publish,sbom,scoop,sign,snapcraft,srpm,validate,winget"
+            args="release --config=$config --clean --timeout 60m --release-notes=/dev/null --skip=announce,aur,aur-source,chocolatey,docker,flatpak,homebrew,ko,makeself,mcp,nix,notarize,publish,sbom,scoop,sign,snapcraft,srpm,validate,winget"
           else
-            args="build --config=$config --clean --timeout 60m"
+            args="release --config=$config --clean --timeout 60m --release-notes=/dev/null --skip=announce,aur,aur-source,chocolatey,docker,flatpak,homebrew,ko,makeself,mcp,nfpm,nix,notarize,publish,sbom,scoop,sign,snapcraft,srpm,validate,winget"
           fi
           {
             echo "nfpm-enabled=$nfpm_enabled"
@@ -738,16 +786,21 @@ jobs:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_PRIVATE_KEY_P8: ${{ secrets.ASC_PRIVATE_KEY_P8 }}
           AUTHORITY: ${{ steps.signer.outputs.authority }}
+          DARWIN_UNIVERSAL: ${{ inputs.darwin-universal }}
           IDENTIFIER_PREFIX: ${{ steps.signer.outputs.identifier-prefix }}
           KEYCHAIN: ${{ steps.signer.outputs.keychain }}
           REPOSITORY_NAME: ${{ github.event.repository.name }}
           SIGNING_IDENTITY_HASH: ${{ steps.signing_identity.outputs.identity-hash }}
+          STABLE_IDENTIFIER: ${{ inputs.stable-identifier }}
           TEAM_ID: ${{ steps.signer.outputs.team-id }}
         run: |
           set -euo pipefail
           shopt -s nullglob
           work="$RUNNER_TEMP/macos-release"
-          mkdir -p "$work/submissions" dist/universal_darwin_all
+          mkdir -p "$work/submissions"
+          if [[ "$DARWIN_UNIVERSAL" != disabled ]]; then
+            mkdir -p dist/universal_darwin_all
+          fi
           p8="$work/AuthKey_${ASC_KEY_ID}.p8"
           printf '%s' "$ASC_PRIVATE_KEY_P8" >"$p8"
           chmod 600 "$p8"
@@ -859,8 +912,10 @@ jobs:
               [[ -n "$path" ]] && arm_paths+=("$path")
             done < <(awk -F '\t' -v name="$binary_name" '$1 == "arm64" && $3 == name { print $2 }' "$work/macho.tsv")
             if (( ${#intel_paths[@]} == 1 && ${#arm_paths[@]} == 1 )); then
-              lipo -create "${intel_paths[0]}" "${arm_paths[0]}" -output "dist/universal_darwin_all/$binary_name"
-              chmod +x "dist/universal_darwin_all/$binary_name"
+              if [[ "$DARWIN_UNIVERSAL" != disabled ]]; then
+                lipo -create "${intel_paths[0]}" "${arm_paths[0]}" -output "dist/universal_darwin_all/$binary_name"
+                chmod +x "dist/universal_darwin_all/$binary_name"
+              fi
               pair_count=$((pair_count + 1))
             elif (( ${#intel_paths[@]} > 0 || ${#arm_paths[@]} > 0 )); then
               echo "cannot form one stable universal pair for $binary_name" >&2
@@ -874,7 +929,7 @@ jobs:
             file "$candidate" | grep -q 'Mach-O' || continue
             binary_slug=$(basename "$candidate" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9.-]+/-/g; s/^-+|-+$//g')
             repo_slug=$(printf '%s' "$REPOSITORY_NAME" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9.-]+/-/g; s/^-+|-+$//g')
-            identifier="$IDENTIFIER_PREFIX.$repo_slug.$binary_slug"
+            identifier=${STABLE_IDENTIFIER:-"$IDENTIFIER_PREFIX.$repo_slug.$binary_slug"}
             requirement="identifier \"$identifier\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$TEAM_ID\""
             codesign --force --options runtime --timestamp --identifier "$identifier" \
               --requirements "=designated => $requirement" --keychain "$KEYCHAIN" \
@@ -963,6 +1018,7 @@ jobs:
             ['windows/amd64', 'windows_amd64'],
             ['windows/arm64', 'windows_arm64'],
           ]);
+          const archiveArtifacts = artifacts.filter((artifact) => artifact.type === 'Archive');
           const targetRows = [];
           const archiveNames = new Set();
           const directories = fs.readdirSync(distDirectory, { withFileTypes: true })
@@ -970,20 +1026,9 @@ jobs:
             .sort((left, right) => left.name.localeCompare(right.name));
           for (const entry of directories) {
             const directory = path.join(distDirectory, entry.name);
-            const targetSlug = entry.name.replace(/[^A-Za-z0-9._-]+/g, '-');
-            const archiveName = `${repositoryName}_${releaseVersion}_${targetSlug}.tar.gz`;
-            if (!/^[A-Za-z0-9][A-Za-z0-9+@._-]*\.tar\.gz$/.test(archiveName)) {
-              throw new Error(`unsafe release archive name: ${archiveName}`);
-            }
-            if (archiveNames.has(archiveName) || fs.existsSync(path.join(releaseDirectory, archiveName))) {
-              throw new Error(`duplicate release archive name: ${archiveName}`);
-            }
-            archiveNames.add(archiveName);
-            execFileSync('tar', ['-czf', path.join(releaseDirectory, archiveName), '-C', directory, '.'], {
-              stdio: 'inherit',
-            });
-
             let canonicalTarget = '';
+            let archiveFormat = 'tar.gz';
+            let archiveName = '';
             if (entry.name === 'universal_darwin_all') {
               canonicalTarget = 'darwin_universal';
             } else {
@@ -995,7 +1040,57 @@ jobs:
               if (platforms.size > 1) {
                 throw new Error(`release archive mixes GoReleaser platforms: dist/${entry.name}`);
               }
-              if (platforms.size === 1) canonicalTarget = canonicalTargets.get([...platforms][0]) ?? '';
+              if (platforms.size === 1) {
+                const platform = [...platforms][0];
+                canonicalTarget = canonicalTargets.get(platform) ?? '';
+                const [goos, goarch] = platform.split('/');
+                // ASSET-INVENTORY already permits exactly one archive per canonical
+                // target. Require the same unambiguous contract from GoReleaser.
+                const matches = archiveArtifacts.filter((artifact) =>
+                  artifact.goos === goos && artifact.goarch === goarch);
+                if (matches.length !== 1) {
+                  throw new Error(`expected exactly one GoReleaser Archive artifact for ${platform}; found ${matches.length}`);
+                }
+                const artifact = matches[0];
+                archiveFormat = artifact.extra?.Format;
+                archiveName = artifact.name;
+                if (!['tar.gz', 'zip'].includes(archiveFormat)) {
+                  throw new Error(`unsupported GoReleaser archive format for ${platform}: ${archiveFormat}`);
+                }
+                if (typeof archiveName !== 'string' || typeof artifact.path !== 'string' ||
+                    path.basename(artifact.path) !== archiveName ||
+                    !archiveName.startsWith(`${repositoryName}_${releaseVersion}_`) ||
+                    !/^[A-Za-z0-9][A-Za-z0-9+@._-]*\.(?:tar\.gz|zip)$/.test(archiveName) ||
+                    !archiveName.endsWith(`.${archiveFormat}`)) {
+                  throw new Error(`unsafe or inconsistent GoReleaser archive metadata for ${platform}`);
+                }
+                const producedArchive = path.resolve(artifact.path);
+                if (path.dirname(producedArchive) !== distDirectory) {
+                  throw new Error(`GoReleaser archive must be a top-level dist artifact: ${archiveName}`);
+                }
+                const producedStat = fs.lstatSync(producedArchive);
+                if (!producedStat.isFile() || producedStat.isSymbolicLink()) {
+                  throw new Error(`GoReleaser archive must be a regular file: ${archiveName}`);
+                }
+              }
+            }
+
+            if (!archiveName) {
+              const targetSlug = entry.name.replace(/[^A-Za-z0-9._-]+/g, '-');
+              archiveName = `${repositoryName}_${releaseVersion}_${targetSlug}.tar.gz`;
+            }
+            if (!/^[A-Za-z0-9][A-Za-z0-9+@._-]*\.(?:tar\.gz|zip)$/.test(archiveName)) {
+              throw new Error(`unsafe release archive name: ${archiveName}`);
+            }
+            if (archiveNames.has(archiveName) || fs.existsSync(path.join(releaseDirectory, archiveName))) {
+              throw new Error(`duplicate release archive name: ${archiveName}`);
+            }
+            archiveNames.add(archiveName);
+            const destination = path.join(releaseDirectory, archiveName);
+            if (archiveFormat === 'tar.gz') {
+              execFileSync('tar', ['-czf', destination, '-C', directory, '.'], { stdio: 'inherit' });
+            } else {
+              execFileSync('zip', ['-qry', destination, '.'], { cwd: directory, stdio: 'inherit' });
             }
             if (canonicalTarget) targetRows.push({ name: archiveName, target: canonicalTarget });
           }
@@ -1150,7 +1245,7 @@ jobs:
           for (const row of targetRows) {
             if (row === null || typeof row !== 'object' || !exactKeys(row, ['name', 'target']) ||
                 typeof row.name !== 'string' ||
-                !/^[A-Za-z0-9][A-Za-z0-9+@._-]*\.tar\.gz$/.test(row.name) ||
+                !/^[A-Za-z0-9][A-Za-z0-9+@._-]*\.(?:tar\.gz|zip)$/.test(row.name) ||
                 typeof row.target !== 'string' ||
                 !/^(?:(?:darwin|linux|windows)_(?:amd64|arm64)|darwin_universal)$/.test(row.target)) {
               throw new Error('asset target map contains an invalid row');
@@ -1328,9 +1423,11 @@ jobs:
       - name: Verify exact inventory, signatures, DR, and notarization
         env:
           EXPECTED_ARCH: ${{ matrix.arch }}
+          DARWIN_UNIVERSAL: ${{ inputs.darwin-universal }}
           HOMEBREW_FORMULA: ${{ inputs.homebrew-formula }}
           REPOSITORY_NAME: ${{ github.event.repository.name }}
           REPOSITORY_TYPE: ${{ inputs.repository-type }}
+          STABLE_IDENTIFIER: ${{ inputs.stable-identifier }}
           TAG: ${{ needs.validate.outputs.tag }}
           TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
           VERIFICATION_PAYLOAD_ARTIFACT: ${{ needs.draft.outputs.verification-artifact-name }}
@@ -1530,7 +1627,7 @@ jobs:
               file "$candidate" | grep -q 'Mach-O' || continue
               binary_slug=$(basename "$candidate" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9.-]+/-/g; s/^-+|-+$//g')
               repo_slug=$(printf '%s' "$REPOSITORY_NAME" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9.-]+/-/g; s/^-+|-+$//g')
-              identifier="$identifier_prefix.$repo_slug.$binary_slug"
+              identifier=${STABLE_IDENTIFIER:-"$identifier_prefix.$repo_slug.$binary_slug"}
               requirement="identifier \"$identifier\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$team_id\""
               codesign --verify --strict -R="$requirement" --verbose=2 "$candidate"
               signature=$(codesign -dvvv "$candidate" 2>&1)
@@ -1574,10 +1671,14 @@ jobs:
               verified_count=$((verified_count + 1))
             done < <(find "$extract" -type f -perm -111 -print0)
           done
-          (( verified_count > 0 && native_count > 0 && universal_count > 0 )) || {
-            echo "missing verified macOS payload for $EXPECTED_ARCH or universal architecture" >&2
+          (( verified_count > 0 && native_count > 0 )) || {
+            echo "missing verified macOS payload for $EXPECTED_ARCH" >&2
             exit 1
           }
+          if [[ "$DARWIN_UNIVERSAL" != disabled && "$universal_count" == 0 ]]; then
+            echo "missing verified universal macOS payload" >&2
+            exit 1
+          fi
 
           jq -n \
             --arg repository "$GITHUB_REPOSITORY" \
@@ -1612,6 +1713,33 @@ jobs:
     outputs:
       release-url: ${{ steps.publish.outputs.release-url }}
     steps:
+      - name: Check out frozen source for signed-tag policy
+        if: inputs.require-signed-tag
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.tag }}
+      - name: Reverify required SSH-signed tag before publication
+        if: inputs.require-signed-tag
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+          TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
+        run: |
+          set -euo pipefail
+          policy=.github/release-allowed-signers
+          [[ -f "$policy" && ! -L "$policy" && -s "$policy" ]] || {
+            echo "$policy must be a nonempty regular file when require-signed-tag is enabled" >&2
+            exit 1
+          }
+          [[ "$(git cat-file -t "refs/tags/$TAG")" == tag ]] || {
+            echo "$TAG must be an annotated SSH-signed tag" >&2
+            exit 1
+          }
+          [[ "$(git rev-parse "refs/tags/$TAG^{}")" == "$TARGET_SHA" ]] || {
+            echo "$TAG does not peel to the frozen target" >&2
+            exit 1
+          }
+          git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile="$policy" verify-tag "$TAG"
       - name: Download arm64 verified inventory attestation
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:

@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.2.0 - 2026-07-27
+
+- Preserve GoReleaser's allowlisted per-target archive formats, add optional stable-identifier and SSH-signed-tag policies, and make the universal Darwin artifact configurable without weakening signing, notarization, inventory, or provenance verification.
+
 ## v1.1.1 - 2026-07-18
 
 - Accept the live taps' closed, static `Hardware::CPU.arm?`/`intel?` platform branches, including the 64-bit qualifier, while continuing to reject dynamic Ruby evaluation.

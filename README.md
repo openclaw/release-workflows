@@ -52,6 +52,9 @@ Inputs:
 | `extra-packages` | JSON array of safe repo-relative files/directories. Basenames must be unique. |
 | `nfpm` | `auto` (default), `enabled`, or `disabled`. Auto builds `.deb`/`.rpm` assets when the frozen GoReleaser config has a nonempty `nfpms` list. Enabled requires that list; disabled preserves binary-only mode even when it exists. |
 | `build-runner` | `ubuntu` (default) or `macos`. macOS selects `macos-15` for the GoReleaser build job; use it for native Darwin/CGO dependencies. |
+| `stable-identifier` | Optional reverse-DNS code-signing identifier. Empty (default) preserves the derived repository policy identifier. Set only to retain an established identifier such as `ai.openclaw.telecrawl`. |
+| `require-signed-tag` | Boolean, default `false`. When `true`, the version tag must already exist, be SSH-signed, and verify against the frozen source's nonempty `.github/release-allowed-signers`; the workflow reverifies it immediately before publication. |
+| `darwin-universal` | `auto` (default), `enabled`, or `disabled`. `auto` and `enabled` preserve the existing universal Darwin archive; `disabled` emits only the configured native Darwin archives while retaining native signing, notarization, and dual-architecture verification. |
 | `strict-checks` | Boolean. Default `false` checks only branch-required contexts. `true` requires every independent check/status green. When no required contexts exist, both modes use the all-check fallback and require at least one completed, non-failed CI signal. |
 
 Repository policies:
@@ -63,13 +66,23 @@ Repository policies:
 
 Legacy OpenClaw repositories may undergo one expected designated-requirement transition when their first fleet release replaces an older identifier with `org.openclaw.<repo>.<binary>`. The slacrawl and graincrawl migrations both crossed this boundary. It is a one-time migration event: after that release, the stable identifier and embedded designated requirement must remain byte-equivalent under the workflow's normal signing and verification checks.
 
+Repositories that cannot make that transition must pass their established reverse-DNS value through `stable-identifier`. The override is applied consistently during signing, manifest construction, both independent architecture verifiers, and designated-requirement checks. It does not change the signer identity or Team ID selected by `repository-type`.
+
 The CI gate merges required status checks from legacy branch protection and effective branch rules, including any required GitHub App binding. With the default `strict-checks: false`, unrelated optional or dynamic failures do not block a release. Required checks must still be present and green on the frozen target commit. Repositories without required contexts fall back to requiring all independent checks/statuses completed and non-failed. Set `strict-checks: true` to request that stricter all-check behavior even when required contexts exist.
 
 The first attempt, when no version tag exists, freezes the current protected default-branch head and creates an annotated tag there. On every retry, an existing exact annotated version tag takes precedence: its peeled commit becomes `target-sha`, even when the caller runs from a newer default-branch head. That frozen commit must still be reachable from the protected default branch; the workflow checks out that commit and evaluates its changelog, version metadata, and required CI signals. The tag is never moved or replaced. Lightweight tags, tags that do not peel directly to a commit, and tags outside protected-branch ancestry fail closed. The caller itself must still be dispatched at the current protected default-branch head.
 
+With `require-signed-tag: true`, automatic tag creation is intentionally unavailable: the exact version tag must already exist. Git verifies its SSH signature against `.github/release-allowed-signers` from the frozen tag commit before any build, then repeats the verification from the same policy and tag immediately before the draft can be published. A missing, empty, symlinked, mismatched, or non-verifying policy/tag fails closed. The default remains `false`, so existing callers retain automatic annotated-tag creation.
+
 ### Build host and nFPM packages
 
 Existing callers need no changes: `build-runner: ubuntu` retains the cross-build job, and `nfpm: auto` behaves exactly like the prior binary-only build when the GoReleaser config has no `nfpms` entries.
+
+GoReleaser now runs its archive phase before signing so its `artifacts.json` is authoritative for each configured platform archive name and format. Those preliminary archives are never released. After macOS signing and notarization, the workflow rebuilds every archive from the signed payload using the exact metadata, accepting only `tar.gz` and `zip`. This preserves `.tar.gz` on existing callers and retains mature crawlers' configured Windows `.zip` assets without trusting filename reconstruction.
+
+`darwin-universal: disabled` removes only the extra `darwin_universal` payload. The configured `darwin/amd64` and `darwin/arm64` pair remains mandatory, individually signed and notarized, and independently verified on native Intel and arm64 runners. `auto` is the backward-compatible default and has the same universal-output behavior as earlier `@v1` releases.
+
+This workflow does not currently claim reproducible-rebuild proof. Its non-Darwin provenance remains the frozen-source GoReleaser build bound by the exact inventory, SHA-256 attestations, and dual-verifier publication chain. A repository whose contract independently rebuilds Linux and Windows binaries and requires byte equality must retain that separate gate until an equally strict reusable implementation exists.
 
 Use `build-runner: macos` when Darwin binaries import native frameworks or otherwise require CGO on macOS. The complete GoReleaser build runs from the same frozen tag on `macos-15`; signing, notarization, verification, draft binding, and publication remain separate later jobs. Native callers should list only targets that can build on that host. A Darwin-only CGO project should omit Linux from its GoReleaser `goos` list. Projects that need both native Darwin and Linux should use separate GoReleaser build IDs whose environment/toolchain works on the selected host; this workflow does not depend on GoReleaser Pro partial-build merging.
 
