@@ -58,6 +58,7 @@ Inputs:
 | `require-signed-tag` | Boolean, default `false`. When `true`, the version tag must already exist, be SSH-signed, and verify against the frozen source's nonempty `.github/release-allowed-signers`; the workflow reverifies it immediately before publication. |
 | `darwin-universal` | `auto` (default), `enabled`, or `disabled`. `auto` and `enabled` preserve the existing universal Darwin archive; `disabled` emits only the configured native Darwin archives while retaining native signing, notarization, and dual-architecture verification. |
 | `strict-checks` | Boolean. Default `false` checks only branch-required contexts. `true` requires every independent check/status green. When no required contexts exist, both modes use the all-check fallback and require at least one completed, non-failed CI signal. |
+| `ci-check-events` | JSON array of GitHub Actions event names eligible for the CI gate, such as `["push","pull_request"]`. Empty by default, preserving all events. Use this only when high-frequency scheduled or manual workflows share the release commit and are not release evidence; checks without a resolvable Actions run remain included. |
 
 Repository policies:
 
@@ -71,6 +72,8 @@ Legacy OpenClaw repositories may undergo one expected designated-requirement tra
 Repositories that cannot make that transition must pass their established reverse-DNS value through `stable-identifier`. The override is applied consistently during signing, manifest construction, both independent architecture verifiers, and designated-requirement checks. It does not change the signer identity or Team ID selected by `repository-type`.
 
 The CI gate merges required status checks from legacy branch protection and effective branch rules, including any required GitHub App binding. With the default `strict-checks: false`, unrelated optional or dynamic failures do not block a release. Required checks must still be present and green on the frozen target commit. Repositories without required contexts fall back to requiring all independent checks/statuses completed and non-failed. Set `strict-checks: true` to request that stricter all-check behavior even when required contexts exist.
+
+`ci-check-events` narrows only Actions-backed check runs whose run event can be resolved exactly. It never removes commit statuses or checks with an unresolvable provenance URL, and the empty default preserves the existing gate. This lets a caller without required contexts exclude unrelated high-frequency `schedule` or `workflow_dispatch` runs without weakening push/PR CI evidence.
 
 The first attempt, when no version tag exists, freezes the current protected default-branch head and creates an annotated tag there. On every retry, an existing exact annotated version tag takes precedence: its peeled commit becomes `target-sha`, even when the caller runs from a newer default-branch head. That frozen commit must still be reachable from the protected default branch; the workflow checks out that commit and evaluates its changelog, version metadata, and required CI signals. The tag is never moved or replaced. Lightweight tags, tags that do not peel directly to a commit, and tags outside protected-branch ancestry fail closed. The caller itself must still be dispatched at the current protected default-branch head.
 

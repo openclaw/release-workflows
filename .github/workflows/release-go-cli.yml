@@ -66,6 +66,11 @@ on:
         required: false
         default: false
         type: boolean
+      ci-check-events:
+        description: JSON array of Actions events eligible for the CI gate; empty keeps every event
+        required: false
+        default: '[]'
+        type: string
     secrets:
       MACOS_SIGNING_P12:
         description: Base64-encoded Developer ID Application certificate and private key
@@ -120,6 +125,7 @@ jobs:
           ARCHIVE_FILES: ${{ inputs.archive-files }}
           BUILD_RUNNER: ${{ inputs.build-runner }}
           CHECKSUM_FILENAME: ${{ inputs.checksum-filename }}
+          CI_CHECK_EVENTS: ${{ inputs.ci-check-events }}
           DARWIN_UNIVERSAL: ${{ inputs.darwin-universal }}
           EXTRA_PACKAGES: ${{ inputs.extra-packages }}
           HOMEBREW_FORMULA: ${{ inputs.homebrew-formula }}
@@ -213,6 +219,11 @@ jobs:
             ) and
             ([.[] | split("/")[-1] | ascii_downcase] | length == (unique | length))
           ' <<<"$ARCHIVE_FILES" >/dev/null
+          jq -e '
+            type == "array" and
+            all(.[]; type == "string" and test("^[a-z][a-z0-9_]*$")) and
+            length == (unique | length)
+          ' <<<"$CI_CHECK_EVENTS" >/dev/null
           {
             echo "release-version=$release_version"
             echo "tag=v$release_version"
@@ -469,6 +480,7 @@ jobs:
       - name: Require independent CI green on frozen target
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
+          CI_CHECK_EVENTS: ${{ inputs.ci-check-events }}
           DEFAULT_BRANCH: ${{ steps.repository.outputs.default-branch }}
           STRICT_CHECKS: ${{ inputs.strict-checks }}
           TARGET_SHA: ${{ steps.repository.outputs.target-sha }}
@@ -482,7 +494,48 @@ jobs:
               per_page: 100,
               filter: 'latest',
             });
-            const checkRuns = allCheckRuns.filter((check) => !check.details_url?.includes(currentRunMarker));
+            // ci-check-event-filter-begin
+            const filterCheckRunsByEvent = ({ checkRuns, allowedEvents, currentRunMarker, workflowRunEvents, info }) => {
+              const accepted = [];
+              for (const check of checkRuns) {
+                if (check.details_url?.includes(currentRunMarker)) continue;
+                if (allowedEvents.size > 0) {
+                  const match = check.details_url?.match(/\/actions\/runs\/(\d+)(?:\/|$)/);
+                  if (match && workflowRunEvents.has(Number(match[1]))) {
+                    const runId = Number(match[1]);
+                    const event = workflowRunEvents.get(runId);
+                    if (!allowedEvents.has(event)) {
+                      info(`Ignoring ${check.name} from Actions event ${event}`);
+                      continue;
+                    }
+                  }
+                }
+                accepted.push(check);
+              }
+              return accepted;
+            };
+            // ci-check-event-filter-end
+            const allowedCheckEvents = new Set(JSON.parse(process.env.CI_CHECK_EVENTS));
+            const workflowRunEvents = new Map();
+            if (allowedCheckEvents.size > 0) {
+              try {
+                const workflowRuns = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
+                  ...context.repo,
+                  head_sha: process.env.TARGET_SHA,
+                  per_page: 100,
+                });
+                for (const run of workflowRuns) workflowRunEvents.set(run.id, run.event);
+              } catch (error) {
+                core.warning(`Could not resolve Actions events for CI filtering; retaining all checks: ${error.message}`);
+              }
+            }
+            const checkRuns = filterCheckRunsByEvent({
+              checkRuns: allCheckRuns,
+              allowedEvents: allowedCheckEvents,
+              currentRunMarker,
+              workflowRunEvents,
+              info: (message) => core.info(message),
+            });
             const allStatuses = await github.paginate(github.rest.repos.listCommitStatusesForRef, {
               ...context.repo,
               ref: process.env.TARGET_SHA,

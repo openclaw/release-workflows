@@ -13,6 +13,7 @@ done < <(find .github/workflows examples -type f \( -name '*.yml' -o -name '*.ya
 actionlint "${workflow_files[@]}"
 
 node scripts/test-release-target-resolution.mjs
+node scripts/test-ci-check-event-filter.mjs
 node scripts/test-build-artifact-matrix.mjs
 node scripts/test-go-cli-policy-inputs.mjs
 node scripts/test-release-notes-extraction.mjs
@@ -41,7 +42,7 @@ for job in required_jobs:
 
 required_inputs = [
     'version', 'repository-type', 'homebrew-tap', 'homebrew-formula', 'extra-packages',
-    'archive-files', 'checksum-filename',
+    'archive-files', 'checksum-filename', 'ci-check-events',
     'nfpm', 'build-runner', 'stable-identifier', 'require-signed-tag', 'darwin-universal',
     'strict-checks',
 ]
@@ -127,6 +128,10 @@ for required_policy_control in [
     "!['tar.gz', 'zip'].includes(archiveFormat)",
     'ARCHIVE_FILES: ${{ inputs.archive-files }}',
     'CHECKSUM_FILENAME: ${{ inputs.checksum-filename }}',
+    'CI_CHECK_EVENTS: ${{ inputs.ci-check-events }}',
+    'Ignoring ${check.name} from Actions event ${event}',
+    'listWorkflowRunsForRepo',
+    'retaining all checks',
 ]:
     if required_policy_control not in workflow:
         raise SystemExit(f'missing crawler compatibility policy control: {required_policy_control}')

@@ -106,6 +106,7 @@ function resolveInputs({
         ARCHIVE_FILES: '[]',
         BUILD_RUNNER: buildRunner,
         CHECKSUM_FILENAME: 'SHA256SUMS',
+        CI_CHECK_EVENTS: '[]',
         DARWIN_UNIVERSAL: 'auto',
         EXTRA_PACKAGES: '[]',
         GITHUB_OUTPUT: githubOutput,

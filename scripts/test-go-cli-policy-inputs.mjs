@@ -41,6 +41,7 @@ const runInputs = (overrides = {}) => {
         ARCHIVE_FILES: '[]',
         BUILD_RUNNER: 'ubuntu',
         CHECKSUM_FILENAME: 'SHA256SUMS',
+        CI_CHECK_EVENTS: '[]',
         DARWIN_UNIVERSAL: 'auto',
         EXTRA_PACKAGES: '[]',
         GITHUB_OUTPUT: output,
@@ -113,6 +114,12 @@ const tests = [
   ['Darwin universal mode is tri-state', () => {
     for (const value of ['auto', 'enabled', 'disabled']) runInputs({ DARWIN_UNIVERSAL: value });
     assert.throws(() => runInputs({ DARWIN_UNIVERSAL: 'sometimes' }));
+  }],
+  ['CI check events accept unique Actions event names', () => {
+    runInputs({ CI_CHECK_EVENTS: '["push","pull_request"]' });
+    for (const value of ['["push","push"]', '["pull-request"]', '["Push"]', '{}']) {
+      assert.throws(() => runInputs({ CI_CHECK_EVENTS: value }));
+    }
   }],
   ['checksum filename accepts safe basenames and rejects paths or hidden names', () => {
     for (const value of ['SHA256SUMS', 'checksums.txt', 'sha256-sums_1.txt']) {
