@@ -41,6 +41,7 @@ for job in required_jobs:
 
 required_inputs = [
     'version', 'repository-type', 'homebrew-tap', 'homebrew-formula', 'extra-packages',
+    'archive-files', 'checksum-filename',
     'nfpm', 'build-runner', 'stable-identifier', 'require-signed-tag', 'darwin-universal',
     'strict-checks',
 ]
@@ -78,7 +79,9 @@ for required_nfpm_verifier_control in [
 for required_verify_attestation_control in [
     'needs.draft.outputs.verification-artifact-name',
     '--rawfile releaseNotes RELEASE-NOTES.md',
-    '--rawfile sha256sums SHA256SUMS',
+    '--rawfile sha256sums "$CHECKSUM_FILENAME"',
+    '--arg checksumFilename "$CHECKSUM_FILENAME"',
+    'checksumFilename:$checksumFilename',
     'verdict:"verified"',
     'payloadArtifact:$payloadArtifact',
     'releaseNotes:$releaseNotes',
@@ -122,6 +125,8 @@ for required_policy_control in [
     'DARWIN_UNIVERSAL: ${{ inputs.darwin-universal }}',
     'if [[ "$DARWIN_UNIVERSAL" != disabled && "$universal_count" == 0 ]]',
     "!['tar.gz', 'zip'].includes(archiveFormat)",
+    'ARCHIVE_FILES: ${{ inputs.archive-files }}',
+    'CHECKSUM_FILENAME: ${{ inputs.checksum-filename }}',
 ]:
     if required_policy_control not in workflow:
         raise SystemExit(f'missing crawler compatibility policy control: {required_policy_control}')
@@ -144,7 +149,7 @@ for required_publish_binding_control in [
     'github.paginate(github.rest.repos.listReleaseAssets',
     "accept: 'application/octet-stream'",
     "crypto.createHash('sha256')",
-    'draft SHA256SUMS bytes differ from verified attestation',
+    'draft ${checksumFilename} bytes differ from verified attestation',
     'verified release notes differ between arm64 and x86_64 attestations',
     'verified asset inventory differs between arm64 and x86_64 attestations',
     'draft RELEASE-NOTES.md bytes differ from verified attestation',
@@ -173,7 +178,7 @@ for required_handoff_control in [
     'verified-inventory-x86_64-${{ needs.draft.outputs.verification-artifact-name }}',
     "inputs: {\n                formula: process.env.FORMULA,\n                tag: process.env.TAG,\n                repository,\n                assets: homebrewAssetsJson,\n              }",
     'TAP_TOKEN cannot access configured Homebrew tap',
-    'verified SHA256SUMS differs between arm64 and x86_64 attestations',
+    'verified ${process.env.CHECKSUM_FILENAME} differs between arm64 and x86_64 attestations',
     'verified asset inventory differs between arm64 and x86_64 attestations',
     "const homebrewTargets = new Set(['darwin_amd64', 'darwin_arm64', 'linux_amd64', 'linux_arm64'])",
     'verified inventory lacks Homebrew assets',
@@ -208,6 +213,8 @@ for required_package_assembly_control in [
     'GoReleaser emitted no Linux Package artifacts',
     "path.join(releaseDirectory, '.NFPM-PACKAGES.json')",
     "platform: `linux_${artifact.goarch}`",
+    'archive file collides with a built payload',
+    'staged archive-files inventory mismatch',
 ]:
     if required_package_assembly_control not in sign:
         raise SystemExit(f'missing nFPM package assembly control: {required_package_assembly_control}')

@@ -38,7 +38,9 @@ const runInputs = (overrides = {}) => {
       cwd: root,
       env: {
         ...process.env,
+        ARCHIVE_FILES: '[]',
         BUILD_RUNNER: 'ubuntu',
+        CHECKSUM_FILENAME: 'SHA256SUMS',
         DARWIN_UNIVERSAL: 'auto',
         EXTRA_PACKAGES: '[]',
         GITHUB_OUTPUT: output,
@@ -111,6 +113,28 @@ const tests = [
   ['Darwin universal mode is tri-state', () => {
     for (const value of ['auto', 'enabled', 'disabled']) runInputs({ DARWIN_UNIVERSAL: value });
     assert.throws(() => runInputs({ DARWIN_UNIVERSAL: 'sometimes' }));
+  }],
+  ['checksum filename accepts safe basenames and rejects paths or hidden names', () => {
+    for (const value of ['SHA256SUMS', 'checksums.txt', 'sha256-sums_1.txt']) {
+      runInputs({ CHECKSUM_FILENAME: value });
+    }
+    for (const value of [
+      '.checksums', 'checksums.txt.', '../checksums.txt', 'nested/checksums.txt', 'checksums\\windows.txt', '',
+      'ASSET-INVENTORY.json', 'release-notes.md', 'SIGNING-MANIFEST.json',
+      'NUL', 'CON.txt', 'com1',
+    ]) {
+      assert.throws(() => runInputs({ CHECKSUM_FILENAME: value }));
+    }
+  }],
+  ['archive files require safe relative paths and unique basenames', () => {
+    runInputs({ ARCHIVE_FILES: '["CHANGELOG.md","docs/LICENSE"]' });
+    for (const value of [
+      '["/README.md"]', '["../README.md"]', '["-docs/README.md"]',
+      '["a/README.md","b/README.md"]', '["a/README.md","b/readme.md"]',
+      '["docs/NUL"]', '["docs/README."]',
+    ]) {
+      assert.throws(() => runInputs({ ARCHIVE_FILES: value }));
+    }
   }],
   ['allowed SSH-signed tag is accepted', () => {
     const fixture = makeSignedTagFixture();

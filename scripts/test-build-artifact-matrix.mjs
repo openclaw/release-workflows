@@ -116,7 +116,7 @@ const packageArtifacts = () => [
   { type: 'Linux Package', name: 'fixture-1.2.3-1.aarch64.rpm', path: 'dist/fixture-1.2.3-1.aarch64.rpm', goos: 'linux', goarch: 'arm64' },
 ];
 
-const runAssembler = ({ nfpm = false, universal = true, mutate = () => {} } = {}) => {
+const runAssembler = ({ archiveFiles = [], nfpm = false, universal = true, mutate = () => {} } = {}) => {
   const root = mkdtempSync(join(tmpdir(), 'release-artifact-assembler-'));
   const originalCwd = process.cwd();
   try {
@@ -140,6 +140,10 @@ const runAssembler = ({ nfpm = false, universal = true, mutate = () => {} } = {}
     }
     mkdirSync(join(dist, 'extra-package-payload'));
     writeFileSync(join(dist, 'extra-package-payload', 'extra.txt'), 'extra\n');
+    if (archiveFiles.length > 0) {
+      mkdirSync(join(root, 'release-archive-files'));
+      for (const name of archiveFiles) writeFileSync(join(root, 'release-archive-files', name), `archive:${name}\n`);
+    }
     if (nfpm) {
       for (const artifact of packageArtifacts()) {
         artifacts.push(artifact);
@@ -151,6 +155,7 @@ const runAssembler = ({ nfpm = false, universal = true, mutate = () => {} } = {}
     writeFileSync(join(releaseAssets, 'SIGNING-MANIFEST.json'), '{}\n');
     process.chdir(root);
     withEnvironment({
+      ARCHIVE_FILES: JSON.stringify(archiveFiles),
       NFPM_ENABLED: nfpm ? 'true' : 'false',
       RELEASE_VERSION: '1.2.3',
       REPOSITORY_NAME: 'fixture',
@@ -181,7 +186,7 @@ const verifyPackages = (root) => execFileSync(
   ['-e', '-u', '-o', 'pipefail', '-c', packageVerifierScript],
   { cwd: join(root, 'release-assets'), encoding: 'utf8', stdio: 'pipe' },
 );
-const runInventory = ({ extraAssets = [], homebrew = false, packages = [], targets = [] } = {}) => {
+const runInventory = ({ checksumFilename = 'SHA256SUMS', extraAssets = [], homebrew = false, packages = [], targets = [] } = {}) => {
   const root = mkdtempSync(join(tmpdir(), 'release-inventory-'));
   const originalCwd = process.cwd();
   try {
@@ -198,6 +203,7 @@ const runInventory = ({ extraAssets = [], homebrew = false, packages = [], targe
     process.chdir(root);
     withEnvironment({
       ASSET_TARGETS_PATH: targetPath,
+      CHECKSUM_FILENAME: checksumFilename,
       GITHUB_REPOSITORY: 'openclaw/fixture',
       HOMEBREW_FORMULA: homebrew ? 'fixture' : '',
       NFPM_PACKAGES_PATH: packagePath,
@@ -205,7 +211,8 @@ const runInventory = ({ extraAssets = [], homebrew = false, packages = [], targe
       TARGET_SHA: 'a'.repeat(40),
     }, () => executeInventoryBuilder(require, process));
     return {
-      checksums: readFileSync(join(root, 'release-assets', 'SHA256SUMS'), 'utf8'),
+      checksumFilename,
+      checksums: readFileSync(join(root, 'release-assets', checksumFilename), 'utf8'),
       inventory: JSON.parse(readFileSync(join(root, 'release-assets', 'ASSET-INVENTORY.json'), 'utf8')),
       root,
     };
@@ -286,6 +293,41 @@ const tests = [
     } finally {
       finishAssembler(fixture);
     }
+  }],
+  ['caller archive-files directory does not affect the empty default', () => {
+    const fixture = runAssembler({ mutate: ({ root }) => {
+      mkdirSync(join(root, 'archive-files'));
+      writeFileSync(join(root, 'archive-files', 'caller.txt'), 'caller source\n');
+    } });
+    try {
+      assert.equal(fixture.targetMap.length, 7);
+    } finally {
+      finishAssembler(fixture);
+    }
+  }],
+  ['opt-in archive files are included in every platform archive', () => {
+    const fixture = runAssembler({ archiveFiles: ['CHANGELOG.md', 'LICENSE', 'README.md'], universal: false });
+    try {
+      for (const row of fixture.targetMap) {
+        const archive = join(fixture.releaseAssets, row.name);
+        const members = (row.name.endsWith('.zip')
+          ? execFileSync('unzip', ['-Z1', archive], { encoding: 'utf8' }).trim().split('\n')
+          : execFileSync('tar', ['-tzf', archive], { encoding: 'utf8' }).trim().split('\n'))
+          .map((name) => name.replace(/^\.\//, ''))
+          .filter(Boolean);
+        assert.deepEqual(members.sort(), [
+          row.target.startsWith('windows_') ? 'fixture.exe' : 'fixture',
+          'CHANGELOG.md',
+          'LICENSE',
+          'README.md',
+        ].sort());
+      }
+    } finally {
+      finishAssembler(fixture);
+    }
+  }],
+  ['archive files cannot case-fold onto a built payload', () => {
+    assert.throws(() => runAssembler({ archiveFiles: ['Fixture'], universal: false }), /collides with a built payload/);
   }],
   ['nFPM package matrix copies exact artifacts and metadata', () => {
     const fixture = runAssembler({ nfpm: true });
@@ -385,6 +427,22 @@ const tests = [
     } finally {
       rmSync(fixture.root, { recursive: true, force: true });
     }
+  }],
+  ['custom checksum filename preserves the inventory and digest set', () => {
+    const fixture = runInventory({ checksumFilename: 'checksums.txt', targets: fourTargets });
+    try {
+      assert.equal(fixture.checksumFilename, 'checksums.txt');
+      assert.match(fixture.checksums, /^[0-9a-f]{64}  ASSET-INVENTORY\.json$/m);
+      assert.equal(fixture.inventory.payloads.some((payload) => payload.name === 'checksums.txt'), false);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  }],
+  ['checksum filename cannot case-fold onto an existing asset', () => {
+    assert.throws(
+      () => runInventory({ checksumFilename: 'release-notes.md', targets: fourTargets }),
+      /release controls already exist/,
+    );
   }],
   ['inventory accepts allowlisted Windows zip targets', () => {
     const windowsTargets = [

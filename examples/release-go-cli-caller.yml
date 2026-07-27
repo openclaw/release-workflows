@@ -26,6 +26,8 @@ jobs:
       homebrew-tap: steipete/homebrew-tap
       homebrew-formula: example-cli
       extra-packages: '[]'
+      # archive-files: '["CHANGELOG.md","LICENSE","README.md"]'
+      # checksum-filename: SHA256SUMS
       # Optional defaults. Set build-runner to macos for native Darwin/CGO builds.
       # nfpm: auto
       # build-runner: ubuntu

@@ -38,6 +38,7 @@ const targetSha = 'a'.repeat(40);
 const runId = '29634760700';
 const runAttempt = '1';
 const verificationPayloadArtifact = `release-verification-payload-${runId}-${runAttempt}`;
+const checksumFilename = 'SHA256SUMS';
 const releaseNotes = '## v1.2.3 - 2026-07-18\n\n- Ship the verified fixture.\n\n';
 
 function digest(data) {
@@ -55,7 +56,7 @@ function replaceChecksum(sha256sums, name, data) {
   return `${lines.join('\n')}\n`;
 }
 
-function baseFixture() {
+function baseFixture(selectedChecksumFilename = checksumFilename) {
   const assetInventory = '{"schemaVersion":1,"repository":"openclaw/fixture"}\n';
   const payloads = new Map([
     ['ASSET-INVENTORY.json', Buffer.from(assetInventory)],
@@ -68,7 +69,7 @@ function baseFixture() {
     .map(([name, data]) => `${digest(data)}  ${name}\n`)
     .join('');
   const draftAssets = new Map(payloads);
-  draftAssets.set('SHA256SUMS', Buffer.from(sha256sums));
+  draftAssets.set(selectedChecksumFilename, Buffer.from(sha256sums));
   const attestations = Object.fromEntries(['arm64', 'x86_64'].map((architecture) => [architecture, {
     schemaVersion: 1,
     repository,
@@ -79,6 +80,7 @@ function baseFixture() {
     commit: targetSha,
     architecture,
     verdict: 'verified',
+    checksumFilename: selectedChecksumFilename,
     assetInventory,
     releaseNotes,
     sha256sums,
@@ -86,10 +88,10 @@ function baseFixture() {
   return { attestations, draftAssets };
 }
 
-async function runScenario(mutate = () => {}, publisherRunAttempt = runAttempt) {
+async function runScenario(mutate = () => {}, publisherRunAttempt = runAttempt, selectedChecksumFilename = checksumFilename) {
   const fixtureRoot = mkdtempSync(join(tmpdir(), 'release-draft-binding-'));
   const originalCwd = process.cwd();
-  const fixture = baseFixture();
+  const fixture = baseFixture(selectedChecksumFilename);
   mutate(fixture);
   for (const architecture of ['arm64', 'x86_64']) {
     const directory = join(fixtureRoot, 'verified-inventory-attestations', architecture);
@@ -139,6 +141,7 @@ async function runScenario(mutate = () => {}, publisherRunAttempt = runAttempt) 
     process.chdir(fixtureRoot);
     await executePublisher(github, context, core, {
       env: {
+        CHECKSUM_FILENAME: selectedChecksumFilename,
         GITHUB_RUN_ATTEMPT: publisherRunAttempt,
         GITHUB_RUN_ID: runId,
         RELEASE_ID: '42',
@@ -167,6 +170,11 @@ const tests = [
   }],
   ['partial publisher rerun reuses producer-bound attestations', async () => {
     const result = await runScenario(() => {}, '2');
+    assert.equal(result.thrown, undefined);
+    assert.equal(result.updateCalls, 1);
+  }],
+  ['custom checksum filename publishes the exact bound draft', async () => {
+    const result = await runScenario(() => {}, runAttempt, 'checksums.txt');
     assert.equal(result.thrown, undefined);
     assert.equal(result.updateCalls, 1);
   }],
