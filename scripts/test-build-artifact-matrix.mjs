@@ -244,12 +244,14 @@ const tests = [
     const output = runBuildMode('auto', 'version: 2\nnfpms:\n  - id: packages\n');
     assert.equal(output['nfpm-enabled'], 'true');
     assert.match(output.args, /^release /);
+    assert.match(output.args, /--parallelism=2/);
     assert.match(output.args, /--release-notes=\/dev\/null/);
   }],
   ['auto mode preserves binary-only build', () => {
     const output = runBuildMode('auto', 'version: 2\nbuilds: []\n');
     assert.equal(output['nfpm-enabled'], 'false');
     assert.match(output.args, /^release /);
+    assert.match(output.args, /--parallelism=2/);
     assert.match(output.args, /--skip=.*nfpm/);
   }],
   ['enabled mode requires configured nFPMs', () => {

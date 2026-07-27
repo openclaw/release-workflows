@@ -809,9 +809,9 @@ jobs:
             disabled) nfpm_enabled=false ;;
           esac
           if [[ "$nfpm_enabled" == true ]]; then
-            args="release --config=$config --clean --timeout 60m --release-notes=/dev/null --skip=announce,aur,aur-source,chocolatey,docker,flatpak,homebrew,ko,makeself,mcp,nix,notarize,publish,sbom,scoop,sign,snapcraft,srpm,validate,winget"
+            args="release --config=$config --clean --timeout 60m --parallelism=2 --release-notes=/dev/null --skip=announce,aur,aur-source,chocolatey,docker,flatpak,homebrew,ko,makeself,mcp,nix,notarize,publish,sbom,scoop,sign,snapcraft,srpm,validate,winget"
           else
-            args="release --config=$config --clean --timeout 60m --release-notes=/dev/null --skip=announce,aur,aur-source,chocolatey,docker,flatpak,homebrew,ko,makeself,mcp,nfpm,nix,notarize,publish,sbom,scoop,sign,snapcraft,srpm,validate,winget"
+            args="release --config=$config --clean --timeout 60m --parallelism=2 --release-notes=/dev/null --skip=announce,aur,aur-source,chocolatey,docker,flatpak,homebrew,ko,makeself,mcp,nfpm,nix,notarize,publish,sbom,scoop,sign,snapcraft,srpm,validate,winget"
           fi
           {
             echo "nfpm-enabled=$nfpm_enabled"
