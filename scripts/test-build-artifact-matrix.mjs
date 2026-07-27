@@ -92,12 +92,23 @@ const runBuildMode = (mode, config, configPath = '.goreleaser.yml') => {
   }
 };
 
-const baseArtifacts = () => [
+const binaryArtifacts = () => [
   { type: 'Binary', name: 'fixture', path: 'dist/fixture_darwin_amd64_v1/fixture', goos: 'darwin', goarch: 'amd64' },
   { type: 'Binary', name: 'fixture', path: 'dist/fixture_darwin_arm64_v8.0/fixture', goos: 'darwin', goarch: 'arm64' },
   { type: 'Binary', name: 'fixture', path: 'dist/fixture_linux_amd64_v1/fixture', goos: 'linux', goarch: 'amd64' },
   { type: 'Binary', name: 'fixture', path: 'dist/fixture_linux_arm64_v8.0/fixture', goos: 'linux', goarch: 'arm64' },
+  { type: 'Binary', name: 'fixture.exe', path: 'dist/fixture_windows_amd64_v1/fixture.exe', goos: 'windows', goarch: 'amd64' },
+  { type: 'Binary', name: 'fixture.exe', path: 'dist/fixture_windows_arm64_v8.0/fixture.exe', goos: 'windows', goarch: 'arm64' },
 ];
+const archiveArtifacts = () => [
+  { type: 'Archive', name: 'fixture_1.2.3_darwin_amd64.tar.gz', path: 'dist/fixture_1.2.3_darwin_amd64.tar.gz', goos: 'darwin', goarch: 'amd64', extra: { Format: 'tar.gz' } },
+  { type: 'Archive', name: 'fixture_1.2.3_darwin_arm64.tar.gz', path: 'dist/fixture_1.2.3_darwin_arm64.tar.gz', goos: 'darwin', goarch: 'arm64', extra: { Format: 'tar.gz' } },
+  { type: 'Archive', name: 'fixture_1.2.3_linux_amd64.tar.gz', path: 'dist/fixture_1.2.3_linux_amd64.tar.gz', goos: 'linux', goarch: 'amd64', extra: { Format: 'tar.gz' } },
+  { type: 'Archive', name: 'fixture_1.2.3_linux_arm64.tar.gz', path: 'dist/fixture_1.2.3_linux_arm64.tar.gz', goos: 'linux', goarch: 'arm64', extra: { Format: 'tar.gz' } },
+  { type: 'Archive', name: 'fixture_1.2.3_windows_amd64.zip', path: 'dist/fixture_1.2.3_windows_amd64.zip', goos: 'windows', goarch: 'amd64', extra: { Format: 'zip' } },
+  { type: 'Archive', name: 'fixture_1.2.3_windows_arm64.zip', path: 'dist/fixture_1.2.3_windows_arm64.zip', goos: 'windows', goarch: 'arm64', extra: { Format: 'zip' } },
+];
+const baseArtifacts = () => [...binaryArtifacts(), ...archiveArtifacts()];
 const packageArtifacts = () => [
   { type: 'Linux Package', name: 'fixture_1.2.3_amd64.deb', path: 'dist/fixture_1.2.3_amd64.deb', goos: 'linux', goarch: 'amd64' },
   { type: 'Linux Package', name: 'fixture-1.2.3-1.x86_64.rpm', path: 'dist/fixture-1.2.3-1.x86_64.rpm', goos: 'linux', goarch: 'amd64' },
@@ -105,7 +116,7 @@ const packageArtifacts = () => [
   { type: 'Linux Package', name: 'fixture-1.2.3-1.aarch64.rpm', path: 'dist/fixture-1.2.3-1.aarch64.rpm', goos: 'linux', goarch: 'arm64' },
 ];
 
-const runAssembler = ({ nfpm = false, mutate = () => {} } = {}) => {
+const runAssembler = ({ nfpm = false, universal = true, mutate = () => {} } = {}) => {
   const root = mkdtempSync(join(tmpdir(), 'release-artifact-assembler-'));
   const originalCwd = process.cwd();
   try {
@@ -114,14 +125,19 @@ const runAssembler = ({ nfpm = false, mutate = () => {} } = {}) => {
     mkdirSync(dist);
     mkdirSync(releaseAssets);
     const artifacts = baseArtifacts();
-    for (const artifact of artifacts) {
+    for (const artifact of artifacts.filter((candidate) => candidate.type === 'Binary')) {
       const directory = join(root, artifact.path, '..');
       mkdirSync(directory, { recursive: true });
       writeFileSync(join(root, artifact.path), `${artifact.goos}/${artifact.goarch}\n`);
       chmodSync(join(root, artifact.path), 0o755);
     }
-    mkdirSync(join(dist, 'universal_darwin_all'));
-    writeFileSync(join(dist, 'universal_darwin_all', 'fixture'), 'universal\n');
+    for (const artifact of artifacts.filter((candidate) => candidate.type === 'Archive')) {
+      writeFileSync(join(root, artifact.path), `unsigned:${artifact.name}\n`);
+    }
+    if (universal) {
+      mkdirSync(join(dist, 'universal_darwin_all'));
+      writeFileSync(join(dist, 'universal_darwin_all', 'fixture'), 'universal\n');
+    }
     mkdirSync(join(dist, 'extra-package-payload'));
     writeFileSync(join(dist, 'extra-package-payload', 'extra.txt'), 'extra\n');
     if (nfpm) {
@@ -224,7 +240,8 @@ const tests = [
   ['auto mode preserves binary-only build', () => {
     const output = runBuildMode('auto', 'version: 2\nbuilds: []\n');
     assert.equal(output['nfpm-enabled'], 'false');
-    assert.equal(output.args, 'build --config=.goreleaser.yml --clean --timeout 60m');
+    assert.match(output.args, /^release /);
+    assert.match(output.args, /--skip=.*nfpm/);
   }],
   ['enabled mode requires configured nFPMs', () => {
     assert.throws(() => runBuildMode('enabled', 'version: 2\nbuilds: []\n'));
@@ -232,7 +249,8 @@ const tests = [
   ['disabled mode overrides configured nFPMs', () => {
     const output = runBuildMode('disabled', 'version: 2\nnfpms:\n  - id: packages\n');
     assert.equal(output['nfpm-enabled'], 'false');
-    assert.equal(output.args, 'build --config=.goreleaser.yml --clean --timeout 60m');
+    assert.match(output.args, /^release /);
+    assert.match(output.args, /--skip=.*nfpm/);
   }],
   ['empty nFPM list stays disabled', () => {
     assert.equal(runBuildMode('auto', 'version: 2\nnfpms: []\n')['nfpm-enabled'], 'false');
@@ -247,8 +265,24 @@ const tests = [
     try {
       assert.deepEqual(fixture.targetMap.map((row) => row.target).sort(), [
         'darwin_amd64', 'darwin_arm64', 'darwin_universal', 'linux_amd64', 'linux_arm64',
+        'windows_amd64', 'windows_arm64',
       ]);
+      assert.deepEqual(
+        fixture.targetMap.filter((row) => row.target.startsWith('windows_')).map((row) => row.name).sort(),
+        ['fixture_1.2.3_windows_amd64.zip', 'fixture_1.2.3_windows_arm64.zip'],
+      );
       assert.deepEqual(fixture.packageMap, []);
+    } finally {
+      finishAssembler(fixture);
+    }
+  }],
+  ['disabled universal mode leaves the six native platform archives', () => {
+    const fixture = runAssembler({ universal: false });
+    try {
+      assert.deepEqual(fixture.targetMap.map((row) => row.target).sort(), [
+        'darwin_amd64', 'darwin_arm64', 'linux_amd64', 'linux_arm64',
+        'windows_amd64', 'windows_arm64',
+      ]);
     } finally {
       finishAssembler(fixture);
     }
@@ -263,7 +297,11 @@ const tests = [
     }
   }],
   ['enabled nFPM mode requires package artifacts', () => {
-    assert.throws(() => runAssembler({ nfpm: true, mutate: ({ artifacts }) => artifacts.splice(4) }), /emitted no Linux Package/);
+    assert.throws(() => runAssembler({ nfpm: true, mutate: ({ artifacts }) => {
+      for (let index = artifacts.length - 1; index >= 0; index -= 1) {
+        if (artifacts[index].type === 'Linux Package') artifacts.splice(index, 1);
+      }
+    } }), /emitted no Linux Package/);
   }],
   ['disabled nFPM mode rejects unexpected package artifacts', () => {
     assert.throws(() => runAssembler({ mutate: ({ artifacts, dist }) => {
@@ -276,6 +314,28 @@ const tests = [
     assert.throws(() => runAssembler({ mutate: ({ artifacts }) => artifacts.push({
       type: 'Binary', name: 'other', path: 'dist/fixture_linux_amd64_v1/other', goos: 'linux', goarch: 'arm64',
     }) }), /mixes GoReleaser platforms/);
+  }],
+  ['archive format must come from a single GoReleaser artifact', () => {
+    assert.throws(() => runAssembler({ mutate: ({ artifacts }) => {
+      const archive = artifacts.find((artifact) => artifact.type === 'Archive' && artifact.goos === 'windows' && artifact.goarch === 'amd64');
+      archive.extra.Format = '7z';
+    } }), /unsupported GoReleaser archive format/);
+  }],
+  ['archive metadata extension must match its allowlisted format', () => {
+    assert.throws(() => runAssembler({ mutate: ({ artifacts, dist }) => {
+      const archive = artifacts.find((artifact) => artifact.type === 'Archive' && artifact.goos === 'windows' && artifact.goarch === 'amd64');
+      archive.name = 'fixture_1.2.3_windows_amd64.tar.gz';
+      archive.path = `dist/${archive.name}`;
+      writeFileSync(join(dist, archive.name), 'unsigned\n');
+    } }), /unsafe or inconsistent GoReleaser archive metadata/);
+  }],
+  ['multiple GoReleaser archives for one canonical target fail closed', () => {
+    assert.throws(() => runAssembler({ mutate: ({ artifacts, dist }) => {
+      const archive = artifacts.find((artifact) => artifact.type === 'Archive' && artifact.goos === 'linux' && artifact.goarch === 'amd64');
+      const duplicate = { ...archive, name: 'fixture_1.2.3_linux_amd64-extra.tar.gz', path: 'dist/fixture_1.2.3_linux_amd64-extra.tar.gz' };
+      artifacts.push(duplicate);
+      writeFileSync(join(dist, duplicate.name), 'unsigned\n');
+    } }), /expected exactly one GoReleaser Archive artifact/);
   }],
   ['colliding archive slugs fail closed', () => {
     assert.throws(() => runAssembler({ mutate: ({ dist }) => {
@@ -322,6 +382,21 @@ const tests = [
     const fixture = runInventory({ targets: fourTargets });
     try {
       assert.equal(fixture.inventory.payloads.some((payload) => 'kind' in payload), false);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  }],
+  ['inventory accepts allowlisted Windows zip targets', () => {
+    const windowsTargets = [
+      { name: 'fixture_1.2.3_windows_amd64.zip', target: 'windows_amd64' },
+      { name: 'fixture_1.2.3_windows_arm64.zip', target: 'windows_arm64' },
+    ];
+    const fixture = runInventory({ targets: [...fourTargets, ...windowsTargets] });
+    try {
+      assert.deepEqual(
+        fixture.inventory.payloads.filter((payload) => payload.target?.startsWith('windows_')).map((payload) => payload.name).sort(),
+        windowsTargets.map((row) => row.name).sort(),
+      );
     } finally {
       rmSync(fixture.root, { recursive: true, force: true });
     }

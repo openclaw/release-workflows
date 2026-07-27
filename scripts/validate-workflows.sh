@@ -14,6 +14,7 @@ actionlint "${workflow_files[@]}"
 
 node scripts/test-release-target-resolution.mjs
 node scripts/test-build-artifact-matrix.mjs
+node scripts/test-go-cli-policy-inputs.mjs
 node scripts/test-release-notes-extraction.mjs
 node scripts/test-draft-binding.mjs
 node scripts/test-homebrew-handoff.mjs
@@ -40,7 +41,8 @@ for job in required_jobs:
 
 required_inputs = [
     'version', 'repository-type', 'homebrew-tap', 'homebrew-formula', 'extra-packages',
-    'nfpm', 'build-runner', 'strict-checks',
+    'nfpm', 'build-runner', 'stable-identifier', 'require-signed-tag', 'darwin-universal',
+    'strict-checks',
 ]
 for name in required_inputs:
     if not re.search(rf'^      {re.escape(name)}:\s*$', workflow, re.MULTILINE):
@@ -107,11 +109,22 @@ for required_build_control in [
     'NFPM_MODE: ${{ inputs.nfpm }}',
     'nfpm-enabled:',
     'release --config=$config --clean --timeout 60m --release-notes=/dev/null --skip=',
-    'build --config=$config --clean --timeout 60m',
     'GORELEASER_CURRENT_TAG: ${{ needs.validate.outputs.tag }}',
 ]:
     if required_build_control not in build:
         raise SystemExit(f'missing build-mode control: {required_build_control}')
+for required_policy_control in [
+    'Verify required SSH-signed tag',
+    'Reverify required SSH-signed tag before publication',
+    'gpg.ssh.allowedSignersFile="$policy" verify-tag "$TAG"',
+    'STABLE_IDENTIFIER: ${{ inputs.stable-identifier }}',
+    'identifier=${STABLE_IDENTIFIER:-"$IDENTIFIER_PREFIX.$repo_slug.$binary_slug"}',
+    'DARWIN_UNIVERSAL: ${{ inputs.darwin-universal }}',
+    'if [[ "$DARWIN_UNIVERSAL" != disabled && "$universal_count" == 0 ]]',
+    "!['tar.gz', 'zip'].includes(archiveFormat)",
+]:
+    if required_policy_control not in workflow:
+        raise SystemExit(f'missing crawler compatibility policy control: {required_policy_control}')
 if 'verification-artifact-name:' not in draft or 'retention-days: 30' not in draft:
     raise SystemExit('draft must export and retain its verification payload for the retry window')
 for required_release_notes_control in [
