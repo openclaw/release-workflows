@@ -34,6 +34,7 @@ jobs:
       # stable-identifier: ai.openclaw.example-cli
       # require-signed-tag: false
       # darwin-universal: auto
+      # ci-check-events: '["push","pull_request"]'
       strict-checks: false
     secrets:
       MACOS_SIGNING_P12: ${{ secrets.MACOS_SIGNING_P12 }}

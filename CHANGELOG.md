@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.3.1 - 2026-07-27
+
+- Let callers opt into event-scoped CI evidence so unrelated scheduled workflows on the same commit cannot permanently block release validation.
+
 ## v1.3.0 - 2026-07-27
 
 - Preserve established checksum asset names and opt-in archive documentation files while keeping existing callers' release bytes unchanged by default.
