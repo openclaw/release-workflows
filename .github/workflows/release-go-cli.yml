@@ -71,6 +71,11 @@ on:
         required: false
         default: '[]'
         type: string
+      reproducible-rebuild:
+        description: 'Independent binary rebuild gate: disabled or non-darwin; all is reserved until signed Darwin binaries are reproducible'
+        required: false
+        default: disabled
+        type: string
     secrets:
       MACOS_SIGNING_P12:
         description: Base64-encoded Developer ID Application certificate and private key
@@ -131,6 +136,7 @@ jobs:
           HOMEBREW_FORMULA: ${{ inputs.homebrew-formula }}
           HOMEBREW_TAP: ${{ inputs.homebrew-tap }}
           NFPM_MODE: ${{ inputs.nfpm }}
+          REPRODUCIBLE_REBUILD: ${{ inputs.reproducible-rebuild }}
           REPOSITORY_TYPE: ${{ inputs.repository-type }}
           STABLE_IDENTIFIER: ${{ inputs.stable-identifier }}
           VERSION: ${{ inputs.version }}
@@ -155,6 +161,14 @@ jobs:
           fi
           if [[ "$NFPM_MODE" != auto && "$NFPM_MODE" != enabled && "$NFPM_MODE" != disabled ]]; then
             echo "nfpm must be auto, enabled, or disabled" >&2
+            exit 1
+          fi
+          if [[ "$REPRODUCIBLE_REBUILD" != disabled && "$REPRODUCIBLE_REBUILD" != non-darwin ]]; then
+            if [[ "$REPRODUCIBLE_REBUILD" == all ]]; then
+              echo "reproducible-rebuild=all is unavailable: Darwin binaries are signed and notarized, so their published bytes cannot match an unsigned rebuild" >&2
+            else
+              echo "reproducible-rebuild must be disabled or non-darwin" >&2
+            fi
             exit 1
           fi
           if [[ ! "$CHECKSUM_FILENAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$ ]]; then
@@ -720,6 +734,10 @@ jobs:
     permissions:
       contents: read
     outputs:
+      go-version: ${{ steps.go-version.outputs.version }}
+      go-setup-version: ${{ steps.go-version.outputs.setup-version }}
+      goreleaser-args: ${{ steps.build-mode.outputs.args }}
+      goreleaser-version: ${{ steps.goreleaser-version.outputs.version }}
       nfpm-enabled: ${{ steps.build-mode.outputs.nfpm-enabled }}
     steps:
       - name: Check out frozen tag
@@ -739,6 +757,18 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Freeze Go version
+        if: inputs.reproducible-rebuild != 'disabled'
+        id: go-version
+        run: |
+          set -euo pipefail
+          version=$(go env GOVERSION)
+          [[ "$version" =~ ^go[0-9]+\.[0-9]+(\.[0-9]+)?([a-z]+[0-9]+)?$ ]] || {
+            echo "could not resolve the installed Go version" >&2
+            exit 1
+          }
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "setup-version=${version#go}" >>"$GITHUB_OUTPUT"
       - name: Resolve GoReleaser package mode
         id: build-mode
         env:
@@ -787,14 +817,30 @@ jobs:
             echo "nfpm-enabled=$nfpm_enabled"
             echo "args=$args"
           } >>"$GITHUB_OUTPUT"
-      - name: Build configured GoReleaser matrix
+      - name: Install GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
-        env:
-          GORELEASER_CURRENT_TAG: ${{ needs.validate.outputs.tag }}
         with:
           distribution: goreleaser
           version: '~> v2'
-          args: ${{ steps.build-mode.outputs.args }}
+          install-only: true
+      - name: Freeze GoReleaser version
+        id: goreleaser-version
+        run: |
+          set -euo pipefail
+          version=$(goreleaser --version | awk '$1 == "GitVersion:" { print $2; exit }')
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "could not resolve the installed GoReleaser version" >&2
+            exit 1
+          }
+          echo "version=v$version" >>"$GITHUB_OUTPUT"
+      - name: Build configured GoReleaser matrix
+        env:
+          GORELEASER_ARGS: ${{ steps.build-mode.outputs.args }}
+          GORELEASER_CURRENT_TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          read -r -a goreleaser_args <<<"$GORELEASER_ARGS"
+          goreleaser "${goreleaser_args[@]}"
       - name: Stage caller package and archive payloads
         env:
           ARCHIVE_FILES: ${{ inputs.archive-files }}
@@ -1178,6 +1224,7 @@ jobs:
           ]);
           const archiveArtifacts = artifacts.filter((artifact) => artifact.type === 'Archive');
           const targetRows = [];
+          const binaryRows = [];
           const archiveNames = new Set();
           const directories = fs.readdirSync(distDirectory, { withFileTypes: true })
             .filter((entry) => entry.isDirectory())
@@ -1187,13 +1234,24 @@ jobs:
             let canonicalTarget = '';
             let archiveFormat = 'tar.gz';
             let archiveName = '';
+            let directoryBinaryArtifacts = [];
+            let directoryPrefix = '';
             if (entry.name === 'universal_darwin_all') {
               canonicalTarget = 'darwin_universal';
             } else {
-              const prefix = `dist/${entry.name}/`;
-              const platforms = new Set(artifacts
-                .filter((artifact) => artifact.type === 'Binary' &&
-                  typeof artifact.path === 'string' && artifact.path.startsWith(prefix))
+              directoryPrefix = `dist/${entry.name}/`;
+              const directoryBinaryCandidates = artifacts.filter((artifact) => artifact.type === 'Binary' &&
+                typeof artifact.path === 'string' && artifact.path.startsWith(directoryPrefix));
+              const directoryBinariesByPath = new Map();
+              for (const artifact of directoryBinaryCandidates) {
+                const existing = directoryBinariesByPath.get(artifact.path);
+                if (existing && (existing.goos !== artifact.goos || existing.goarch !== artifact.goarch)) {
+                  throw new Error(`conflicting GoReleaser binary metadata for ${artifact.path}`);
+                }
+                if (!existing) directoryBinariesByPath.set(artifact.path, artifact);
+              }
+              directoryBinaryArtifacts = [...directoryBinariesByPath.values()];
+              const platforms = new Set(directoryBinaryArtifacts
                 .map((artifact) => `${artifact.goos}/${artifact.goarch}`));
               if (platforms.size > 1) {
                 throw new Error(`release archive mixes GoReleaser platforms: dist/${entry.name}`);
@@ -1260,7 +1318,18 @@ jobs:
             } else {
               execFileSync('zip', ['-qry', destination, '.'], { cwd: directory, stdio: 'inherit' });
             }
-            if (canonicalTarget) targetRows.push({ name: archiveName, target: canonicalTarget });
+            if (canonicalTarget) {
+              targetRows.push({ name: archiveName, target: canonicalTarget });
+              for (const artifact of directoryBinaryArtifacts) {
+                const member = artifact.path.slice(directoryPrefix.length);
+                const components = member.split('/');
+                if (!member || member.includes('\\') || components.includes('..') ||
+                    components.some((component) => !component || component.startsWith('-'))) {
+                  throw new Error(`unsafe GoReleaser binary member path: ${artifact.path}`);
+                }
+                binaryRows.push({ target: canonicalTarget, archive: archiveName, member });
+              }
+            }
           }
           if (directories.length === 0) throw new Error('GoReleaser produced no release archive directories');
 
@@ -1306,10 +1375,15 @@ jobs:
             });
           }
           targetRows.sort((left, right) => left.name.localeCompare(right.name));
+          binaryRows.sort((left, right) => left.target.localeCompare(right.target) || left.member.localeCompare(right.member));
           packageRows.sort((left, right) => left.name.localeCompare(right.name));
           fs.writeFileSync(
             path.join(releaseDirectory, '.ASSET-TARGETS.json'),
             `${JSON.stringify(targetRows, null, 2)}\n`,
+          );
+          fs.writeFileSync(
+            path.join(releaseDirectory, '.ASSET-BINARIES.json'),
+            `${JSON.stringify(binaryRows, null, 2)}\n`,
           );
           fs.writeFileSync(
             path.join(releaseDirectory, '.NFPM-PACKAGES.json'),
@@ -1352,9 +1426,284 @@ jobs:
           rm -f "$search_list_file" "$RUNNER_TEMP/release-signing.p12"
           exit "$cleanup_failed"
 
+  rebuild:
+    name: 3c · Independent reproducible rebuild
+    needs: [validate, build]
+    runs-on: ${{ inputs.build-runner == 'macos' && 'macos-15' || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+    outputs:
+      artifact-name: ${{ steps.rebuild-artifact-name.outputs.artifact-name }}
+    steps:
+      - name: Check out clean source for independent rebuild
+        if: inputs.reproducible-rebuild != 'disabled'
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          path: reproducible-source
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.tag }}
+          fetch-depth: 0
+      - name: Verify independent rebuild source
+        if: inputs.reproducible-rebuild != 'disabled'
+        env:
+          TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
+        run: |
+          set -euo pipefail
+          [[ "$(git -C reproducible-source rev-parse HEAD)" == "$TARGET_SHA" ]]
+          [[ -z "$(git -C reproducible-source status --porcelain --untracked-files=all)" ]]
+      - name: Set up independent Go toolchain
+        if: inputs.reproducible-rebuild != 'disabled'
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ needs.build.outputs.go-setup-version }}
+          cache: false
+      - name: Verify independent Go toolchain
+        if: inputs.reproducible-rebuild != 'disabled'
+        env:
+          EXPECTED_GO_VERSION: ${{ needs.build.outputs.go-version }}
+        run: |
+          set -euo pipefail
+          [[ "$(go env GOVERSION)" == "$EXPECTED_GO_VERSION" ]]
+      - name: Install GoReleaser for independent rebuild
+        if: inputs.reproducible-rebuild != 'disabled'
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
+        with:
+          distribution: goreleaser
+          version: ${{ needs.build.outputs.goreleaser-version }}
+          install-only: true
+      - name: Independently rebuild configured matrix without credentials
+        if: inputs.reproducible-rebuild != 'disabled'
+        env:
+          GORELEASER_ARGS: ${{ needs.build.outputs.goreleaser-args }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_RESULTS_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
+          goreleaser_bin=$(command -v goreleaser)
+          go_bin=$(command -v go)
+          rebuild_home="$RUNNER_TEMP/reproducible-home"
+          rebuild_tmp="$RUNNER_TEMP/reproducible-tmp"
+          mkdir -p "$rebuild_home" "$rebuild_tmp" "$RUNNER_TEMP/reproducible-gocache" "$RUNNER_TEMP/reproducible-gomodcache"
+          read -r -a goreleaser_args <<<"$GORELEASER_ARGS"
+          cd reproducible-source
+          env -i \
+            CI=true \
+            GIT_CONFIG_GLOBAL=/dev/null \
+            GIT_CONFIG_NOSYSTEM=1 \
+            GOCACHE="$RUNNER_TEMP/reproducible-gocache" \
+            GOMODCACHE="$RUNNER_TEMP/reproducible-gomodcache" \
+            GORELEASER_CURRENT_TAG="$RELEASE_TAG" \
+            HOME="$rebuild_home" \
+            LANG=C \
+            LC_ALL=C \
+            PATH="$(dirname "$goreleaser_bin"):$(dirname "$go_bin"):/usr/bin:/bin:/usr/sbin:/sbin" \
+            TMPDIR="$rebuild_tmp" \
+            TZ=UTC \
+            "$goreleaser_bin" "${goreleaser_args[@]}"
+      - name: Verify rebuild source remained clean
+        if: inputs.reproducible-rebuild != 'disabled'
+        run: |
+          set -euo pipefail
+          [[ -z "$(/usr/bin/git -C reproducible-source status --porcelain --untracked-files=all -- ':!dist')" ]]
+      - name: Resolve raw rebuild artifact name
+        if: inputs.reproducible-rebuild != 'disabled'
+        id: rebuild-artifact-name
+        run: echo "artifact-name=independent-rebuild-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >>"$GITHUB_OUTPUT"
+      - name: Upload raw independent rebuild
+        if: inputs.reproducible-rebuild != 'disabled'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: ${{ steps.rebuild-artifact-name.outputs.artifact-name }}
+          path: reproducible-source/dist
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  compare:
+    name: 3d · Compare staged and rebuilt bytes
+    needs: [validate, build, sign, rebuild]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    outputs:
+      artifact-name: ${{ steps.proof-artifact-name.outputs.artifact-name }}
+    steps:
+      - name: Download raw independent rebuild
+        if: inputs.reproducible-rebuild != 'disabled'
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: ${{ needs.rebuild.outputs.artifact-name }}
+          path: reproducible-source/dist
+      - name: Download signed payload
+        if: inputs.reproducible-rebuild != 'disabled'
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: signed-release-assets-${{ github.run_id }}
+      - name: Require byte-identical independent rebuild
+        if: inputs.reproducible-rebuild != 'disabled'
+        env:
+          GORELEASER_VERSION: ${{ needs.build.outputs.goreleaser-version }}
+          GO_VERSION: ${{ needs.build.outputs.go-version }}
+          REPRODUCIBLE_REBUILD: ${{ inputs.reproducible-rebuild }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
+        run: |
+          set -euo pipefail
+          /usr/bin/tar -xzf signed-release-assets.tar.gz
+          [[ -z "$(find reproducible-source/dist -type l -print -quit)" ]]
+          [[ -n "$GO_VERSION" && -n "$GORELEASER_VERSION" ]]
+          export REPRODUCIBLE_REBUILD_PROOF="$RUNNER_TEMP/reproducible-rebuild.json"
+          node <<'NODE'
+          // reproducible-rebuild-verifier-begin
+          const crypto = require('crypto');
+          const fs = require('fs');
+          const path = require('path');
+          const { execFileSync } = require('child_process');
+
+          const mode = process.env.REPRODUCIBLE_REBUILD;
+          if (mode !== 'non-darwin') throw new Error(`unsupported reproducible rebuild mode: ${mode}`);
+          const sourceRoot = path.resolve('reproducible-source');
+          const releaseRoot = path.resolve('release-assets');
+          const artifacts = JSON.parse(fs.readFileSync(path.join(sourceRoot, 'dist', 'artifacts.json'), 'utf8'));
+          const targetRows = JSON.parse(fs.readFileSync(path.join(releaseRoot, '.ASSET-TARGETS.json'), 'utf8'));
+          const binaryRows = JSON.parse(fs.readFileSync(path.join(releaseRoot, '.ASSET-BINARIES.json'), 'utf8'));
+          if (!Array.isArray(artifacts) || !Array.isArray(targetRows) || !Array.isArray(binaryRows)) {
+            throw new Error('rebuild and staged binary metadata must be arrays');
+          }
+          const canonicalTargets = new Map([
+            ['linux/amd64', 'linux_amd64'],
+            ['linux/arm64', 'linux_arm64'],
+            ['windows/amd64', 'windows_amd64'],
+            ['windows/arm64', 'windows_arm64'],
+          ]);
+          const digest = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
+          const safeMembers = (archive) => {
+            const args = archive.endsWith('.zip') ? ['-Z1', archive] : ['-tzf', archive];
+            const command = archive.endsWith('.zip') ? 'unzip' : 'tar';
+            const members = execFileSync(command, args, { encoding: 'utf8', maxBuffer: 1024 * 1024 * 1024 })
+              .trimEnd().split('\n').filter(Boolean);
+            for (const member of members) {
+              const normalized = member.replace(/^\.\//, '');
+              const components = normalized.split('/');
+              if (path.posix.isAbsolute(normalized) || components.includes('..') ||
+                  components.some((component) => component.startsWith('-'))) {
+                throw new Error(`unsafe archive member in ${path.basename(archive)}: ${member}`);
+              }
+            }
+            return members;
+          };
+          const readMember = (archive, member) => execFileSync(
+            archive.endsWith('.zip') ? 'unzip' : 'tar',
+            archive.endsWith('.zip') ? ['-p', archive, member] : ['-xOzf', archive, '--', member],
+            { encoding: 'buffer', maxBuffer: 1024 * 1024 * 1024 },
+          );
+
+          const selectedCandidates = artifacts.filter((artifact) =>
+            artifact?.type === 'Binary' && canonicalTargets.has(`${artifact.goos}/${artifact.goarch}`));
+          const selectedByPath = new Map();
+          for (const artifact of selectedCandidates) {
+            const existing = selectedByPath.get(artifact.path);
+            if (existing && (existing.goos !== artifact.goos || existing.goarch !== artifact.goarch)) {
+              throw new Error(`conflicting independent rebuild metadata for ${artifact.path}`);
+            }
+            if (!existing) selectedByPath.set(artifact.path, artifact);
+          }
+          const selectedArtifacts = [...selectedByPath.values()];
+          if (selectedArtifacts.length === 0) throw new Error('independent rebuild produced no non-Darwin binaries');
+          const expectedRows = binaryRows.filter((row) => /^(?:linux|windows)_(?:amd64|arm64)$/.test(row?.target ?? ''));
+          const expectedByKey = new Map();
+          for (const row of expectedRows) {
+            if (typeof row.archive !== 'string' || typeof row.member !== 'string' || !row.member ||
+                row.member.includes('\\') || row.member.split('/').some((component) => !component || component === '..' || component.startsWith('-')) ||
+                (row.archive.endsWith('.zip') && /[*?[]/.test(row.member)) ||
+                targetRows.filter((targetRow) => targetRow.target === row.target && targetRow.name === row.archive).length !== 1) {
+              throw new Error('staged binary manifest contains an invalid row');
+            }
+            const key = `${row.target}\0${row.member}`;
+            if (expectedByKey.has(key)) throw new Error(`duplicate staged binary manifest row: ${row.target}/${row.member}`);
+            expectedByKey.set(key, row);
+          }
+          if (expectedByKey.size === 0) throw new Error('staged payload contains no non-Darwin binaries');
+          const proofRows = [];
+          const observedKeys = new Set();
+          for (const artifact of selectedArtifacts) {
+            if (typeof artifact.path !== 'string' || !artifact.path.startsWith('dist/')) {
+              throw new Error('independent rebuild binary has an unsafe path');
+            }
+            const target = canonicalTargets.get(`${artifact.goos}/${artifact.goarch}`);
+            const member = artifact.path.split('/').slice(2).join('/');
+            const key = `${target}\0${member}`;
+            if (!member || member.includes('\\') || member.split('/').some((component) => !component || component === '..' || component.startsWith('-')) ||
+                observedKeys.has(key)) {
+              throw new Error(`duplicate or unsafe independent rebuild binary for ${target}: ${member}`);
+            }
+            observedKeys.add(key);
+            const expected = expectedByKey.get(key);
+            if (!expected) throw new Error(`independent rebuild emitted an unexpected binary: ${target}/${member}`);
+            if (expected.archive.endsWith('.zip') && /[*?[]/.test(member)) {
+              throw new Error(`ZIP binary member uses wildcard metacharacters: ${member}`);
+            }
+            const archiveName = expected.archive;
+            if (typeof archiveName !== 'string' || path.basename(archiveName) !== archiveName) {
+              throw new Error(`unsafe staged archive name for ${target}`);
+            }
+            const archive = path.join(releaseRoot, archiveName);
+            const matchingMembers = safeMembers(archive).filter((member) =>
+              member.replace(/^\.\//, '') === expected.member);
+            if (matchingMembers.length !== 1) {
+              throw new Error(`expected exactly one ${expected.member} in staged archive ${archiveName}; found ${matchingMembers.length}`);
+            }
+            const stagedBytes = readMember(archive, matchingMembers[0]);
+            const rebuiltPath = path.resolve(sourceRoot, artifact.path);
+            if (!rebuiltPath.startsWith(`${path.join(sourceRoot, 'dist')}${path.sep}`)) {
+              throw new Error(`independent rebuild path escapes dist: ${artifact.path}`);
+            }
+            const rebuiltStat = fs.lstatSync(rebuiltPath);
+            if (!rebuiltStat.isFile() || rebuiltStat.isSymbolicLink()) {
+              throw new Error(`independent rebuild binary is not a regular file: ${artifact.path}`);
+            }
+            const rebuiltBytes = fs.readFileSync(rebuiltPath);
+            const stagedSha256 = digest(stagedBytes);
+            const rebuiltSha256 = digest(rebuiltBytes);
+            if (!stagedBytes.equals(rebuiltBytes)) {
+              throw new Error(`reproducible rebuild mismatch for ${target}/${member}: staged_sha256=${stagedSha256} rebuilt_sha256=${rebuiltSha256}`);
+            }
+            console.log(`reproducible rebuild: target=${target} binary=${member} staged_sha256=${stagedSha256} rebuilt_sha256=${rebuiltSha256} byte_identical=true`);
+            proofRows.push({ target, archive: archiveName, member, stagedSha256, rebuiltSha256 });
+          }
+          if (observedKeys.size !== expectedByKey.size || [...expectedByKey.keys()].some((key) => !observedKeys.has(key))) {
+            throw new Error('independent rebuild binary set differs from the staged non-Darwin binary set');
+          }
+          proofRows.sort((left, right) => left.target.localeCompare(right.target) || left.member.localeCompare(right.member));
+          const proof = {
+            schemaVersion: 1,
+            repository: process.env.GITHUB_REPOSITORY,
+            tag: process.env.TAG,
+            commit: process.env.TARGET_SHA,
+            mode,
+            goVersion: process.env.GO_VERSION,
+            goreleaserVersion: process.env.GORELEASER_VERSION,
+            targets: proofRows,
+          };
+          fs.writeFileSync(process.env.REPRODUCIBLE_REBUILD_PROOF, `${JSON.stringify(proof, null, 2)}\n`);
+          // reproducible-rebuild-verifier-end
+          NODE
+      - name: Resolve reproducible rebuild proof name
+        if: inputs.reproducible-rebuild != 'disabled'
+        id: proof-artifact-name
+        run: echo "artifact-name=reproducible-rebuild-proof-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >>"$GITHUB_OUTPUT"
+      - name: Upload reproducible rebuild proof
+        if: inputs.reproducible-rebuild != 'disabled'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: ${{ steps.proof-artifact-name.outputs.artifact-name }}
+          path: ${{ runner.temp }}/reproducible-rebuild.json
+          if-no-files-found: error
+          retention-days: 30
+
   draft:
     name: 4 · Create exact draft
-    needs: [validate, sign]
+    needs: [validate, build, sign, compare]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -1371,10 +1720,18 @@ jobs:
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
           name: signed-release-assets-${{ github.run_id }}
+      - name: Download reproducible rebuild proof
+        if: inputs.reproducible-rebuild != 'disabled'
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: ${{ needs.compare.outputs.artifact-name }}
+          path: ${{ runner.temp }}/reproducible-rebuild-proof
       - name: Create frozen inventory and checksums
         env:
           CHECKSUM_FILENAME: ${{ inputs.checksum-filename }}
           HOMEBREW_FORMULA: ${{ inputs.homebrew-formula }}
+          REPRODUCIBLE_REBUILD: ${{ inputs.reproducible-rebuild }}
+          REPRODUCIBLE_REBUILD_PROOF: ${{ runner.temp }}/reproducible-rebuild-proof/reproducible-rebuild.json
           TAG: ${{ needs.validate.outputs.tag }}
           TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
         run: |
@@ -1383,8 +1740,10 @@ jobs:
           [[ -s validated-release-notes/RELEASE-NOTES.md ]] || { echo "validated release notes missing" >&2; exit 1; }
           cp validated-release-notes/RELEASE-NOTES.md release-assets/RELEASE-NOTES.md
           target_map="$RUNNER_TEMP/ASSET-TARGETS.json"
+          binary_map="$RUNNER_TEMP/ASSET-BINARIES.json"
           package_map="$RUNNER_TEMP/NFPM-PACKAGES.json"
           mv release-assets/.ASSET-TARGETS.json "$target_map"
+          mv release-assets/.ASSET-BINARIES.json "$binary_map"
           mv release-assets/.NFPM-PACKAGES.json "$package_map"
           ASSET_TARGETS_PATH="$target_map" NFPM_PACKAGES_PATH="$package_map" node <<'NODE'
           // asset-inventory-builder-begin
@@ -1487,6 +1846,42 @@ jobs:
             commit: process.env.TARGET_SHA,
             payloads,
           };
+          if (process.env.REPRODUCIBLE_REBUILD !== 'disabled') {
+            const proof = JSON.parse(fs.readFileSync(process.env.REPRODUCIBLE_REBUILD_PROOF, 'utf8'));
+            if (!exactKeys(proof, ['schemaVersion', 'repository', 'tag', 'commit', 'mode', 'goVersion', 'goreleaserVersion', 'targets']) ||
+                proof.schemaVersion !== 1 || proof.repository !== process.env.GITHUB_REPOSITORY ||
+                proof.tag !== process.env.TAG || proof.commit !== process.env.TARGET_SHA ||
+                proof.mode !== process.env.REPRODUCIBLE_REBUILD ||
+                typeof proof.goVersion !== 'string' || proof.goVersion.length === 0 ||
+                typeof proof.goreleaserVersion !== 'string' || proof.goreleaserVersion.length === 0 ||
+                !Array.isArray(proof.targets) || proof.targets.length === 0) {
+              throw new Error('reproducible rebuild proof identity or schema mismatch');
+            }
+            const proofKeys = new Set();
+            for (const row of proof.targets) {
+              if (!exactKeys(row, ['target', 'archive', 'member', 'stagedSha256', 'rebuiltSha256']) ||
+                  typeof row.target !== 'string' || !/^(?:linux|windows)_(?:amd64|arm64)$/.test(row.target) ||
+                  typeof row.archive !== 'string' || targetByName.get(row.archive) !== row.target ||
+                  typeof row.member !== 'string' || row.member.length === 0 || row.member.includes('\\') ||
+                  row.member.split('/').some((component) => !component || component === '..' || component.startsWith('-')) ||
+                  (row.archive.endsWith('.zip') && /[*?[]/.test(row.member)) ||
+                  typeof row.stagedSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(row.stagedSha256) ||
+                  row.rebuiltSha256 !== row.stagedSha256) {
+                throw new Error('reproducible rebuild proof contains an invalid target row');
+              }
+              const key = `${row.target}\0${row.member}`;
+              if (proofKeys.has(key)) throw new Error('reproducible rebuild proof contains a duplicate target binary');
+              proofKeys.add(key);
+            }
+            const expectedTargets = new Set(targetRows
+              .filter((row) => /^(?:linux|windows)_(?:amd64|arm64)$/.test(row.target))
+              .map((row) => row.target));
+            const proofTargets = new Set(proof.targets.map((row) => row.target));
+            if (expectedTargets.size !== proofTargets.size || [...expectedTargets].some((target) => !proofTargets.has(target))) {
+              throw new Error('reproducible rebuild proof does not cover every staged non-Darwin target');
+            }
+            inventory.reproducibleRebuild = proof;
+          }
           fs.writeFileSync(
             path.join(releaseDirectory, 'ASSET-INVENTORY.json'),
             `${JSON.stringify(inventory, null, 2)}\n`,
@@ -1602,6 +1997,7 @@ jobs:
           EXPECTED_ARCH: ${{ matrix.arch }}
           DARWIN_UNIVERSAL: ${{ inputs.darwin-universal }}
           HOMEBREW_FORMULA: ${{ inputs.homebrew-formula }}
+          REPRODUCIBLE_REBUILD: ${{ inputs.reproducible-rebuild }}
           REPOSITORY_NAME: ${{ github.event.repository.name }}
           REPOSITORY_TYPE: ${{ inputs.repository-type }}
           STABLE_IDENTIFIER: ${{ inputs.stable-identifier }}
@@ -1716,6 +2112,70 @@ jobs:
             [[ "$(stat -f %z "$name")" == "$size" ]]
             [[ "$(shasum -a 256 "$name" | awk '{print $1}')" == "$digest" ]]
           done < <(jq -r '.payloads[] | [.name,.size,.sha256] | @tsv' ASSET-INVENTORY.json)
+
+          # reproducible-rebuild-inventory-verifier-begin
+          node <<'NODE'
+          const crypto = require('crypto');
+          const fs = require('fs');
+          const path = require('path');
+          const { execFileSync } = require('child_process');
+          const inventory = JSON.parse(fs.readFileSync('ASSET-INVENTORY.json', 'utf8'));
+          const mode = process.env.REPRODUCIBLE_REBUILD;
+          if (mode === 'disabled') {
+            if (Object.hasOwn(inventory, 'reproducibleRebuild')) {
+              throw new Error('disabled reproducible rebuild unexpectedly has an inventory proof');
+            }
+          } else {
+            const proof = inventory.reproducibleRebuild;
+            if (!proof || proof.schemaVersion !== 1 || proof.repository !== process.env.GITHUB_REPOSITORY ||
+                proof.tag !== process.env.TAG || proof.commit !== process.env.TARGET_SHA || proof.mode !== mode ||
+                typeof proof.goVersion !== 'string' || typeof proof.goreleaserVersion !== 'string' ||
+                !Array.isArray(proof.targets) || proof.targets.length === 0) {
+              throw new Error('reproducible rebuild inventory proof identity or schema mismatch');
+            }
+            const payloadTargets = new Map(inventory.payloads
+              .filter((payload) => /^(?:linux|windows)_(?:amd64|arm64)$/.test(payload.target ?? ''))
+              .map((payload) => [payload.target, payload.name]));
+            const proofTargets = new Set();
+            const proofKeys = new Set();
+            for (const row of proof.targets) {
+              if (!row || !/^(?:linux|windows)_(?:amd64|arm64)$/.test(row.target ?? '') ||
+                  payloadTargets.get(row.target) !== row.archive || typeof row.member !== 'string' ||
+                  row.member.length === 0 || row.member.includes('\\') ||
+                  row.member.split('/').some((component) => !component || component === '..' || component.startsWith('-')) ||
+                  (row.archive.endsWith('.zip') && /[*?[]/.test(row.member)) ||
+                  !/^[0-9a-f]{64}$/.test(row.stagedSha256 ?? '') || row.rebuiltSha256 !== row.stagedSha256) {
+                throw new Error('reproducible rebuild inventory proof contains an invalid target row');
+              }
+              const key = `${row.target}\0${row.member}`;
+              if (proofKeys.has(key)) throw new Error('reproducible rebuild inventory proof contains a duplicate target binary');
+              proofKeys.add(key);
+              proofTargets.add(row.target);
+              const archive = row.archive;
+              const command = archive.endsWith('.zip') ? 'unzip' : 'tar';
+              const members = execFileSync(command, archive.endsWith('.zip') ? ['-Z1', archive] : ['-tzf', archive],
+                { encoding: 'utf8', maxBuffer: 1024 * 1024 * 1024 })
+                .trimEnd().split('\n').filter(Boolean);
+              const matches = members.filter((member) => member.replace(/^\.\//, '') === row.member);
+              if (matches.length !== 1) throw new Error(`inventory proof binary is ambiguous in ${archive}: ${row.member}`);
+              const components = matches[0].replace(/^\.\//, '').split('/');
+              if (components.includes('..') || components.some((component) => component.startsWith('-'))) {
+                throw new Error(`inventory proof contains an unsafe archive member: ${matches[0]}`);
+              }
+              const bytes = execFileSync(command, archive.endsWith('.zip') ? ['-p', archive, matches[0]] : ['-xOzf', archive, '--', matches[0]],
+                { encoding: 'buffer', maxBuffer: 1024 * 1024 * 1024 });
+              const observed = crypto.createHash('sha256').update(bytes).digest('hex');
+              if (observed !== row.stagedSha256) {
+                throw new Error(`inventory proof digest does not match staged binary for ${row.target}/${row.member}`);
+              }
+            }
+            if (payloadTargets.size !== proofTargets.size || [...payloadTargets.keys()].some((target) => !proofTargets.has(target))) {
+              throw new Error('reproducible rebuild inventory proof does not cover every non-Darwin target');
+            }
+            console.log(`verified auditable reproducible rebuild proof for ${proof.targets.length} non-Darwin binaries`);
+          }
+          NODE
+          # reproducible-rebuild-inventory-verifier-end
 
           # nfpm-checksum-verifier-begin
           jq -e '

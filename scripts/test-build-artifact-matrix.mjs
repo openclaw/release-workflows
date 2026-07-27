@@ -161,6 +161,7 @@ const runAssembler = ({ archiveFiles = [], nfpm = false, universal = true, mutat
       REPOSITORY_NAME: 'fixture',
     }, () => executeAssembler(require, process));
     return {
+      binaryMap: JSON.parse(readFileSync(join(releaseAssets, '.ASSET-BINARIES.json'), 'utf8')),
       packageMap: JSON.parse(readFileSync(join(releaseAssets, '.NFPM-PACKAGES.json'), 'utf8')),
       releaseAssets,
       root,
@@ -207,6 +208,7 @@ const runInventory = ({ checksumFilename = 'SHA256SUMS', extraAssets = [], homeb
       GITHUB_REPOSITORY: 'openclaw/fixture',
       HOMEBREW_FORMULA: homebrew ? 'fixture' : '',
       NFPM_PACKAGES_PATH: packagePath,
+      REPRODUCIBLE_REBUILD: 'disabled',
       TAG: 'v1.2.3',
       TARGET_SHA: 'a'.repeat(40),
     }, () => executeInventoryBuilder(require, process));
@@ -278,6 +280,10 @@ const tests = [
         fixture.targetMap.filter((row) => row.target.startsWith('windows_')).map((row) => row.name).sort(),
         ['fixture_1.2.3_windows_amd64.zip', 'fixture_1.2.3_windows_arm64.zip'],
       );
+      assert.equal(fixture.binaryMap.length, 6);
+      assert.deepEqual(fixture.binaryMap.filter((row) => row.target.startsWith('windows_')).map((row) => row.member), [
+        'fixture.exe', 'fixture.exe',
+      ]);
       assert.deepEqual(fixture.packageMap, []);
     } finally {
       finishAssembler(fixture);
@@ -290,6 +296,16 @@ const tests = [
         'darwin_amd64', 'darwin_arm64', 'linux_amd64', 'linux_arm64',
         'windows_amd64', 'windows_arm64',
       ]);
+    } finally {
+      finishAssembler(fixture);
+    }
+  }],
+  ['duplicate GoReleaser aliases map to one staged binary member', () => {
+    const fixture = runAssembler({ mutate: ({ artifacts }) => {
+      artifacts.push({ ...artifacts.find((artifact) => artifact.type === 'Binary' && artifact.goos === 'linux' && artifact.goarch === 'amd64') });
+    } });
+    try {
+      assert.equal(fixture.binaryMap.length, 6);
     } finally {
       finishAssembler(fixture);
     }
