@@ -48,6 +48,7 @@ const runInputs = (overrides = {}) => {
         HOMEBREW_FORMULA: '',
         HOMEBREW_TAP: '',
         NFPM_MODE: 'auto',
+        REPRODUCIBLE_REBUILD: 'disabled',
         REPOSITORY_TYPE: 'openclaw',
         STABLE_IDENTIFIER: '',
         VERSION: '1.2.3',
@@ -114,6 +115,12 @@ const tests = [
   ['Darwin universal mode is tri-state', () => {
     for (const value of ['auto', 'enabled', 'disabled']) runInputs({ DARWIN_UNIVERSAL: value });
     assert.throws(() => runInputs({ DARWIN_UNIVERSAL: 'sometimes' }));
+  }],
+  ['reproducible rebuild defaults off and rejects unverifiable Darwin mode', () => {
+    runInputs({ REPRODUCIBLE_REBUILD: 'disabled' });
+    runInputs({ REPRODUCIBLE_REBUILD: 'non-darwin' });
+    assert.throws(() => runInputs({ REPRODUCIBLE_REBUILD: 'all' }));
+    assert.throws(() => runInputs({ REPRODUCIBLE_REBUILD: 'sometimes' }));
   }],
   ['CI check events accept unique Actions event names', () => {
     runInputs({ CI_CHECK_EVENTS: '["push","pull_request"]' });

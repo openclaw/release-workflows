@@ -113,6 +113,7 @@ function resolveInputs({
         HOMEBREW_FORMULA: formula,
         HOMEBREW_TAP: homebrewTap,
         NFPM_MODE: nfpmMode,
+        REPRODUCIBLE_REBUILD: 'disabled',
         REPOSITORY_TYPE: repositoryType,
         STABLE_IDENTIFIER: '',
         VERSION: '1.2.3',

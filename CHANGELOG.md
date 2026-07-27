@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.4.0 - 2026-07-27
+
+- Add an opt-in, fail-closed reproducible rebuild gate that independently rebuilds staged Linux and Windows binaries, requires byte identity, and records both digests in the verifier-bound asset inventory.
+
 ## v1.3.1 - 2026-07-27
 
 - Let callers opt into event-scoped CI evidence so unrelated scheduled workflows on the same commit cannot permanently block release validation.

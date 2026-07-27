@@ -15,6 +15,7 @@ actionlint "${workflow_files[@]}"
 node scripts/test-release-target-resolution.mjs
 node scripts/test-ci-check-event-filter.mjs
 node scripts/test-build-artifact-matrix.mjs
+node scripts/test-reproducible-rebuild.mjs
 node scripts/test-go-cli-policy-inputs.mjs
 node scripts/test-release-notes-extraction.mjs
 node scripts/test-draft-binding.mjs
@@ -35,7 +36,7 @@ import re
 
 workflow_paths = sorted(Path('.github/workflows').glob('*.y*ml')) + sorted(Path('examples').glob('*.y*ml'))
 workflow = Path('.github/workflows/release-go-cli.yml').read_text()
-required_jobs = ['validate', 'tag', 'build', 'sign', 'draft', 'verify', 'publish', 'handoff', 'closeout']
+required_jobs = ['validate', 'tag', 'build', 'sign', 'rebuild', 'compare', 'draft', 'verify', 'publish', 'handoff', 'closeout']
 for job in required_jobs:
     if not re.search(rf'^  {re.escape(job)}:\s*$', workflow, re.MULTILINE):
         raise SystemExit(f'missing required job: {job}')
@@ -44,7 +45,7 @@ required_inputs = [
     'version', 'repository-type', 'homebrew-tap', 'homebrew-formula', 'extra-packages',
     'archive-files', 'checksum-filename', 'ci-check-events',
     'nfpm', 'build-runner', 'stable-identifier', 'require-signed-tag', 'darwin-universal',
-    'strict-checks',
+    'strict-checks', 'reproducible-rebuild',
 ]
 for name in required_inputs:
     if not re.search(rf'^      {re.escape(name)}:\s*$', workflow, re.MULTILINE):
@@ -108,15 +109,58 @@ if not app_condition < spctl_assessment < app_condition_end:
 publish = workflow.split('\n  publish:\n', 1)[1].split('\n  handoff:\n', 1)[0]
 draft = workflow.split('\n  draft:\n', 1)[1].split('\n  verify:\n', 1)[0]
 build = workflow.split('\n  build:\n', 1)[1].split('\n  sign:\n', 1)[0]
+rebuild = workflow.split('\n  rebuild:\n', 1)[1].split('\n  compare:\n', 1)[0]
+compare = workflow.split('\n  compare:\n', 1)[1].split('\n  draft:\n', 1)[0]
 for required_build_control in [
     "inputs.build-runner == 'macos' && 'macos-15' || 'ubuntu-latest'",
     'NFPM_MODE: ${{ inputs.nfpm }}',
     'nfpm-enabled:',
     'release --config=$config --clean --timeout 60m --release-notes=/dev/null --skip=',
     'GORELEASER_CURRENT_TAG: ${{ needs.validate.outputs.tag }}',
+    'goreleaser-version:',
 ]:
     if required_build_control not in build:
         raise SystemExit(f'missing build-mode control: {required_build_control}')
+if not re.search(r'permissions:\s*\n\s*contents: read\s*$', rebuild, re.MULTILINE):
+    raise SystemExit('reproducible rebuild job must grant only contents: read')
+for required_rebuild_control in [
+    "inputs.build-runner == 'macos' && 'macos-15' || 'ubuntu-latest'",
+    'fetch-depth: 0',
+    'version: ${{ needs.build.outputs.goreleaser-version }}',
+    '[[ "$(go env GOVERSION)" == "$EXPECTED_GO_VERSION" ]]',
+    'artifact-name=independent-rebuild-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT',
+    'artifact-name: ${{ steps.rebuild-artifact-name.outputs.artifact-name }}',
+    'path: reproducible-source/dist',
+    'include-hidden-files: true',
+    'go-version: ${{ needs.build.outputs.go-setup-version }}',
+    'install-only: true',
+    'without credentials',
+    'unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN',
+    'env -i',
+]:
+    if required_rebuild_control not in rebuild:
+        raise SystemExit(f'missing independent rebuild control: {required_rebuild_control}')
+if 'contents: write' in rebuild:
+    raise SystemExit('reproducible rebuild job must not have release write access')
+if 'signed-release-assets-' in rebuild:
+    raise SystemExit('tag-controlled rebuild job must never receive the staged release payload')
+if not re.search(r'permissions:\s*\n\s*actions: read\s*$', compare, re.MULTILINE):
+    raise SystemExit('clean comparison job must grant only actions: read')
+for required_compare_control in [
+    'name: ${{ needs.rebuild.outputs.artifact-name }}',
+    'signed-release-assets-${{ github.run_id }}',
+    'artifact-name=reproducible-rebuild-proof-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT',
+    'artifact-name: ${{ steps.proof-artifact-name.outputs.artifact-name }}',
+    'reproducible rebuild mismatch for ${target}/${member}',
+]:
+    if required_compare_control not in compare:
+        raise SystemExit(f'missing clean comparison control: {required_compare_control}')
+for forbidden_compare_execution in ['actions/checkout', 'goreleaser/goreleaser-action', 'git -C']:
+    if forbidden_compare_execution in compare:
+        raise SystemExit(f'clean comparison job executes tag-controlled code: {forbidden_compare_execution}')
+for forbidden_draft_rebuild_execution in ['goreleaser/goreleaser-action', 'reproducible-source']:
+    if forbidden_draft_rebuild_execution in draft:
+        raise SystemExit(f'draft job executes tag-controlled rebuild code: {forbidden_draft_rebuild_execution}')
 for required_policy_control in [
     'Verify required SSH-signed tag',
     'Reverify required SSH-signed tag before publication',
@@ -212,11 +256,12 @@ for required_handoff_control in [
 if not re.search(r'permissions:\s*\n\s*actions: read\s*$', handoff, re.MULTILINE):
     raise SystemExit('handoff source token must grant only actions: read')
 
-sign = workflow.split('\n  sign:\n', 1)[1].split('\n  draft:\n', 1)[0]
+sign = workflow.split('\n  sign:\n', 1)[1].split('\n  rebuild:\n', 1)[0]
 for required_package_assembly_control in [
     "artifact.type === 'Linux Package'",
     'GoReleaser emitted no Linux Package artifacts',
     "path.join(releaseDirectory, '.NFPM-PACKAGES.json')",
+    "path.join(releaseDirectory, '.ASSET-BINARIES.json')",
     "platform: `linux_${artifact.goarch}`",
     'archive file collides with a built payload',
     'staged archive-files inventory mismatch',
