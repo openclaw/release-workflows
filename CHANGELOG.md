@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.5.1 - 2026-08-02
+
+- Keep signing, verification, publication, Homebrew handoff, and release
+  closeout running when the optional split-host build is intentionally skipped,
+  while still requiring every direct dependency to succeed.
+
 ## v1.5.0 - 2026-08-02
 
 - Add optional split-host CGO builds that merge a macOS GoReleaser matrix with fixed-toolchain Linux/Windows outputs, route reproducible non-Darwin rebuilds through the split config, and allow versionless root `package.json` build manifests.

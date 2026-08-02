@@ -35,6 +35,52 @@ const mergeStep = execFileSync(
   ['-rpsych', '-e', extractor, workflowPath],
   { encoding: 'utf8' },
 );
+const gateExtractor = String.raw`
+  require "json"
+  workflow = Psych.safe_load(
+    File.read(ARGV.fetch(0)),
+    permitted_classes: [],
+    permitted_symbols: [],
+    aliases: false
+  )
+  jobs = workflow.fetch("jobs")
+  print JSON.generate(
+    %w[sign compare draft verify publish handoff closeout].to_h do |name|
+      job = jobs.fetch(name)
+      [name, { "if" => job.fetch("if"), "needs" => Array(job.fetch("needs")) }]
+    end
+  )
+`;
+const continuationGates = JSON.parse(execFileSync(
+  'ruby',
+  ['-rpsych', '-e', gateExtractor, workflowPath],
+  { encoding: 'utf8' },
+));
+
+const requiredContinuationNeeds = {
+  sign: ['validate', 'build', 'merge-builds'],
+  compare: ['validate', 'build', 'sign', 'rebuild'],
+  draft: ['validate', 'build', 'sign', 'compare'],
+  verify: ['validate', 'draft'],
+  publish: ['validate', 'draft', 'verify'],
+  handoff: ['validate', 'draft', 'publish'],
+};
+for (const [job, requiredNeeds] of Object.entries(requiredContinuationNeeds)) {
+  const gate = continuationGates[job];
+  assert.deepEqual(gate.needs, requiredNeeds);
+  assert.match(gate.if, /always\(\)/);
+  for (const need of requiredNeeds) {
+    assert.match(gate.if, new RegExp(`needs\\.${need.replaceAll('-', '\\-')}\\.result == 'success'`));
+  }
+}
+assert.match(continuationGates.handoff.if, /inputs\.homebrew-formula != ''/);
+assert.match(continuationGates.closeout.if, /always\(\)/);
+assert.match(continuationGates.closeout.if, /needs\.validate\.result == 'success'/);
+assert.match(continuationGates.closeout.if, /needs\.publish\.result == 'success'/);
+assert.match(continuationGates.closeout.if, /needs\.handoff\.result == 'success'/);
+assert.match(continuationGates.closeout.if, /needs\.handoff\.result == 'skipped'/);
+console.log('PASS optional split skip cannot bypass release continuation gates');
+
 const begin = '// split-host-artifact-merger-begin';
 const end = '// split-host-artifact-merger-end';
 const start = mergeStep.indexOf(begin);

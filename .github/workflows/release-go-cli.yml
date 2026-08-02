@@ -1106,6 +1106,13 @@ jobs:
 
   sign:
     name: 3d · Sign, notarize, and package macOS
+    if: >-
+      ${{
+        always() &&
+        needs.validate.result == 'success' &&
+        needs.build.result == 'success' &&
+        needs.merge-builds.result == 'success'
+      }}
     needs: [validate, build, merge-builds]
     runs-on: macos-14
     permissions:
@@ -1758,6 +1765,14 @@ jobs:
 
   compare:
     name: 3f · Compare staged and rebuilt bytes
+    if: >-
+      ${{
+        always() &&
+        needs.validate.result == 'success' &&
+        needs.build.result == 'success' &&
+        needs.sign.result == 'success' &&
+        needs.rebuild.result == 'success'
+      }}
     needs: [validate, build, sign, rebuild]
     runs-on: ubuntu-latest
     permissions:
@@ -1940,6 +1955,14 @@ jobs:
 
   draft:
     name: 4 · Create exact draft
+    if: >-
+      ${{
+        always() &&
+        needs.validate.result == 'success' &&
+        needs.build.result == 'success' &&
+        needs.sign.result == 'success' &&
+        needs.compare.result == 'success'
+      }}
     needs: [validate, build, sign, compare]
     runs-on: ubuntu-latest
     permissions:
@@ -2206,6 +2229,12 @@ jobs:
 
   verify:
     name: 5 · Independent verify (${{ matrix.arch }})
+    if: >-
+      ${{
+        always() &&
+        needs.validate.result == 'success' &&
+        needs.draft.result == 'success'
+      }}
     needs: [validate, draft]
     strategy:
       fail-fast: false
@@ -2580,6 +2609,13 @@ jobs:
 
   publish:
     name: 6 · Publish verified draft
+    if: >-
+      ${{
+        always() &&
+        needs.validate.result == 'success' &&
+        needs.draft.result == 'success' &&
+        needs.verify.result == 'success'
+      }}
     needs: [validate, draft, verify]
     runs-on: ubuntu-latest
     permissions:
@@ -2784,7 +2820,14 @@ jobs:
 
   handoff:
     name: 7 · Homebrew handoff
-    if: inputs.homebrew-formula != ''
+    if: >-
+      ${{
+        always() &&
+        inputs.homebrew-formula != '' &&
+        needs.validate.result == 'success' &&
+        needs.draft.result == 'success' &&
+        needs.publish.result == 'success'
+      }}
     needs: [validate, draft, publish]
     runs-on: ubuntu-latest
     permissions:
@@ -3321,7 +3364,13 @@ jobs:
 
   closeout:
     name: 8 · Open next Unreleased PR
-    if: always() && needs.publish.result == 'success' && (needs.handoff.result == 'success' || needs.handoff.result == 'skipped')
+    if: >-
+      ${{
+        always() &&
+        needs.validate.result == 'success' &&
+        needs.publish.result == 'success' &&
+        (needs.handoff.result == 'success' || needs.handoff.result == 'skipped')
+      }}
     needs: [validate, publish, handoff]
     runs-on: ubuntu-latest
     permissions:
