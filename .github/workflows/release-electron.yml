@@ -1,0 +1,627 @@
+name: Release Electron Desktop
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      repository-type:
+        required: true
+        type: string
+      node-version:
+        required: false
+        default: '26'
+        type: string
+      pnpm-version:
+        required: false
+        default: '11.19.0'
+        type: string
+      goreleaser-version:
+        required: false
+        default: v2.17.0
+        type: string
+      desktop-package:
+        required: false
+        default: '@clickclack/desktop'
+        type: string
+      desktop-directory:
+        required: false
+        default: apps/desktop
+        type: string
+      product-name:
+        required: false
+        default: ClickClack
+        type: string
+      bundle-identifier:
+        required: false
+        default: chat.clickclack.desktop
+        type: string
+      checksum-filename:
+        required: false
+        default: SHA256SUMS
+        type: string
+      ci-check-events:
+        required: false
+        default: '["push","pull_request"]'
+        type: string
+    secrets:
+      MACOS_SIGNING_P12:
+        required: true
+      MACOS_SIGNING_P12_PASSWORD:
+        required: true
+      ASC_KEY_ID:
+        required: true
+      ASC_ISSUER_ID:
+        required: true
+      ASC_PRIVATE_KEY_P8:
+        required: true
+    outputs:
+      release-url:
+        value: ${{ jobs.publish.outputs.release-url }}
+
+concurrency:
+  group: release-electron-${{ github.repository }}-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: 1 · Validate frozen Electron source
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      statuses: read
+    outputs:
+      default-branch: ${{ steps.source.outputs.default-branch }}
+      release-notes-artifact-name: ${{ steps.metadata.outputs.release-notes-artifact-name }}
+      release-version: ${{ steps.inputs.outputs.release-version }}
+      tag: ${{ steps.inputs.outputs.tag }}
+      tag-object-sha: ${{ steps.source.outputs.tag-object-sha }}
+      target-sha: ${{ steps.source.outputs.target-sha }}
+    steps:
+      - name: Validate inputs
+        id: inputs
+        env:
+          BUNDLE_IDENTIFIER: ${{ inputs.bundle-identifier }}
+          CHECKSUM_FILENAME: ${{ inputs.checksum-filename }}
+          CI_CHECK_EVENTS: ${{ inputs.ci-check-events }}
+          DESKTOP_DIRECTORY: ${{ inputs.desktop-directory }}
+          DESKTOP_PACKAGE: ${{ inputs.desktop-package }}
+          PRODUCT_NAME: ${{ inputs.product-name }}
+          REPOSITORY_TYPE: ${{ inputs.repository-type }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          release_version=${VERSION#v}
+          [[ "$release_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "version must be SemVer" >&2; exit 1; }
+          [[ "$REPOSITORY_TYPE" == openclaw || "$REPOSITORY_TYPE" == personal ]]
+          [[ "$BUNDLE_IDENTIFIER" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]
+          [[ "$CHECKSUM_FILENAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$ ]]
+          [[ "$DESKTOP_DIRECTORY" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]]
+          [[ "$DESKTOP_PACKAGE" =~ ^@?[A-Za-z0-9._/-]+$ ]]
+          [[ "$PRODUCT_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]
+          jq -e 'type == "array" and all(.[]; type == "string" and test("^[a-z][a-z0-9_]*$")) and length == (unique | length)' <<<"$CI_CHECK_EVENTS" >/dev/null
+          echo "release-version=$release_version" >>"$GITHUB_OUTPUT"
+          echo "tag=v$release_version" >>"$GITHUB_OUTPUT"
+
+      - name: Validate signing credentials
+        env:
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_PRIVATE_KEY_P8: ${{ secrets.ASC_PRIVATE_KEY_P8 }}
+          MACOS_SIGNING_P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          MACOS_SIGNING_P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in MACOS_SIGNING_P12 MACOS_SIGNING_P12_PASSWORD ASC_KEY_ID ASC_ISSUER_ID ASC_PRIVATE_KEY_P8; do
+            [[ -n "${!name:-}" ]] || missing+=("$name")
+          done
+          (( ${#missing[@]} == 0 )) || { printf 'missing required release secret(s): %s\n' "${missing[*]}" >&2; exit 1; }
+
+      - name: Resolve protected release target
+        id: source
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          TAG: ${{ steps.inputs.outputs.tag }}
+        with:
+          script: |
+            const repository = await github.rest.repos.get(context.repo);
+            const defaultBranch = repository.data.default_branch;
+            if (context.ref !== `refs/heads/${defaultBranch}` || !process.env.GITHUB_WORKFLOW_REF.endsWith(`@refs/heads/${defaultBranch}`)) {
+              core.setFailed(`caller must run from protected ${defaultBranch}`); return;
+            }
+            const branch = await github.rest.repos.getBranch({ ...context.repo, branch: defaultBranch });
+            if (context.sha !== branch.data.commit.sha) { core.setFailed('caller must run at current protected head'); return; }
+            let targetSha = branch.data.commit.sha;
+            let tagObjectSha = '';
+            try {
+              const ref = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
+              if (ref.data.object.type !== 'tag') throw new Error('existing release tag must be annotated');
+              tagObjectSha = ref.data.object.sha;
+              const tag = await github.rest.git.getTag({ ...context.repo, tag_sha: tagObjectSha });
+              if (tag.data.object.type !== 'commit') throw new Error('release tag must peel to a commit');
+              targetSha = tag.data.object.sha;
+            } catch (error) { if (error.status !== 404) throw error; }
+            const comparison = await github.rest.repos.compareCommitsWithBasehead({ ...context.repo, basehead: `${targetSha}...${branch.data.commit.sha}` });
+            if (!['ahead', 'identical'].includes(comparison.data.status)) { core.setFailed('release target is outside protected history'); return; }
+            core.setOutput('default-branch', defaultBranch);
+            core.setOutput('tag-object-sha', tagObjectSha);
+            core.setOutput('target-sha', targetSha);
+
+      - name: Check out exact release target
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ steps.source.outputs.target-sha }}
+
+      - name: Validate Electron release metadata
+        id: metadata
+        env:
+          DESKTOP_DIRECTORY: ${{ inputs.desktop-directory }}
+          RELEASE_VERSION: ${{ steps.inputs.outputs.release-version }}
+        run: |
+          set -euo pipefail
+          for path in CHANGELOG.md go.mod package.json pnpm-lock.yaml .goreleaser.yaml "$DESKTOP_DIRECTORY/electron-builder.yml" "$DESKTOP_DIRECTORY/scripts/release-artifacts.mjs" "$DESKTOP_DIRECTORY/scripts/verify-macos-release.sh"; do
+            [[ -f "$path" ]] || { echo "required release input missing: $path" >&2; exit 1; }
+          done
+          python3 - "$RELEASE_VERSION" "$RUNNER_TEMP/RELEASE-NOTES.md" <<'PY'
+          from pathlib import Path
+          import re, sys
+          version, output = sys.argv[1:]
+          text = Path("CHANGELOG.md").read_text()
+          headings = list(re.finditer(r"^##[ \t]+.*$", text, re.M))
+          matches = [m for m in headings if re.search(rf"(?<![0-9A-Za-z.])v?{re.escape(version)}(?![0-9A-Za-z.+-])", m.group()) and re.search(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", m.group())]
+          if len(matches) != 1: raise SystemExit(f"CHANGELOG.md needs exactly one dated section for {version}; found {len(matches)}")
+          start = matches[0].start(); end = next((m.start() for m in headings if m.start() > start), len(text))
+          Path(output).write_text(text[start:end])
+          PY
+          echo "release-notes-artifact-name=electron-release-notes-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >>"$GITHUB_OUTPUT"
+
+      - name: Upload frozen release notes
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: ${{ steps.metadata.outputs.release-notes-artifact-name }}
+          path: ${{ runner.temp }}/RELEASE-NOTES.md
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Require independent CI green on frozen target
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          CI_CHECK_EVENTS: ${{ inputs.ci-check-events }}
+          TARGET_SHA: ${{ steps.source.outputs.target-sha }}
+        with:
+          script: |
+            const accepted = new Set(['success', 'neutral', 'skipped']);
+            const currentMarker = `/actions/runs/${context.runId}`;
+            const allowed = new Set(JSON.parse(process.env.CI_CHECK_EVENTS));
+            const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, { ...context.repo, head_sha: process.env.TARGET_SHA, per_page: 100 });
+            const events = new Map(runs.map((run) => [run.id, run.event]));
+            const checks = (await github.paginate(github.rest.checks.listForRef, { ...context.repo, ref: process.env.TARGET_SHA, per_page: 100, filter: 'latest' })).filter((check) => {
+              if (check.details_url?.includes(currentMarker)) return false;
+              const match = check.details_url?.match(/\/actions\/runs\/(\d+)(?:\/|$)/);
+              return !match || allowed.size === 0 || !events.get(Number(match[1])) || allowed.has(events.get(Number(match[1])));
+            });
+            if (!checks.length) { core.setFailed('frozen target has no independent CI check'); return; }
+            const failures = checks.filter((check) => check.status !== 'completed' || !accepted.has(check.conclusion));
+            if (failures.length) core.setFailed(`non-green checks: ${failures.map((check) => `${check.name}=${check.status}/${check.conclusion}`).join(', ')}`);
+
+  tag:
+    name: 2 · Freeze annotated tag
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create or reuse exact annotated tag
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          EXPECTED_TAG_OBJECT: ${{ needs.validate.outputs.tag-object-sha }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
+        with:
+          script: |
+            let existing = null;
+            try { existing = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` }); } catch (error) { if (error.status !== 404) throw error; }
+            if (process.env.EXPECTED_TAG_OBJECT) {
+              if (!existing || existing.data.object.type !== 'tag' || existing.data.object.sha !== process.env.EXPECTED_TAG_OBJECT) throw new Error('release tag changed after validation');
+              const tag = await github.rest.git.getTag({ ...context.repo, tag_sha: process.env.EXPECTED_TAG_OBJECT });
+              if (tag.data.object.type !== 'commit' || tag.data.object.sha !== process.env.TARGET_SHA) throw new Error('release tag target changed');
+              return;
+            }
+            if (existing) throw new Error('release tag appeared after validation');
+            const tag = await github.rest.git.createTag({ ...context.repo, tag: process.env.TAG, message: `Release ${process.env.TAG}\n\nFleet Electron release tag.`, object: process.env.TARGET_SHA, type: 'commit', tagger: { name: 'github-actions[bot]', email: '41898282+github-actions[bot]@users.noreply.github.com', date: new Date().toISOString() } });
+            await github.rest.git.createRef({ ...context.repo, ref: `refs/tags/${process.env.TAG}`, sha: tag.data.sha });
+
+  build-server:
+    name: 3a · Build Go server assets
+    needs: [validate, tag]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.tag }}
+          fetch-depth: 0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+        with:
+          version: ${{ inputs.pnpm-version }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: ${{ inputs.goreleaser-version }}
+          args: release --clean --parallelism=2 --skip=publish,sign,notarize
+        env:
+          GORELEASER_CURRENT_TAG: ${{ needs.validate.outputs.tag }}
+      - name: Stage exact server artifacts
+        run: |
+          set -euo pipefail
+          mkdir server-assets
+          while IFS= read -r file; do cp "$file" server-assets/; done < <(find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.deb' -o -name '*.rpm' -o -name 'sha256sums.txt' \) | LC_ALL=C sort)
+          [[ -n "$(find server-assets -type f -print -quit)" ]]
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: electron-server-${{ github.run_id }}
+          path: server-assets
+          if-no-files-found: error
+          retention-days: 1
+
+  build-desktop:
+    name: 3b · Build ${{ matrix.platform }} desktop
+    needs: [validate, tag]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: win
+            os: windows-latest
+            args: --win nsis zip --x64
+          - platform: linux
+            os: ubuntu-latest
+            args: --linux AppImage deb --x64
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.tag }}
+      - uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+        with:
+          version: ${{ inputs.pnpm-version }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:desktop
+      - run: pnpm --filter "${{ inputs.desktop-package }}" typecheck
+      - run: pnpm --filter "${{ inputs.desktop-package }}" build
+      - name: Package unsigned desktop artifacts
+        run: pnpm --filter "${{ inputs.desktop-package }}" exec electron-builder ${{ matrix.args }} --config.extraMetadata.version=${{ needs.validate.outputs.release-version }} --publish never
+      - name: Write platform checksums
+        shell: bash
+        run: node "${{ inputs.desktop-directory }}/scripts/release-artifacts.mjs" "${{ matrix.platform }}" "${{ needs.validate.outputs.release-version }}" "${{ inputs.desktop-directory }}/release"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: electron-desktop-${{ matrix.platform }}-${{ github.run_id }}
+          path: |
+            ${{ inputs.desktop-directory }}/release/*.exe
+            ${{ inputs.desktop-directory }}/release/*.zip
+            ${{ inputs.desktop-directory }}/release/*.AppImage
+            ${{ inputs.desktop-directory }}/release/*.deb
+            ${{ inputs.desktop-directory }}/release/*SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  build-macos:
+    name: 3c · Sign, notarize, and staple macOS desktop
+    needs: [validate, tag]
+    runs-on: macos-15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.tag }}
+      - uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+        with:
+          version: ${{ inputs.pnpm-version }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Import Foundation signing identity
+        id: signer
+        env:
+          P12_BASE64: ${{ secrets.MACOS_SIGNING_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+          REPOSITORY_TYPE: ${{ inputs.repository-type }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/electron-release.keychain-db"; password=$(openssl rand -hex 32); p12="$RUNNER_TEMP/electron-release.p12"
+          printf '%s' "$P12_BASE64" | base64 --decode >"$p12"
+          security create-keychain -p "$password" "$keychain"; security unlock-keychain -p "$password" "$keychain"
+          security import "$p12" -k "$keychain" -P "$P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
+          security list-keychains -d user | sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//' >"$RUNNER_TEMP/electron-original-keychains.txt"
+          keychains=("$keychain")
+          while IFS= read -r existing; do [[ -z "$existing" || "$existing" == "$keychain" ]] || keychains+=("$existing"); done <"$RUNNER_TEMP/electron-original-keychains.txt"
+          security list-keychains -d user -s "${keychains[@]}"
+          if [[ "$REPOSITORY_TYPE" == openclaw ]]; then team=FWJYW4S8P8; qualifier='OpenClaw Foundation (FWJYW4S8P8)'; else team=Y5PE65HELJ; qualifier='Peter Steinberger (Y5PE65HELJ)'; fi
+          {
+            echo "keychain=$keychain"
+            echo "qualifier=$qualifier"
+            echo "team=$team"
+          } >>"$GITHUB_OUTPUT"
+          rm -f "$p12"
+      - name: Build signed unpacked apps
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'true'
+          CSC_NAME: ${{ steps.signer.outputs.qualifier }}
+        run: |
+          set -euo pipefail
+          pnpm --filter "${{ inputs.desktop-package }}" build
+          pnpm --filter "${{ inputs.desktop-package }}" exec electron-builder --mac dir --x64 --arm64 --config.mac.identity="$CSC_NAME" --config.extraMetadata.version=${{ needs.validate.outputs.release-version }} --publish never
+      - name: Notarize, staple, and package macOS apps
+        env:
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_PRIVATE_KEY_P8: ${{ secrets.ASC_PRIVATE_KEY_P8 }}
+          BUNDLE_IDENTIFIER: ${{ inputs.bundle-identifier }}
+          DESKTOP_DIRECTORY: ${{ inputs.desktop-directory }}
+          PRODUCT_NAME: ${{ inputs.product-name }}
+          TEAM_ID: ${{ steps.signer.outputs.team }}
+          VERSION: ${{ needs.validate.outputs.release-version }}
+        run: |
+          set -euo pipefail
+          p8="$RUNNER_TEMP/AuthKey_${ASC_KEY_ID}.p8"; printf '%s' "$ASC_PRIVATE_KEY_P8" >"$p8"; chmod 600 "$p8"
+          for pair in x64:mac arm64:mac-arm64; do
+            arch=${pair%%:*}; directory=${pair#*:}; app="$DESKTOP_DIRECTORY/release/$directory/$PRODUCT_NAME.app"
+            [[ -d "$app" ]]
+            [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" == "$BUNDLE_IDENTIFIER" ]]
+            codesign --verify --strict --deep "$app"
+            submission="$RUNNER_TEMP/$PRODUCT_NAME-$arch.zip"; ditto -c -k --sequesterRsrc --keepParent "$app" "$submission"
+            xcrun notarytool submit "$submission" --key "$p8" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --no-s3-acceleration --wait --output-format json >"$submission.json"
+            [[ "$(jq -r '.status' "$submission.json")" == Accepted ]]
+            xcrun stapler staple "$app"; xcrun stapler validate "$app"; spctl --assess --type execute "$app"
+            pnpm --filter "${{ inputs.desktop-package }}" exec electron-builder --prepackaged "$app" --mac dmg zip --"$arch" --config.extraMetadata.version="$VERSION" --publish never
+            dmg="$DESKTOP_DIRECTORY/release/$PRODUCT_NAME-$VERSION-mac-$arch.dmg"
+            [[ -f "$dmg" ]]; xcrun stapler staple "$dmg"; xcrun stapler validate "$dmg"
+          done
+          node "$DESKTOP_DIRECTORY/scripts/release-artifacts.mjs" mac "$VERSION" "$DESKTOP_DIRECTORY/release"
+          rm -f "$p8"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: electron-desktop-mac-${{ github.run_id }}
+          path: |
+            ${{ inputs.desktop-directory }}/release/*.dmg
+            ${{ inputs.desktop-directory }}/release/*.zip
+            ${{ inputs.desktop-directory }}/release/*SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 1
+      - name: Delete ephemeral keychain
+        if: always()
+        env:
+          KEYCHAIN: ${{ steps.signer.outputs.keychain }}
+        run: |
+          set -euo pipefail
+          original=()
+          if [[ -f "$RUNNER_TEMP/electron-original-keychains.txt" ]]; then
+            while IFS= read -r item; do [[ -z "$item" ]] || original+=("$item"); done <"$RUNNER_TEMP/electron-original-keychains.txt"
+            security list-keychains -d user -s "${original[@]}"
+          fi
+          [[ -z "${KEYCHAIN:-}" || ! -e "$KEYCHAIN" ]] || security delete-keychain "$KEYCHAIN"
+
+  assemble:
+    name: 4 · Freeze exact Electron payload
+    needs: [validate, build-server, build-desktop, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    outputs:
+      artifact-name: ${{ steps.name.outputs.artifact-name }}
+    steps:
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          pattern: electron-*-${{ github.run_id }}
+          path: inputs
+          merge-multiple: true
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: ${{ needs.validate.outputs.release-notes-artifact-name }}
+          path: notes
+      - name: Assemble inventory and checksum manifest
+        env:
+          CHECKSUM_FILENAME: ${{ inputs.checksum-filename }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
+        run: |
+          set -euo pipefail
+          mkdir release-assets
+          while IFS= read -r file; do
+            name=${file##*/}; [[ ! -e "release-assets/$name" ]] || { echo "duplicate asset: $name" >&2; exit 1; }; cp "$file" "release-assets/$name"
+          done < <(find inputs -type f | LC_ALL=C sort)
+          cp notes/RELEASE-NOTES.md release-assets/
+          node <<'NODE'
+          const fs = require('fs'), path = require('path'), crypto = require('crypto');
+          const dir = 'release-assets';
+          const names = fs.readdirSync(dir).filter((name) => name !== process.env.CHECKSUM_FILENAME && !name.endsWith('SHA256SUMS.txt')).sort();
+          const payloads = names.map((name) => { const bytes = fs.readFileSync(path.join(dir, name)); return { name, size: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') }; });
+          fs.writeFileSync(path.join(dir, 'ASSET-INVENTORY.json'), JSON.stringify({ schemaVersion: 1, repository: process.env.GITHUB_REPOSITORY, tag: process.env.TAG, commit: process.env.TARGET_SHA, payloads }, null, 2) + '\n');
+          NODE
+          manifest="$RUNNER_TEMP/electron-sha256s"
+          while IFS= read -r file; do
+            (cd release-assets; sha256sum "$file")
+          done < <(find release-assets -maxdepth 1 -type f ! -name "$CHECKSUM_FILENAME" -printf '%f\n' | LC_ALL=C sort) >"$manifest"
+          mv "$manifest" "release-assets/$CHECKSUM_FILENAME"
+          tar -czf electron-release-assets.tar.gz release-assets
+      - id: name
+        run: echo "artifact-name=electron-release-assets-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >>"$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: ${{ steps.name.outputs.artifact-name }}
+          path: electron-release-assets.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+  draft:
+    name: 5 · Create exact Electron draft
+    needs: [validate, assemble]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    outputs:
+      release-id: ${{ steps.release.outputs.release-id }}
+      verification-artifact-name: ${{ needs.assemble.outputs.artifact-name }}
+    steps:
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: ${{ needs.assemble.outputs.artifact-name }}
+      - id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          tar -xzf electron-release-assets.tar.gz
+          mapfile -t assets < <(find release-assets -maxdepth 1 -type f -printf '%p\n' | LC_ALL=C sort)
+          gh release create "$TAG" --draft --verify-tag --title "$TAG" --notes-file release-assets/RELEASE-NOTES.md "${assets[@]}"
+          echo "release-id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq .id)" >>"$GITHUB_OUTPUT"
+
+  verify:
+    name: 6 · Independent Electron verify (${{ matrix.arch }})
+    needs: [validate, draft]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-14
+            artifact-arch: arm64
+          - arch: x86_64
+            runner: macos-15-intel
+            artifact-arch: x64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      actions: read
+    steps:
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: ${{ needs.draft.outputs.verification-artifact-name }}
+      - name: Verify checksums, sealed app, stapling, and cross-platform formats
+        env:
+          ARTIFACT_ARCH: ${{ matrix.artifact-arch }}
+          BUNDLE_IDENTIFIER: ${{ inputs.bundle-identifier }}
+          CHECKSUM_FILENAME: ${{ inputs.checksum-filename }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
+          PRODUCT_NAME: ${{ inputs.product-name }}
+          REPOSITORY_TYPE: ${{ inputs.repository-type }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
+          VERSION: ${{ needs.validate.outputs.release-version }}
+        run: |
+          set -euo pipefail
+          tar -xzf electron-release-assets.tar.gz; cd release-assets; shasum -a 256 -c "$CHECKSUM_FILENAME"
+          jq -e --arg repo "$GITHUB_REPOSITORY" --arg tag "$TAG" --arg commit "$TARGET_SHA" '.schemaVersion == 1 and .repository == $repo and .tag == $tag and .commit == $commit' ASSET-INVENTORY.json >/dev/null
+          zip="$PRODUCT_NAME-$VERSION-mac-$ARTIFACT_ARCH.zip"; dmg="$PRODUCT_NAME-$VERSION-mac-$ARTIFACT_ARCH.dmg"; [[ -f "$zip" && -f "$dmg" ]]
+          mkdir zip-app; ditto -x -k "$zip" zip-app; app="zip-app/$PRODUCT_NAME.app"; [[ -d "$app" ]]
+          if [[ "$REPOSITORY_TYPE" == openclaw ]]; then team=FWJYW4S8P8; else team=Y5PE65HELJ; fi
+          requirement="identifier \"$BUNDLE_IDENTIFIER\" and anchor apple generic and certificate leaf[subject.OU] = \"$team\""
+          codesign --verify --strict --deep -R="$requirement" "$app"; spctl --assess --type execute "$app"; xcrun stapler validate "$app"
+          [[ "$(lipo -archs "$app/Contents/MacOS/$PRODUCT_NAME")" == "$EXPECTED_ARCH" ]]
+          mount="$RUNNER_TEMP/electron-dmg"; mkdir "$mount"; hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount" -quiet
+          codesign --verify --strict --deep -R="$requirement" "$mount/$PRODUCT_NAME.app"; xcrun stapler validate "$mount/$PRODUCT_NAME.app"; hdiutil detach "$mount" -quiet
+          find . -maxdepth 1 -name '*.AppImage' -print -quit | grep -q .; file ./*.AppImage | grep -q ELF
+          find . -maxdepth 1 -name '*.exe' -print -quit | grep -q .; file ./*.exe | grep -Eq 'PE32|MS Windows'
+          jq -n --arg repository "$GITHUB_REPOSITORY" --arg runId "$GITHUB_RUN_ID" --arg payloadArtifact "${{ needs.draft.outputs.verification-artifact-name }}" --arg tag "$TAG" --arg commit "$TARGET_SHA" --arg architecture "$EXPECTED_ARCH" --rawfile assetInventory ASSET-INVENTORY.json --rawfile sha256sums "$CHECKSUM_FILENAME" --rawfile releaseNotes RELEASE-NOTES.md '{schemaVersion:1,repository:$repository,runId:$runId,payloadArtifact:$payloadArtifact,tag:$tag,commit:$commit,architecture:$architecture,verdict:"verified",assetInventory:$assetInventory,sha256sums:$sha256sums,releaseNotes:$releaseNotes}' >verified-electron-attestation.json
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: verified-electron-${{ matrix.arch }}-${{ needs.draft.outputs.verification-artifact-name }}
+          path: release-assets/verified-electron-attestation.json
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: 7 · Publish verified Electron draft
+    needs: [validate, draft, verify]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    outputs:
+      release-url: ${{ steps.publish.outputs.release-url }}
+    steps:
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: verified-electron-arm64-${{ needs.draft.outputs.verification-artifact-name }}
+          path: attestations/arm64
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: verified-electron-x86_64-${{ needs.draft.outputs.verification-artifact-name }}
+          path: attestations/x86_64
+      - id: publish
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          CHECKSUM_FILENAME: ${{ inputs.checksum-filename }}
+          RELEASE_ID: ${{ needs.draft.outputs.release-id }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
+          VERIFICATION_ARTIFACT: ${{ needs.draft.outputs.verification-artifact-name }}
+        with:
+          script: |
+            const crypto = require('crypto'), fs = require('fs');
+            const paths = { arm64: 'attestations/arm64/verified-electron-attestation.json', x86_64: 'attestations/x86_64/verified-electron-attestation.json' };
+            const attestations = Object.fromEntries(Object.entries(paths).map(([arch, file]) => [arch, JSON.parse(fs.readFileSync(file, 'utf8'))]));
+            for (const [arch, a] of Object.entries(attestations)) for (const [field, value] of Object.entries({ repository: `${context.repo.owner}/${context.repo.repo}`, runId: String(context.runId), payloadArtifact: process.env.VERIFICATION_ARTIFACT, tag: process.env.TAG, commit: process.env.TARGET_SHA, architecture: arch, verdict: 'verified' })) if (a[field] !== value) throw new Error(`${arch} attestation ${field} mismatch`);
+            for (const field of ['assetInventory', 'sha256sums', 'releaseNotes']) if (attestations.arm64[field] !== attestations.x86_64[field]) throw new Error(`architecture ${field} disagreement`);
+            const digests = new Map(attestations.arm64.sha256sums.trimEnd().split('\n').map((line) => { const m = /^([0-9a-f]{64})  ([^\r\n]+)$/.exec(line); if (!m) throw new Error('invalid checksum line'); return [m[2], m[1]]; }));
+            const releaseId = Number(process.env.RELEASE_ID); const release = await github.rest.repos.getRelease({ ...context.repo, release_id: releaseId }); if (!release.data.draft) throw new Error('release is not draft');
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets, { ...context.repo, release_id: releaseId, per_page: 100 }); const downloaded = new Map();
+            for (const asset of assets) { const response = await github.request('GET /repos/{owner}/{repo}/releases/assets/{asset_id}', { ...context.repo, asset_id: asset.id, headers: { accept: 'application/octet-stream' } }); downloaded.set(asset.name, Buffer.from(response.data)); }
+            if (JSON.stringify([...downloaded.keys()].sort()) !== JSON.stringify([...digests.keys(), process.env.CHECKSUM_FILENAME].sort())) throw new Error('draft asset inventory mismatch');
+            if (downloaded.get(process.env.CHECKSUM_FILENAME).toString('utf8') !== attestations.arm64.sha256sums) throw new Error('draft checksum mismatch');
+            for (const [name, digest] of digests) if (crypto.createHash('sha256').update(downloaded.get(name)).digest('hex') !== digest) throw new Error(`draft digest mismatch: ${name}`);
+            const published = await github.rest.repos.updateRelease({ ...context.repo, release_id: releaseId, draft: false, body: attestations.arm64.releaseNotes }); if (published.data.draft || !published.data.published_at) throw new Error('release did not publish'); core.setOutput('release-url', published.data.html_url);
+
+  closeout:
+    name: 8 · Open next Unreleased PR
+    needs: [validate, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ needs.validate.outputs.default-branch }}
+      - name: Open Unreleased section when missing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          grep -Eq '^## .*Unreleased' CHANGELOG.md && exit 0
+          ruby -e 'p="CHANGELOG.md"; t=File.read(p); m=t.index(/^## /)||t.length; File.write(p,"#{t[0...m].rstrip}\n\n## Unreleased\n\n#{t[m..]}")'
+          branch="release/next-unreleased-$GITHUB_RUN_ID"; git config user.name github-actions[bot]; git config user.email 41898282+github-actions[bot]@users.noreply.github.com; git switch -c "$branch"; git add CHANGELOG.md; git commit -m "chore: open next unreleased section"; git push origin "$branch"
+          body="$RUNNER_TEMP/closeout.md"; printf '%s\n' 'Opens the next Unreleased section after the verified Electron release.' >"$body"; gh pr create --base "${{ needs.validate.outputs.default-branch }}" --head "$branch" --title "chore: open next Unreleased section" --body-file "$body"
