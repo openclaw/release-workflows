@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.5.0 - 2026-08-02
+
+- Add optional split-host CGO builds that merge a macOS GoReleaser matrix with fixed-toolchain Linux/Windows outputs, route reproducible non-Darwin rebuilds through the split config, and allow versionless root `package.json` build manifests.
+
 ## v1.4.1 - 2026-07-27
 
 - Bound primary and independent GoReleaser builds to two concurrent targets so memory-heavy callers can complete reliably with identical build scheduling.
