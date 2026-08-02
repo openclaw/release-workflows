@@ -88,6 +88,7 @@ const tests = [
     assert.equal(result.thrown, undefined);
     assert.equal(result.outputs.get('target-sha'), 'b'.repeat(40));
     assert.equal(result.outputs.get('target-source'), 'protected-head');
+    assert.equal(result.outputs.get('tag-object-sha'), '');
     assert.deepEqual(result.comparisons, []);
   }],
   ['existing annotated tag freezes peeled commit', async () => {
@@ -95,6 +96,7 @@ const tests = [
     assert.deepEqual(result.failures, []);
     assert.equal(result.outputs.get('target-sha'), 'a'.repeat(40));
     assert.equal(result.outputs.get('target-source'), 'annotated-tag');
+    assert.equal(result.outputs.get('tag-object-sha'), 'c'.repeat(40));
     assert.deepEqual(result.comparisons, [`${'a'.repeat(40)}...${'b'.repeat(40)}`]);
   }],
   ['tag at current head remains valid', async () => {

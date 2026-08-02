@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.5.3 - 2026-08-02
+
+- Fail before tag creation when required macOS signing or notarization credentials are unavailable, and reject tag refs that appear, disappear, or change after release-target validation.
+
 ## v1.5.2 - 2026-08-02
 
 - Authenticate the post-publication GitHub API verification so anonymous rate limits cannot turn a successfully published release into a failed run before Homebrew handoff and closeout.
