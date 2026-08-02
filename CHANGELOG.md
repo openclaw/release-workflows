@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.5.2 - 2026-08-02
+
+- Authenticate the post-publication GitHub API verification so anonymous rate limits cannot turn a successfully published release into a failed run before Homebrew handoff and closeout.
+
 ## v1.5.1 - 2026-08-02
 
 - Keep signing, verification, publication, Homebrew handoff, and release
