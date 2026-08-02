@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.6.1 - 2026-08-02
+
+- Validate Swift CLI signing and notarization secrets before creating a consumer tag, and bind tag freezing to the exact annotated object observed during source validation.
+
 ## v1.6.0 - 2026-08-02
 
 - Add a reusable SwiftPM CLI release pipeline with frozen-source tags, universal Darwin CLI and arm64e/arm64/x86_64 helper packaging, resource bundles, Developer ID signing and notarization, Linux archives, dual native verification, exact draft binding, Homebrew handoff, and closeout.
