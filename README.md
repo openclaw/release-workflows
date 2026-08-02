@@ -25,6 +25,14 @@ When `homebrew-formula` is nonempty, the handoff dispatches the configured tap's
 
 See [`examples/release-swift-cli-caller.yml`](examples/release-swift-cli-caller.yml) for the thin caller. The consumer must provision `MACOS_SIGNING_P12`, `MACOS_SIGNING_P12_PASSWORD`, `ASC_KEY_ID`, `ASC_ISSUER_ID`, and `ASC_PRIVATE_KEY_P8`; Homebrew handoff additionally needs `TAP_TOKEN`.
 
+## Electron desktop archetype
+
+`release-electron.yml` freezes a protected source commit and builds GoReleaser server archives/packages alongside Electron desktop artifacts. Credential-free jobs produce Windows NSIS/ZIP and Linux AppImage/DEB outputs. The macOS job imports an ephemeral Developer ID keychain, builds native x64 and arm64 `.app` bundles, submits and staples each app, then packages architecture-specific DMG and ZIP assets. All server and desktop bytes are merged into one immutable Actions payload with `ASSET-INVENTORY.json`, `RELEASE-NOTES.md`, and the configured checksum manifest.
+
+Independent arm64 and Intel macOS jobs verify the full checksum set, exact source identity, sealed bundle identifier and Team ID, Gatekeeper acceptance, stapled tickets in both ZIP and DMG payloads, native architecture, plus Windows PE and Linux AppImage formats. Publication re-downloads every draft asset and requires exact name and digest equality with both attestations before undrafting.
+
+See [`examples/release-electron-caller.yml`](examples/release-electron-caller.yml). The caller must provision the same five Apple secrets as the Swift archetype. The credential preflight runs before tag creation, so an unprovisioned consumer can validate its unsigned desktop contract in ordinary CI without leaving a partial release tag.
+
 ## Go CLI archetype
 
 `release-go-cli.yml` is the first fleet archetype. It requires:

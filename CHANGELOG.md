@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.7.0 - 2026-08-02
+
+- Add a reusable Electron desktop release pipeline for Go server assets plus signed, notarized, and stapled macOS DMG/ZIP apps, Windows NSIS/ZIP, Linux AppImage/DEB, exact checksum inventory, dual native verification, bound publication, and closeout.
+
 ## v1.6.1 - 2026-08-02
 
 - Validate Swift CLI signing and notarization secrets before creating a consumer tag, and bind tag freezing to the exact annotated object observed during source validation.
