@@ -13,6 +13,8 @@ done < <(find .github/workflows examples -type f \( -name '*.yml' -o -name '*.ya
 actionlint "${workflow_files[@]}"
 
 node scripts/test-release-target-resolution.mjs
+node scripts/test-signing-credential-preflight.mjs
+node scripts/test-tag-freeze.mjs
 node scripts/test-ci-check-event-filter.mjs
 node scripts/test-build-artifact-matrix.mjs
 node scripts/test-split-host-build.mjs
@@ -317,6 +319,7 @@ for required_notes_extraction_control in [
         raise SystemExit(f'validate does not freeze exact release notes: {required_notes_extraction_control}')
 for required_retry_control in [
     "existingTag.data.object.type !== 'tag'",
+    "core.setOutput('tag-object-sha', tagObjectSha)",
     'targetSha = tagObject.data.object.sha',
     'basehead: `${targetSha}...${branchHead}`',
     "!['ahead', 'identical'].includes(comparison.data.status)",
@@ -324,6 +327,26 @@ for required_retry_control in [
 ]:
     if required_retry_control not in validate:
         raise SystemExit(f'missing immutable retry control: {required_retry_control}')
+
+for required_preflight_control in [
+    'Validate signing credentials',
+    'missing required release secret(s)',
+    'MACOS_SIGNING_P12 MACOS_SIGNING_P12_PASSWORD',
+    'ASC_KEY_ID ASC_ISSUER_ID ASC_PRIVATE_KEY_P8',
+]:
+    if required_preflight_control not in validate:
+        raise SystemExit(f'missing signing credential preflight: {required_preflight_control}')
+
+tag = workflow.split('\n  tag:\n', 1)[1].split('\n  build:\n', 1)[0]
+for required_tag_control in [
+    'EXPECTED_TAG_OBJECT: ${{ needs.validate.outputs.tag-object-sha }}',
+    'tag disappeared after validation',
+    'existing.data.object.sha !== process.env.EXPECTED_TAG_OBJECT',
+    'tag object changed after validation',
+    'tag appeared after validation',
+]:
+    if required_tag_control not in tag:
+        raise SystemExit(f'missing exact tag freeze control: {required_tag_control}')
 
 closeout = workflow.split('\n  closeout:\n', 1)[1]
 for required_closeout_diagnostic in [

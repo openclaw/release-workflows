@@ -127,6 +127,7 @@ jobs:
       release-notes-artifact-name: ${{ steps.metadata.outputs.release-notes-artifact-name }}
       release-version: ${{ steps.inputs.outputs.release-version }}
       tag: ${{ steps.inputs.outputs.tag }}
+      tag-object-sha: ${{ steps.repository.outputs.tag-object-sha }}
       target-sha: ${{ steps.repository.outputs.target-sha }}
     steps:
       - name: Validate inputs
@@ -263,6 +264,26 @@ jobs:
             echo "homebrew-tap=$homebrew_tap"
           } >>"$GITHUB_OUTPUT"
 
+      - name: Validate signing credentials
+        env:
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_PRIVATE_KEY_P8: ${{ secrets.ASC_PRIVATE_KEY_P8 }}
+          MACOS_SIGNING_P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          MACOS_SIGNING_P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in \
+            MACOS_SIGNING_P12 MACOS_SIGNING_P12_PASSWORD \
+            ASC_KEY_ID ASC_ISSUER_ID ASC_PRIVATE_KEY_P8; do
+            [[ -n "${!name:-}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf 'missing required release secret(s): %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+
       - name: Resolve protected release target
         id: repository
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
@@ -288,6 +309,7 @@ jobs:
 
             let targetSha = branchHead;
             let targetSource = 'protected-head';
+            let tagObjectSha = '';
             let existingTag = null;
             try {
               existingTag = await github.rest.git.getRef({
@@ -303,9 +325,10 @@ jobs:
                 core.setFailed(`existing tag is lightweight, not annotated: ${process.env.TAG}`);
                 return;
               }
+              tagObjectSha = existingTag.data.object.sha;
               const tagObject = await github.rest.git.getTag({
                 ...context.repo,
-                tag_sha: existingTag.data.object.sha,
+                tag_sha: tagObjectSha,
               });
               if (tagObject.data.object.type !== 'commit') {
                 core.setFailed(`annotated tag does not peel directly to a commit: ${process.env.TAG}`);
@@ -328,6 +351,7 @@ jobs:
               core.info(`first-attempt target is protected ${branchName} head ${branchHead}`);
             }
             core.setOutput('default-branch', branchName);
+            core.setOutput('tag-object-sha', tagObjectSha);
             core.setOutput('target-sha', targetSha);
             core.setOutput('target-source', targetSource);
 
@@ -747,26 +771,47 @@ jobs:
       - name: Create immutable annotated tag
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
+          EXPECTED_TAG_OBJECT: ${{ needs.validate.outputs.tag-object-sha }}
           REPOSITORY_TYPE: ${{ inputs.repository-type }}
           TAG: ${{ needs.validate.outputs.tag }}
           TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
         with:
           script: |
+            let existing = null;
             try {
-              const existing = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
+              existing = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+
+            if (process.env.EXPECTED_TAG_OBJECT !== '') {
+              if (existing === null) {
+                core.setFailed(`tag disappeared after validation: ${process.env.TAG}`);
+                return;
+              }
               if (existing.data.object.type !== 'tag') {
                 core.setFailed(`existing tag is lightweight, not signed or annotated: ${process.env.TAG}`);
                 return;
               }
-              const tagObject = await github.rest.git.getTag({ ...context.repo, tag_sha: existing.data.object.sha });
+              if (existing.data.object.sha !== process.env.EXPECTED_TAG_OBJECT) {
+                core.setFailed(`tag object changed after validation: ${process.env.TAG}`);
+                return;
+              }
+              const tagObject = await github.rest.git.getTag({
+                ...context.repo,
+                tag_sha: process.env.EXPECTED_TAG_OBJECT,
+              });
               if (tagObject.data.object.type !== 'commit' || tagObject.data.object.sha !== process.env.TARGET_SHA) {
                 core.setFailed(`existing tag does not freeze ${process.env.TARGET_SHA}`);
                 return;
               }
               core.info(`reusing exact signed or annotated tag ${process.env.TAG}`);
               return;
-            } catch (error) {
-              if (error.status !== 404) throw error;
+            }
+
+            if (existing !== null) {
+              core.setFailed(`tag appeared after validation: ${process.env.TAG}`);
+              return;
             }
             const tagObject = await github.rest.git.createTag({
               ...context.repo,
