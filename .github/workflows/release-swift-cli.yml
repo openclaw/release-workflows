@@ -133,6 +133,7 @@ jobs:
       release-notes-artifact-name: ${{ steps.metadata.outputs.release-notes-artifact-name }}
       release-version: ${{ steps.inputs.outputs.release-version }}
       tag: ${{ steps.inputs.outputs.tag }}
+      tag-object-sha: ${{ steps.source.outputs.tag-object-sha }}
       target-sha: ${{ steps.source.outputs.target-sha }}
     steps:
       - name: Validate inputs
@@ -189,6 +190,24 @@ jobs:
           echo "release-version=$release_version" >>"$GITHUB_OUTPUT"
           echo "tag=v$release_version" >>"$GITHUB_OUTPUT"
 
+      - name: Validate signing credentials
+        env:
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_PRIVATE_KEY_P8: ${{ secrets.ASC_PRIVATE_KEY_P8 }}
+          MACOS_SIGNING_P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          MACOS_SIGNING_P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in MACOS_SIGNING_P12 MACOS_SIGNING_P12_PASSWORD ASC_KEY_ID ASC_ISSUER_ID ASC_PRIVATE_KEY_P8; do
+            [[ -n "${!name:-}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf 'missing required release secret(s): %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+
       - name: Resolve protected release target
         id: source
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
@@ -211,10 +230,12 @@ jobs:
               return;
             }
             let targetSha = branchHead;
+            let tagObjectSha = '';
             try {
               const ref = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
               if (ref.data.object.type !== 'tag') throw new Error('existing release tag must be annotated');
-              const tagObject = await github.rest.git.getTag({ ...context.repo, tag_sha: ref.data.object.sha });
+              tagObjectSha = ref.data.object.sha;
+              const tagObject = await github.rest.git.getTag({ ...context.repo, tag_sha: tagObjectSha });
               if (tagObject.data.object.type !== 'commit') throw new Error('release tag must peel directly to a commit');
               targetSha = tagObject.data.object.sha;
             } catch (error) {
@@ -229,6 +250,7 @@ jobs:
               return;
             }
             core.setOutput('default-branch', defaultBranch);
+            core.setOutput('tag-object-sha', tagObjectSha);
             core.setOutput('target-sha', targetSha);
 
       - name: Check out exact release target
@@ -336,21 +358,28 @@ jobs:
       - name: Create or reuse immutable annotated tag
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
+          EXPECTED_TAG_OBJECT: ${{ needs.validate.outputs.tag-object-sha }}
           TAG: ${{ needs.validate.outputs.tag }}
           TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
         with:
           script: |
+            let existing = null;
             try {
-              const ref = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
-              if (ref.data.object.type !== 'tag') throw new Error('existing release tag is not annotated');
-              const object = await github.rest.git.getTag({ ...context.repo, tag_sha: ref.data.object.sha });
-              if (object.data.object.type !== 'commit' || object.data.object.sha !== process.env.TARGET_SHA) {
-                throw new Error('existing release tag target changed');
-              }
-              return;
+              existing = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
             } catch (error) {
               if (error.status !== 404) throw error;
             }
+
+            if (process.env.EXPECTED_TAG_OBJECT !== '') {
+              if (existing === null) throw new Error('release tag disappeared after validation');
+              if (existing.data.object.type !== 'tag' || existing.data.object.sha !== process.env.EXPECTED_TAG_OBJECT) {
+                throw new Error('release tag object changed after validation');
+              }
+              const object = await github.rest.git.getTag({ ...context.repo, tag_sha: process.env.EXPECTED_TAG_OBJECT });
+              if (object.data.object.type !== 'commit' || object.data.object.sha !== process.env.TARGET_SHA) throw new Error('existing release tag target changed');
+              return;
+            }
+            if (existing !== null) throw new Error('release tag appeared after validation');
             const object = await github.rest.git.createTag({
               ...context.repo,
               tag: process.env.TAG,

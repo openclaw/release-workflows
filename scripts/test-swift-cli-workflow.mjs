@@ -27,6 +27,16 @@ const sign = section('sign', 'draft');
 const verify = section('verify', 'publish');
 const publish = section('publish', 'handoff');
 const handoff = section('handoff', 'closeout');
+const validate = section('validate', 'tag');
+const tag = section('tag', 'build-macos');
+
+assert.match(validate, /Validate signing credentials/);
+assert.match(validate, /missing required release secret\(s\)/);
+assert.match(validate, /tag-object-sha/);
+assert.match(tag, /EXPECTED_TAG_OBJECT/);
+assert.match(tag, /release tag disappeared after validation/);
+assert.match(tag, /release tag appeared after validation/);
+assert.match(tag, /release tag object changed after validation/);
 
 for (const build of [buildMac, buildLinux]) {
   assert.doesNotMatch(build, /secrets\./, 'build jobs cannot receive release credentials');
