@@ -15,6 +15,7 @@ actionlint "${workflow_files[@]}"
 node scripts/test-release-target-resolution.mjs
 node scripts/test-ci-check-event-filter.mjs
 node scripts/test-build-artifact-matrix.mjs
+node scripts/test-split-host-build.mjs
 node scripts/test-reproducible-rebuild.mjs
 node scripts/test-go-cli-policy-inputs.mjs
 node scripts/test-release-notes-extraction.mjs
@@ -36,7 +37,7 @@ import re
 
 workflow_paths = sorted(Path('.github/workflows').glob('*.y*ml')) + sorted(Path('examples').glob('*.y*ml'))
 workflow = Path('.github/workflows/release-go-cli.yml').read_text()
-required_jobs = ['validate', 'tag', 'build', 'sign', 'rebuild', 'compare', 'draft', 'verify', 'publish', 'handoff', 'closeout']
+required_jobs = ['validate', 'tag', 'build', 'build-split', 'merge-builds', 'sign', 'rebuild', 'compare', 'draft', 'verify', 'publish', 'handoff', 'closeout']
 for job in required_jobs:
     if not re.search(rf'^  {re.escape(job)}:\s*$', workflow, re.MULTILINE):
         raise SystemExit(f'missing required job: {job}')
@@ -44,7 +45,7 @@ for job in required_jobs:
 required_inputs = [
     'version', 'repository-type', 'homebrew-tap', 'homebrew-formula', 'extra-packages',
     'archive-files', 'checksum-filename', 'ci-check-events',
-    'nfpm', 'build-runner', 'stable-identifier', 'require-signed-tag', 'darwin-universal',
+    'nfpm', 'build-runner', 'split-goreleaser-config', 'stable-identifier', 'require-signed-tag', 'darwin-universal',
     'strict-checks', 'reproducible-rebuild',
 ]
 for name in required_inputs:
@@ -112,7 +113,7 @@ build = workflow.split('\n  build:\n', 1)[1].split('\n  sign:\n', 1)[0]
 rebuild = workflow.split('\n  rebuild:\n', 1)[1].split('\n  compare:\n', 1)[0]
 compare = workflow.split('\n  compare:\n', 1)[1].split('\n  draft:\n', 1)[0]
 for required_build_control in [
-    "inputs.build-runner == 'macos' && 'macos-15' || 'ubuntu-latest'",
+    "inputs.split-goreleaser-config != '' && 'macos-15'",
     'NFPM_MODE: ${{ inputs.nfpm }}',
     'nfpm-enabled:',
     'release --config=$config --clean --timeout 60m --parallelism=2 --release-notes=/dev/null --skip=',
@@ -124,7 +125,7 @@ for required_build_control in [
 if not re.search(r'permissions:\s*\n\s*contents: read\s*$', rebuild, re.MULTILINE):
     raise SystemExit('reproducible rebuild job must grant only contents: read')
 for required_rebuild_control in [
-    "inputs.build-runner == 'macos' && 'macos-15' || 'ubuntu-latest'",
+    "inputs.split-goreleaser-config != '' && 'ubuntu-latest'",
     'fetch-depth: 0',
     'version: ${{ needs.build.outputs.goreleaser-version }}',
     '[[ "$(go env GOVERSION)" == "$EXPECTED_GO_VERSION" ]]',

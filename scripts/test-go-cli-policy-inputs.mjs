@@ -50,6 +50,7 @@ const runInputs = (overrides = {}) => {
         NFPM_MODE: 'auto',
         REPRODUCIBLE_REBUILD: 'disabled',
         REPOSITORY_TYPE: 'openclaw',
+        SPLIT_GORELEASER_CONFIG: '',
         STABLE_IDENTIFIER: '',
         VERSION: '1.2.3',
         ...overrides,
@@ -121,6 +122,13 @@ const tests = [
     runInputs({ REPRODUCIBLE_REBUILD: 'non-darwin' });
     assert.throws(() => runInputs({ REPRODUCIBLE_REBUILD: 'all' }));
     assert.throws(() => runInputs({ REPRODUCIBLE_REBUILD: 'sometimes' }));
+  }],
+  ['split-host config requires a safe path and binary-only package mode', () => {
+    runInputs({ NFPM_MODE: 'disabled', SPLIT_GORELEASER_CONFIG: '.goreleaser-linux-windows.yml' });
+    for (const value of ['/tmp/config.yml', '../config.yml', 'configs/../config.yml', 'config\\windows.yml']) {
+      assert.throws(() => runInputs({ NFPM_MODE: 'disabled', SPLIT_GORELEASER_CONFIG: value }));
+    }
+    assert.throws(() => runInputs({ NFPM_MODE: 'auto', SPLIT_GORELEASER_CONFIG: 'split.yml' }));
   }],
   ['CI check events accept unique Actions event names', () => {
     runInputs({ CI_CHECK_EVENTS: '["push","pull_request"]' });

@@ -46,6 +46,11 @@ on:
         required: false
         default: ubuntu
         type: string
+      split-goreleaser-config:
+        description: 'Optional second GoReleaser config for Linux/Windows CGO builds on Ubuntu; the primary config runs on macOS'
+        required: false
+        default: ''
+        type: string
       stable-identifier:
         description: Reverse-DNS signing identifier; empty derives the repository policy default
         required: false
@@ -138,6 +143,7 @@ jobs:
           NFPM_MODE: ${{ inputs.nfpm }}
           REPRODUCIBLE_REBUILD: ${{ inputs.reproducible-rebuild }}
           REPOSITORY_TYPE: ${{ inputs.repository-type }}
+          SPLIT_GORELEASER_CONFIG: ${{ inputs.split-goreleaser-config }}
           STABLE_IDENTIFIER: ${{ inputs.stable-identifier }}
           VERSION: ${{ inputs.version }}
         run: |
@@ -154,6 +160,19 @@ jobs:
           if [[ "$BUILD_RUNNER" != ubuntu && "$BUILD_RUNNER" != macos ]]; then
             echo "build-runner must be ubuntu or macos" >&2
             exit 1
+          fi
+          if [[ -n "$SPLIT_GORELEASER_CONFIG" ]]; then
+            if [[ ! "$SPLIT_GORELEASER_CONFIG" =~ ^[A-Za-z0-9.][A-Za-z0-9._/-]*$ ||
+                  "$SPLIT_GORELEASER_CONFIG" == /* || "$SPLIT_GORELEASER_CONFIG" == */../* ||
+                  "$SPLIT_GORELEASER_CONFIG" == ../* || "$SPLIT_GORELEASER_CONFIG" == */.. ||
+                  "$SPLIT_GORELEASER_CONFIG" == . || "$SPLIT_GORELEASER_CONFIG" == .. ]]; then
+              echo "split-goreleaser-config must be a safe repo-relative path" >&2
+              exit 1
+            fi
+            if [[ "$NFPM_MODE" != disabled ]]; then
+              echo "split-host builds currently require nfpm=disabled" >&2
+              exit 1
+            fi
           fi
           if [[ "$DARWIN_UNIVERSAL" != auto && "$DARWIN_UNIVERSAL" != enabled && "$DARWIN_UNIVERSAL" != disabled ]]; then
             echo "darwin-universal must be auto, enabled, or disabled" >&2
@@ -346,6 +365,7 @@ jobs:
           ARCHIVE_FILES: ${{ inputs.archive-files }}
           EXTRA_PACKAGES: ${{ inputs.extra-packages }}
           RELEASE_VERSION: ${{ steps.inputs.outputs.release-version }}
+          SPLIT_GORELEASER_CONFIG: ${{ inputs.split-goreleaser-config }}
         run: |
           set -euo pipefail
           [[ -f CHANGELOG.md ]] || { echo "CHANGELOG.md is required" >&2; exit 1; }
@@ -364,6 +384,36 @@ jobs:
             echo "a GoReleaser config is required" >&2
             exit 1
           }
+          if [[ -n "$SPLIT_GORELEASER_CONFIG" ]]; then
+            entry=$(git ls-tree HEAD -- "$SPLIT_GORELEASER_CONFIG")
+            mode=${entry%% *}
+            entry_path=${entry#*$'\t'}
+            [[ "$entry_path" == "$SPLIT_GORELEASER_CONFIG" && "$mode" == 100644 ]] || {
+              echo "split-goreleaser-config must be a tracked regular file in the frozen source" >&2
+              exit 1
+            }
+            [[ "$SPLIT_GORELEASER_CONFIG" != "$goreleaser_config" ]] || {
+              echo "split-goreleaser-config must differ from the primary GoReleaser config" >&2
+              exit 1
+            }
+            ruby -rpsych -e '
+              def targets(path)
+                config = Psych.safe_load(File.read(path), permitted_classes: [], permitted_symbols: [], aliases: true) || {}
+                builds = config["builds"]
+                abort "#{path}: builds must be a nonempty array" unless builds.is_a?(Array) && !builds.empty?
+                builds.flat_map do |build|
+                  abort "#{path}: every build must be a mapping" unless build.is_a?(Hash)
+                  Array(build["goos"])
+                end
+              end
+              primary, split = ARGV
+              primary_targets = targets(primary)
+              split_targets = targets(split)
+              abort "#{primary}: split-host primary config must build Darwin" unless primary_targets.include?("darwin")
+              abort "#{split}: split-host config cannot build Darwin" if split_targets.include?("darwin")
+              abort "#{split}: split-host config must build Linux or Windows" unless (split_targets & ["linux", "windows"]).any?
+            ' "$goreleaser_config" "$SPLIT_GORELEASER_CONFIG"
+          fi
 
           python3 - "$RELEASE_VERSION" "$RUNNER_TEMP/RELEASE-NOTES.md" <<'PY'
           from pathlib import Path
@@ -439,10 +489,19 @@ jobs:
           done
 
           package_files=()
-          [[ -f package.json ]] && package_files+=(package.json)
           while IFS= read -r path; do
             [[ -d "$path" && -f "$path/package.json" ]] && package_files+=("$path/package.json")
           done < <(jq -r '.[]' <<<"$EXTRA_PACKAGES")
+          if [[ -f package.json ]]; then
+            root_version=$(jq -er 'if has("version") and (.version | type == "string") then .version else empty end' package.json || true)
+            if [[ -n "$root_version" ]]; then
+              actual=${root_version#v}
+              [[ "$actual" == "$RELEASE_VERSION" ]] || {
+                echo "package.json version $actual does not match $RELEASE_VERSION" >&2
+                exit 1
+              }
+            fi
+          fi
           for package_file in "${package_files[@]}"; do
             actual=$(jq -er '.version' "$package_file")
             actual=${actual#v}
@@ -730,7 +789,7 @@ jobs:
   build:
     name: 3a · GoReleaser build matrix
     needs: [validate, tag]
-    runs-on: ${{ inputs.build-runner == 'macos' && 'macos-15' || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.split-goreleaser-config != '' && 'macos-15' || (inputs.build-runner == 'macos' && 'macos-15' || 'ubuntu-latest') }}
     permissions:
       contents: read
     outputs:
@@ -758,7 +817,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Freeze Go version
-        if: inputs.reproducible-rebuild != 'disabled'
+        if: inputs.reproducible-rebuild != 'disabled' || inputs.split-goreleaser-config != ''
         id: go-version
         run: |
           set -euo pipefail
@@ -875,14 +934,179 @@ jobs:
       - name: Upload raw matrix
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
+          name: raw-goreleaser-primary-${{ github.run_id }}
+          path: raw-goreleaser-dist.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  build-split:
+    name: 3b · Linux/Windows CGO matrix
+    if: inputs.split-goreleaser-config != ''
+    needs: [validate, tag, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      goreleaser-args: ${{ steps.build-mode.outputs.args }}
+    steps:
+      - name: Check out frozen tag
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.tag }}
+          fetch-depth: 0
+      - name: Verify tag target
+        env:
+          TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$TARGET_SHA" ]]
+      - name: Set up exact Go toolchain
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ needs.build.outputs.go-setup-version }}
+          cache: true
+      - name: Install fixed cross-compilers
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential gcc-aarch64-linux-gnu libc6-dev-arm64-cross mingw-w64
+      - name: Resolve split GoReleaser mode
+        id: build-mode
+        env:
+          SPLIT_GORELEASER_CONFIG: ${{ inputs.split-goreleaser-config }}
+        run: |
+          set -euo pipefail
+          args="release --config=$SPLIT_GORELEASER_CONFIG --clean --timeout 60m --parallelism=2 --release-notes=/dev/null --skip=announce,aur,aur-source,chocolatey,docker,flatpak,homebrew,ko,makeself,mcp,nfpm,nix,notarize,publish,sbom,scoop,sign,snapcraft,srpm,validate,winget"
+          echo "args=$args" >>"$GITHUB_OUTPUT"
+      - name: Install exact GoReleaser
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
+        with:
+          distribution: goreleaser
+          version: ${{ needs.build.outputs.goreleaser-version }}
+          install-only: true
+      - name: Build Linux and Windows matrix
+        env:
+          GORELEASER_ARGS: ${{ steps.build-mode.outputs.args }}
+          GORELEASER_CURRENT_TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          read -r -a goreleaser_args <<<"$GORELEASER_ARGS"
+          goreleaser "${goreleaser_args[@]}"
+          tar -czf raw-goreleaser-split.tar.gz dist
+      - name: Upload raw split matrix
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: raw-goreleaser-split-${{ github.run_id }}
+          path: raw-goreleaser-split.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  merge-builds:
+    name: 3c · Freeze merged GoReleaser payload
+    if: >-
+      ${{
+        always() &&
+        needs.build.result == 'success' &&
+        (inputs.split-goreleaser-config == '' || needs.build-split.result == 'success')
+      }}
+    needs: [build, build-split]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - name: Download primary matrix
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: raw-goreleaser-primary-${{ github.run_id }}
+          path: primary
+      - name: Download split matrix
+        if: inputs.split-goreleaser-config != ''
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: raw-goreleaser-split-${{ github.run_id }}
+          path: split
+      - name: Merge host payloads without collisions
+        env:
+          SPLIT_ENABLED: ${{ inputs.split-goreleaser-config != '' }}
+        run: |
+          set -euo pipefail
+          mkdir primary/root merged
+          tar -xzf primary/raw-goreleaser-dist.tar.gz -C primary/root
+          if [[ "$SPLIT_ENABLED" == true ]]; then
+            mkdir split/root
+            tar -xzf split/raw-goreleaser-split.tar.gz -C split/root
+            node <<'NODE'
+          // split-host-artifact-merger-begin
+          const fs = require('fs');
+          const path = require('path');
+
+          const roots = [path.resolve('primary/root'), path.resolve('split/root')];
+          const outputRoot = path.resolve('merged');
+          const outputDist = path.join(outputRoot, 'dist');
+          fs.mkdirSync(outputDist, { recursive: true });
+          const acceptedTypes = new Set(['Archive', 'Binary', 'Linux Package', 'Universal Binary']);
+          const mergedArtifacts = [];
+          const copied = new Map();
+
+          const safeArtifactPath = (root, artifactPath) => {
+            if (typeof artifactPath !== 'string' || artifactPath.includes('\\')) {
+              throw new Error('GoReleaser artifact has an unsafe path');
+            }
+            const resolved = path.resolve(root, artifactPath);
+            const dist = path.resolve(root, 'dist');
+            if (resolved !== dist && !resolved.startsWith(`${dist}${path.sep}`)) {
+              throw new Error(`GoReleaser artifact escapes dist: ${artifactPath}`);
+            }
+            return resolved;
+          };
+
+          for (const root of roots) {
+            const artifactFile = path.join(root, 'dist', 'artifacts.json');
+            const artifacts = JSON.parse(fs.readFileSync(artifactFile, 'utf8'));
+            if (!Array.isArray(artifacts)) throw new Error('GoReleaser artifacts.json must be an array');
+            for (const artifact of artifacts) {
+              if (!acceptedTypes.has(artifact.type)) continue;
+              const source = safeArtifactPath(root, artifact.path);
+              const relative = path.relative(path.join(root, 'dist'), source);
+              const destination = path.join(outputDist, relative);
+              const stat = fs.lstatSync(source);
+              if (!stat.isFile() || stat.isSymbolicLink()) {
+                throw new Error(`GoReleaser artifact is not a regular file: ${artifact.path}`);
+              }
+              const previous = copied.get(relative);
+              if (previous && previous !== source) throw new Error(`split-host artifact collision: dist/${relative}`);
+              if (!previous) {
+                fs.mkdirSync(path.dirname(destination), { recursive: true });
+                fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
+                fs.chmodSync(destination, stat.mode & 0o777);
+                copied.set(relative, source);
+              }
+              mergedArtifacts.push(artifact);
+            }
+          }
+          const extras = path.join(roots[0], 'dist', 'extra-package-payload');
+          if (fs.existsSync(extras)) fs.cpSync(extras, path.join(outputDist, 'extra-package-payload'), { recursive: true, errorOnExist: true });
+          const archiveFiles = path.join(roots[0], 'release-archive-files');
+          if (fs.existsSync(archiveFiles)) fs.cpSync(archiveFiles, path.join(outputRoot, 'release-archive-files'), { recursive: true, errorOnExist: true });
+          fs.writeFileSync(path.join(outputDist, 'artifacts.json'), `${JSON.stringify(mergedArtifacts, null, 2)}\n`);
+          // split-host-artifact-merger-end
+          NODE
+          else
+            cp -R primary/root/. merged/
+          fi
+          tar -czf raw-goreleaser-dist.tar.gz -C merged .
+      - name: Upload immutable merged matrix
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
           name: raw-goreleaser-dist-${{ github.run_id }}
           path: raw-goreleaser-dist.tar.gz
           if-no-files-found: error
           retention-days: 1
 
   sign:
-    name: 3b · Sign, notarize, and package macOS
-    needs: [validate, build]
+    name: 3d · Sign, notarize, and package macOS
+    needs: [validate, build, merge-builds]
     runs-on: macos-14
     permissions:
       contents: read
@@ -1163,7 +1387,7 @@ jobs:
       - name: Assemble signed archives and nFPM packages
         env:
           ARCHIVE_FILES: ${{ inputs.archive-files }}
-          NFPM_ENABLED: ${{ needs.build.outputs.nfpm-enabled }}
+          NFPM_ENABLED: ${{ inputs.split-goreleaser-config != '' && 'false' || needs.build.outputs.nfpm-enabled }}
           RELEASE_VERSION: ${{ needs.validate.outputs.release-version }}
           REPOSITORY_NAME: ${{ github.event.repository.name }}
         run: |
@@ -1427,9 +1651,16 @@ jobs:
           exit "$cleanup_failed"
 
   rebuild:
-    name: 3c · Independent reproducible rebuild
-    needs: [validate, build]
-    runs-on: ${{ inputs.build-runner == 'macos' && 'macos-15' || 'ubuntu-latest' }}
+    name: 3e · Independent reproducible rebuild
+    if: >-
+      ${{
+        always() &&
+        needs.validate.result == 'success' &&
+        needs.build.result == 'success' &&
+        (inputs.split-goreleaser-config == '' || needs.build-split.result == 'success')
+      }}
+    needs: [validate, build, build-split]
+    runs-on: ${{ inputs.split-goreleaser-config != '' && 'ubuntu-latest' || (inputs.build-runner == 'macos' && 'macos-15' || 'ubuntu-latest') }}
     permissions:
       contents: read
     outputs:
@@ -1471,10 +1702,16 @@ jobs:
           distribution: goreleaser
           version: ${{ needs.build.outputs.goreleaser-version }}
           install-only: true
+      - name: Install fixed cross-compilers for split rebuild
+        if: inputs.reproducible-rebuild != 'disabled' && inputs.split-goreleaser-config != ''
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential gcc-aarch64-linux-gnu libc6-dev-arm64-cross mingw-w64
       - name: Independently rebuild configured matrix without credentials
         if: inputs.reproducible-rebuild != 'disabled'
         env:
-          GORELEASER_ARGS: ${{ needs.build.outputs.goreleaser-args }}
+          GORELEASER_ARGS: ${{ inputs.split-goreleaser-config != '' && needs.build-split.outputs.goreleaser-args || needs.build.outputs.goreleaser-args }}
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: |
           set -euo pipefail
@@ -1520,7 +1757,7 @@ jobs:
           retention-days: 1
 
   compare:
-    name: 3d · Compare staged and rebuilt bytes
+    name: 3f · Compare staged and rebuilt bytes
     needs: [validate, build, sign, rebuild]
     runs-on: ubuntu-latest
     permissions:

@@ -31,6 +31,7 @@ jobs:
       # Optional defaults. Set build-runner to macos for native Darwin/CGO builds.
       # nfpm: auto
       # build-runner: ubuntu
+      # split-goreleaser-config: .goreleaser-linux-windows.yml
       # stable-identifier: ai.openclaw.example-cli
       # require-signed-tag: false
       # darwin-universal: auto

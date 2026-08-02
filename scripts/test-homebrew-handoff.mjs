@@ -115,6 +115,7 @@ function resolveInputs({
         NFPM_MODE: nfpmMode,
         REPRODUCIBLE_REBUILD: 'disabled',
         REPOSITORY_TYPE: repositoryType,
+        SPLIT_GORELEASER_CONFIG: '',
         STABLE_IDENTIFIER: '',
         VERSION: '1.2.3',
       },

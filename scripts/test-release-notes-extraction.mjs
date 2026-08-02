@@ -27,7 +27,7 @@ const metadataScript = execFileSync(
   { encoding: 'utf8' },
 );
 
-function runMetadata(changelog, version = '1.2.3') {
+function runMetadata(changelog, version = '1.2.3', packageManifest = { name: 'fixture', version }) {
   const fixtureRoot = mkdtempSync(join(tmpdir(), 'release-notes-extraction-'));
   const runnerTemp = join(fixtureRoot, 'runner-temp');
   const githubOutput = join(fixtureRoot, 'github-output');
@@ -36,7 +36,7 @@ function runMetadata(changelog, version = '1.2.3') {
   writeFileSync(join(fixtureRoot, 'go.mod'), 'module example.test/fixture\n\ngo 1.24\n');
   writeFileSync(join(fixtureRoot, '.goreleaser.yml'), 'version: 2\n');
   // Keep Bash 3.2 nounset behavior deterministic by making package_files non-empty.
-  writeFileSync(join(fixtureRoot, 'package.json'), JSON.stringify({ name: 'fixture', version }));
+  writeFileSync(join(fixtureRoot, 'package.json'), JSON.stringify(packageManifest));
 
   let thrown;
   try {
@@ -52,6 +52,7 @@ function runMetadata(changelog, version = '1.2.3') {
         GITHUB_RUN_ID: '42',
         RELEASE_VERSION: version,
         RUNNER_TEMP: runnerTemp,
+        SPLIT_GORELEASER_CONFIG: '',
       },
       stdio: 'pipe',
     });
@@ -103,4 +104,12 @@ assert.notEqual(duplicate.thrown, undefined);
 assert.match(duplicate.stderr, /exactly one dated level-two section for 1\.2\.3; found 2/);
 console.log('PASS duplicate dated version sections fail closed');
 
-console.log(`release notes extraction tests passed (${cases.length + 1} scenarios)`);
+const versionlessRoot = runMetadata(
+  '# Changelog\n\n## v1.2.3 - 2026-07-18\n\n- Versionless package fixture.\n',
+  '1.2.3',
+  { name: 'fixture', private: true },
+);
+assert.equal(versionlessRoot.thrown, undefined);
+console.log('PASS versionless root package manifest is accepted');
+
+console.log(`release notes extraction tests passed (${cases.length + 2} scenarios)`);
