@@ -1,0 +1,909 @@
+name: Release Swift CLI
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: SemVer release version, with or without a leading v
+        required: true
+        type: string
+      repository-type:
+        description: Signing identity policy, openclaw or personal
+        required: true
+        type: string
+      homebrew-tap:
+        description: Homebrew tap owner/repo
+        required: false
+        default: steipete/homebrew-tap
+        type: string
+      homebrew-formula:
+        description: Formula name; empty disables handoff
+        required: false
+        default: ''
+        type: string
+      binary-name:
+        description: SwiftPM executable product name
+        required: false
+        default: imsg
+        type: string
+      helper-name:
+        description: Companion universal dylib filename
+        required: false
+        default: imsg-bridge-helper.dylib
+        type: string
+      binary-identifier:
+        description: Stable code-signing identifier for the CLI
+        required: false
+        default: com.steipete.imsg
+        type: string
+      helper-identifier:
+        description: Stable code-signing identifier for the companion dylib
+        required: false
+        default: com.steipete.imsg.bridge-helper
+        type: string
+      macos-archive-name:
+        description: Published macOS ZIP filename
+        required: false
+        default: imsg-macos.zip
+        type: string
+      linux-archive-name:
+        description: Published Linux tar.gz filename
+        required: false
+        default: imsg-linux-x86_64.tar.gz
+        type: string
+      version-file:
+        description: Repo-relative shell file containing MARKETING_VERSION
+        required: false
+        default: version.env
+        type: string
+      macos-build-script:
+        description: Repo-relative executable that builds universal macOS payloads into OUTPUT_DIR
+        required: false
+        default: scripts/build-universal.sh
+        type: string
+      linux-build-script:
+        description: Repo-relative executable that builds the Linux archive into OUTPUT_DIR
+        required: false
+        default: scripts/build-linux.sh
+        type: string
+      prepare-script:
+        description: Repo-relative executable that patches resolved SwiftPM dependencies
+        required: false
+        default: scripts/patch-deps.sh
+        type: string
+      generate-version-script:
+        description: Repo-relative executable that synchronizes generated version metadata
+        required: false
+        default: scripts/generate-version.sh
+        type: string
+      entitlements-file:
+        description: Repo-relative entitlements file for the CLI
+        required: false
+        default: Resources/imsg.entitlements
+        type: string
+      swift-linux-image:
+        description: Swift Linux container image
+        required: false
+        default: swift:6.3.3-noble
+        type: string
+      checksum-filename:
+        description: Published checksum manifest filename
+        required: false
+        default: SHA256SUMS
+        type: string
+      ci-check-events:
+        description: JSON array of Actions events accepted as frozen-source CI evidence
+        required: false
+        default: '["push","pull_request"]'
+        type: string
+    secrets:
+      MACOS_SIGNING_P12:
+        required: true
+      MACOS_SIGNING_P12_PASSWORD:
+        required: true
+      ASC_KEY_ID:
+        required: true
+      ASC_ISSUER_ID:
+        required: true
+      ASC_PRIVATE_KEY_P8:
+        required: true
+      TAP_TOKEN:
+        required: false
+    outputs:
+      release-id:
+        value: ${{ jobs.draft.outputs.release-id }}
+      release-url:
+        value: ${{ jobs.publish.outputs.release-url }}
+
+concurrency:
+  group: release-swift-cli-${{ github.repository }}-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: 1 · Validate frozen Swift source
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      statuses: read
+    outputs:
+      default-branch: ${{ steps.source.outputs.default-branch }}
+      release-notes-artifact-name: ${{ steps.metadata.outputs.release-notes-artifact-name }}
+      release-version: ${{ steps.inputs.outputs.release-version }}
+      tag: ${{ steps.inputs.outputs.tag }}
+      target-sha: ${{ steps.source.outputs.target-sha }}
+    steps:
+      - name: Validate inputs
+        id: inputs
+        env:
+          BINARY_IDENTIFIER: ${{ inputs.binary-identifier }}
+          BINARY_NAME: ${{ inputs.binary-name }}
+          CHECKSUM_FILENAME: ${{ inputs.checksum-filename }}
+          CI_CHECK_EVENTS: ${{ inputs.ci-check-events }}
+          ENTITLEMENTS_FILE: ${{ inputs.entitlements-file }}
+          GENERATE_VERSION_SCRIPT: ${{ inputs.generate-version-script }}
+          HELPER_IDENTIFIER: ${{ inputs.helper-identifier }}
+          HELPER_NAME: ${{ inputs.helper-name }}
+          HOMEBREW_FORMULA: ${{ inputs.homebrew-formula }}
+          HOMEBREW_TAP: ${{ inputs.homebrew-tap }}
+          LINUX_ARCHIVE_NAME: ${{ inputs.linux-archive-name }}
+          LINUX_BUILD_SCRIPT: ${{ inputs.linux-build-script }}
+          MACOS_ARCHIVE_NAME: ${{ inputs.macos-archive-name }}
+          MACOS_BUILD_SCRIPT: ${{ inputs.macos-build-script }}
+          PREPARE_SCRIPT: ${{ inputs.prepare-script }}
+          REPOSITORY_TYPE: ${{ inputs.repository-type }}
+          VERSION: ${{ inputs.version }}
+          VERSION_FILE: ${{ inputs.version-file }}
+        run: |
+          set -euo pipefail
+          release_version=${VERSION#v}
+          [[ "$release_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]] || {
+            echo "version must be SemVer, with optional leading v" >&2
+            exit 1
+          }
+          [[ "$REPOSITORY_TYPE" == openclaw || "$REPOSITORY_TYPE" == personal ]] || {
+            echo "repository-type must be openclaw or personal" >&2
+            exit 1
+          }
+          safe_name='^[A-Za-z0-9][A-Za-z0-9+@._-]{0,254}$'
+          for value in "$BINARY_NAME" "$HELPER_NAME" "$MACOS_ARCHIVE_NAME" "$LINUX_ARCHIVE_NAME" "$CHECKSUM_FILENAME"; do
+            [[ "$value" =~ $safe_name && "$value" != *. ]] || { echo "unsafe filename input: $value" >&2; exit 1; }
+          done
+          [[ "$MACOS_ARCHIVE_NAME" == *.zip && "$LINUX_ARCHIVE_NAME" == *.tar.gz ]] || {
+            echo "macOS archive must be .zip and Linux archive must be .tar.gz" >&2
+            exit 1
+          }
+          [[ "$BINARY_IDENTIFIER" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]
+          [[ "$HELPER_IDENTIFIER" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]
+          [[ "$HOMEBREW_TAP" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]+$ ]]
+          [[ -z "$HOMEBREW_FORMULA" || "$HOMEBREW_FORMULA" =~ ^[A-Za-z0-9][A-Za-z0-9+_.@-]*$ ]]
+          for path in "$VERSION_FILE" "$MACOS_BUILD_SCRIPT" "$LINUX_BUILD_SCRIPT" "$PREPARE_SCRIPT" "$GENERATE_VERSION_SCRIPT" "$ENTITLEMENTS_FILE"; do
+            [[ "$path" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ && "$path" != */../* && "$path" != ../* ]] || {
+              echo "unsafe repo-relative path: $path" >&2
+              exit 1
+            }
+          done
+          jq -e 'type == "array" and all(.[]; type == "string" and test("^[a-z][a-z0-9_]*$")) and length == (unique | length)' <<<"$CI_CHECK_EVENTS" >/dev/null
+          echo "release-version=$release_version" >>"$GITHUB_OUTPUT"
+          echo "tag=v$release_version" >>"$GITHUB_OUTPUT"
+
+      - name: Resolve protected release target
+        id: source
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          TAG: ${{ steps.inputs.outputs.tag }}
+        with:
+          script: |
+            const repository = await github.rest.repos.get(context.repo);
+            const defaultBranch = repository.data.default_branch;
+            const expectedRef = `refs/heads/${defaultBranch}`;
+            const expectedWorkflowSuffix = `@refs/heads/${defaultBranch}`;
+            if (context.ref !== expectedRef || !process.env.GITHUB_WORKFLOW_REF.endsWith(expectedWorkflowSuffix)) {
+              core.setFailed(`caller must run from protected ${defaultBranch}`);
+              return;
+            }
+            const branch = await github.rest.repos.getBranch({ ...context.repo, branch: defaultBranch });
+            const branchHead = branch.data.commit.sha;
+            if (context.sha !== branchHead) {
+              core.setFailed(`caller workflow SHA ${context.sha} is not current ${defaultBranch} head ${branchHead}`);
+              return;
+            }
+            let targetSha = branchHead;
+            try {
+              const ref = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
+              if (ref.data.object.type !== 'tag') throw new Error('existing release tag must be annotated');
+              const tagObject = await github.rest.git.getTag({ ...context.repo, tag_sha: ref.data.object.sha });
+              if (tagObject.data.object.type !== 'commit') throw new Error('release tag must peel directly to a commit');
+              targetSha = tagObject.data.object.sha;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            const comparison = await github.rest.repos.compareCommitsWithBasehead({
+              ...context.repo,
+              basehead: `${targetSha}...${branchHead}`,
+            });
+            if (!['ahead', 'identical'].includes(comparison.data.status)) {
+              core.setFailed(`release target ${targetSha} is not reachable from ${defaultBranch}`);
+              return;
+            }
+            core.setOutput('default-branch', defaultBranch);
+            core.setOutput('target-sha', targetSha);
+
+      - name: Check out exact release target
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ steps.source.outputs.target-sha }}
+
+      - name: Validate Swift release metadata
+        id: metadata
+        env:
+          ENTITLEMENTS_FILE: ${{ inputs.entitlements-file }}
+          GENERATE_VERSION_SCRIPT: ${{ inputs.generate-version-script }}
+          LINUX_BUILD_SCRIPT: ${{ inputs.linux-build-script }}
+          MACOS_BUILD_SCRIPT: ${{ inputs.macos-build-script }}
+          PREPARE_SCRIPT: ${{ inputs.prepare-script }}
+          RELEASE_VERSION: ${{ steps.inputs.outputs.release-version }}
+          VERSION_FILE: ${{ inputs.version-file }}
+        run: |
+          set -euo pipefail
+          [[ -f Package.swift && -f Package.resolved && -f CHANGELOG.md ]]
+          for path in "$VERSION_FILE" "$MACOS_BUILD_SCRIPT" "$LINUX_BUILD_SCRIPT" "$PREPARE_SCRIPT" "$GENERATE_VERSION_SCRIPT" "$ENTITLEMENTS_FILE"; do
+            entry=$(git ls-tree HEAD -- "$path")
+            mode=${entry%% *}
+            entry_path=${entry#*$'\t'}
+            [[ "$entry_path" == "$path" && ( "$mode" == 100644 || "$mode" == 100755 ) ]] || {
+              echo "release input must be a tracked regular file: $path" >&2
+              exit 1
+            }
+          done
+          actual=$(sed -nE 's/^MARKETING_VERSION=(.*)$/\1/p' "$VERSION_FILE")
+          [[ "$actual" == "$RELEASE_VERSION" ]] || { echo "$VERSION_FILE version mismatch" >&2; exit 1; }
+          python3 - "$RELEASE_VERSION" "$RUNNER_TEMP/RELEASE-NOTES.md" <<'PY'
+          from pathlib import Path
+          import re, sys
+          version, output = sys.argv[1:]
+          text = Path("CHANGELOG.md").read_text()
+          headings = list(re.finditer(r"^##[ \t]+.*$", text, re.M))
+          matches = [m for m in headings if re.search(rf"(?<![0-9A-Za-z.])v?{re.escape(version)}(?![0-9A-Za-z.+-])", m.group()) and re.search(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", m.group())]
+          if len(matches) != 1:
+              raise SystemExit(f"CHANGELOG.md needs exactly one dated level-two section for {version}; found {len(matches)}")
+          start = matches[0].start()
+          end = next((m.start() for m in headings if m.start() > start), len(text))
+          section = text[start:end]
+          if not section.strip(): raise SystemExit("release notes section is empty")
+          Path(output).write_text(section)
+          PY
+          echo "release-notes-artifact-name=swift-release-notes-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >>"$GITHUB_OUTPUT"
+
+      - name: Upload frozen release notes
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: ${{ steps.metadata.outputs.release-notes-artifact-name }}
+          path: ${{ runner.temp }}/RELEASE-NOTES.md
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Require independent CI green on frozen target
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          CI_CHECK_EVENTS: ${{ inputs.ci-check-events }}
+          TARGET_SHA: ${{ steps.source.outputs.target-sha }}
+        with:
+          script: |
+            const accepted = new Set(['success', 'neutral', 'skipped']);
+            const currentMarker = `/actions/runs/${context.runId}`;
+            const allowedEvents = new Set(JSON.parse(process.env.CI_CHECK_EVENTS));
+            const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
+              ...context.repo, head_sha: process.env.TARGET_SHA, per_page: 100,
+            });
+            const runEvents = new Map(runs.map((run) => [run.id, run.event]));
+            const allChecks = await github.paginate(github.rest.checks.listForRef, {
+              ...context.repo, ref: process.env.TARGET_SHA, per_page: 100, filter: 'latest',
+            });
+            const checks = allChecks.filter((check) => {
+              if (check.details_url?.includes(currentMarker)) return false;
+              const match = check.details_url?.match(/\/actions\/runs\/(\d+)(?:\/|$)/);
+              if (!match || allowedEvents.size === 0) return true;
+              const event = runEvents.get(Number(match[1]));
+              return !event || allowedEvents.has(event);
+            });
+            const statuses = await github.paginate(github.rest.repos.listCommitStatusesForRef, {
+              ...context.repo, ref: process.env.TARGET_SHA, per_page: 100,
+            });
+            const latestStatuses = new Map();
+            for (const status of statuses) if (!latestStatuses.has(status.context.toLowerCase())) latestStatuses.set(status.context.toLowerCase(), status);
+            if (checks.length === 0 && latestStatuses.size === 0) {
+              core.setFailed('frozen target has no independent CI evidence');
+              return;
+            }
+            const failures = [
+              ...checks.filter((check) => check.status !== 'completed' || !accepted.has(check.conclusion)).map((check) => `${check.name}=${check.status}/${check.conclusion}`),
+              ...[...latestStatuses.values()].filter((status) => status.state !== 'success').map((status) => `${status.context}=status/${status.state}`),
+            ];
+            if (failures.length) core.setFailed(`non-green checks: ${failures.join(', ')}`);
+
+  tag:
+    name: 2 · Freeze annotated tag
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create or reuse immutable annotated tag
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+          TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
+        with:
+          script: |
+            try {
+              const ref = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
+              if (ref.data.object.type !== 'tag') throw new Error('existing release tag is not annotated');
+              const object = await github.rest.git.getTag({ ...context.repo, tag_sha: ref.data.object.sha });
+              if (object.data.object.type !== 'commit' || object.data.object.sha !== process.env.TARGET_SHA) {
+                throw new Error('existing release tag target changed');
+              }
+              return;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            const object = await github.rest.git.createTag({
+              ...context.repo,
+              tag: process.env.TAG,
+              message: `Release ${process.env.TAG}\n\nFleet Swift CLI release tag.`,
+              object: process.env.TARGET_SHA,
+              type: 'commit',
+              tagger: { name: 'github-actions[bot]', email: '41898282+github-actions[bot]@users.noreply.github.com', date: new Date().toISOString() },
+            });
+            await github.rest.git.createRef({ ...context.repo, ref: `refs/tags/${process.env.TAG}`, sha: object.data.sha });
+
+  build-macos:
+    name: 3a · Build universal Swift payload
+    needs: [validate, tag]
+    runs-on: macos-15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out frozen tag
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.tag }}
+          fetch-depth: 0
+      - name: Resolve and patch SwiftPM dependencies
+        env:
+          GENERATE_VERSION_SCRIPT: ${{ inputs.generate-version-script }}
+          PREPARE_SCRIPT: ${{ inputs.prepare-script }}
+        run: |
+          set -euo pipefail
+          "$GENERATE_VERSION_SCRIPT"
+          swift package resolve
+          "$PREPARE_SCRIPT"
+      - name: Build universal CLI, helper dylib, and resource bundles
+        env:
+          BINARY_NAME: ${{ inputs.binary-name }}
+          ENTITLEMENTS_FILE: ${{ inputs.entitlements-file }}
+          HELPER_NAME: ${{ inputs.helper-name }}
+          MACOS_BUILD_SCRIPT: ${{ inputs.macos-build-script }}
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/swift-macos-raw"
+          OUTPUT_DIR="$output" CODESIGN_IDENTITY=- "$MACOS_BUILD_SCRIPT"
+          [[ -f "$output/$BINARY_NAME" && -x "$output/$BINARY_NAME" ]]
+          [[ -f "$output/$HELPER_NAME" ]]
+          [[ -n "$(find "$output" -maxdepth 1 -type d -name '*.bundle' -print -quit)" ]] || { echo "at least one resource bundle is required" >&2; exit 1; }
+          [[ -z "$(find "$output" -type l -print -quit)" ]]
+          cp "$ENTITLEMENTS_FILE" "$output/release.entitlements"
+          tar -czf raw-swift-macos.tar.gz -C "$output" .
+      - name: Upload raw macOS payload
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: raw-swift-macos-${{ github.run_id }}
+          path: raw-swift-macos.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  build-linux:
+    name: 3b · Build Linux Swift archive
+    needs: [validate, tag]
+    runs-on: ubuntu-latest
+    container: ${{ inputs.swift-linux-image }}
+    permissions:
+      contents: read
+    steps:
+      - name: Check out frozen tag
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.tag }}
+          fetch-depth: 0
+      - name: Resolve and patch SwiftPM dependencies
+        env:
+          GENERATE_VERSION_SCRIPT: ${{ inputs.generate-version-script }}
+          PREPARE_SCRIPT: ${{ inputs.prepare-script }}
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends python3 file
+          "$GENERATE_VERSION_SCRIPT"
+          swift package resolve
+          "$PREPARE_SCRIPT"
+      - name: Build exact Linux archive
+        env:
+          LINUX_ARCHIVE_NAME: ${{ inputs.linux-archive-name }}
+          LINUX_BUILD_SCRIPT: ${{ inputs.linux-build-script }}
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/swift-linux"
+          mkdir -p "$output"
+          OUTPUT_DIR="$output" "$LINUX_BUILD_SCRIPT"
+          [[ -f "$output/$LINUX_ARCHIVE_NAME" ]]
+          [[ -z "$(find "$output" -type l -print -quit)" ]]
+          cp "$output/$LINUX_ARCHIVE_NAME" .
+      - name: Upload raw Linux archive
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: raw-swift-linux-${{ github.run_id }}
+          path: ${{ inputs.linux-archive-name }}
+          if-no-files-found: error
+          retention-days: 1
+
+  sign:
+    name: 3c · Sign, notarize, and freeze Swift assets
+    needs: [validate, build-macos, build-linux]
+    runs-on: macos-15
+    permissions:
+      actions: read
+    outputs:
+      artifact-name: ${{ steps.payload-name.outputs.artifact-name }}
+    steps:
+      - name: Download raw macOS payload
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: raw-swift-macos-${{ github.run_id }}
+          path: raw-macos
+      - name: Download raw Linux archive
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: raw-swift-linux-${{ github.run_id }}
+          path: raw-linux
+      - name: Download frozen release notes
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: ${{ needs.validate.outputs.release-notes-artifact-name }}
+          path: frozen-notes
+      - name: Import policy signer into ephemeral keychain
+        id: signer
+        env:
+          P12_BASE64: ${{ secrets.MACOS_SIGNING_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+          REPOSITORY_TYPE: ${{ inputs.repository-type }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/swift-release.keychain-db"
+          password=$(openssl rand -hex 32)
+          p12="$RUNNER_TEMP/swift-release.p12"
+          printf '%s' "$P12_BASE64" | base64 --decode >"$p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$p12" -k "$keychain" -P "$P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
+          if [[ "$REPOSITORY_TYPE" == openclaw ]]; then
+            team=FWJYW4S8P8
+            authority="Developer ID Application: OpenClaw Foundation ($team)"
+          else
+            team=Y5PE65HELJ
+            authority="Developer ID Application: Peter Steinberger ($team)"
+          fi
+          identity=$(security find-identity -v -p codesigning "$keychain" | awk -v authority="$authority" 'index($0, "\"" authority "\"") && $2 ~ /^[0-9A-Fa-f]{40}$/ { print $2; exit }')
+          [[ "$identity" =~ ^[0-9A-Fa-f]{40}$ ]] || { echo "required signing identity missing: $authority" >&2; exit 1; }
+          {
+            echo "authority=$authority"
+            echo "identity=$identity"
+            echo "keychain=$keychain"
+            echo "team=$team"
+          } >>"$GITHUB_OUTPUT"
+          rm -f "$p12"
+      - name: Sign and notarize exact macOS payload
+        env:
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_PRIVATE_KEY_P8: ${{ secrets.ASC_PRIVATE_KEY_P8 }}
+          BINARY_IDENTIFIER: ${{ inputs.binary-identifier }}
+          BINARY_NAME: ${{ inputs.binary-name }}
+          HELPER_IDENTIFIER: ${{ inputs.helper-identifier }}
+          HELPER_NAME: ${{ inputs.helper-name }}
+          IDENTITY: ${{ steps.signer.outputs.identity }}
+          KEYCHAIN: ${{ steps.signer.outputs.keychain }}
+          MACOS_ARCHIVE_NAME: ${{ inputs.macos-archive-name }}
+          TEAM_ID: ${{ steps.signer.outputs.team }}
+        run: |
+          set -euo pipefail
+          mkdir payload release-assets
+          tar -xzf raw-macos/raw-swift-macos.tar.gz -C payload
+          [[ -z "$(find payload -type l -print -quit)" ]]
+          cli="payload/$BINARY_NAME"
+          helper="payload/$HELPER_NAME"
+          entitlements="payload/release.entitlements"
+          [[ -f "$cli" && -x "$cli" && -f "$helper" && -f "$entitlements" ]]
+          cli_requirement="identifier \"$BINARY_IDENTIFIER\" and anchor apple generic and certificate leaf[subject.OU] = \"$TEAM_ID\""
+          helper_requirement="identifier \"$HELPER_IDENTIFIER\" and anchor apple generic and certificate leaf[subject.OU] = \"$TEAM_ID\""
+          codesign --force --timestamp --options runtime --identifier "$BINARY_IDENTIFIER" --requirements "=designated => $cli_requirement" --entitlements "$entitlements" --keychain "$KEYCHAIN" --sign "$IDENTITY" "$cli"
+          codesign --force --timestamp --options runtime --identifier "$HELPER_IDENTIFIER" --requirements "=designated => $helper_requirement" --keychain "$KEYCHAIN" --sign "$IDENTITY" "$helper"
+          codesign --verify --strict -R="$cli_requirement" "$cli"
+          codesign --verify --strict -R="$helper_requirement" "$helper"
+          [[ " $(lipo -archs "$cli") " == *' arm64 '* && " $(lipo -archs "$cli") " == *' x86_64 '* ]]
+          for arch in arm64e arm64 x86_64; do
+            lipo -archs "$helper" | tr ' ' '\n' | grep -Fxq "$arch"
+          done
+          rm -f "$entitlements"
+          p8="$RUNNER_TEMP/AuthKey_${ASC_KEY_ID}.p8"
+          printf '%s' "$ASC_PRIVATE_KEY_P8" >"$p8"
+          chmod 600 "$p8"
+          /usr/bin/ditto --norsrc -c -k payload "release-assets/$MACOS_ARCHIVE_NAME"
+          xcrun notarytool submit "release-assets/$MACOS_ARCHIVE_NAME" --key "$p8" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --no-s3-acceleration --wait --output-format json >"$RUNNER_TEMP/notary.json"
+          [[ "$(jq -r '.status' "$RUNNER_TEMP/notary.json")" == Accepted ]]
+          codesign --verify --strict --check-notarization -R=notarized "$cli"
+          codesign --verify --strict --check-notarization -R=notarized "$helper"
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg binary "$BINARY_NAME" --arg binaryIdentifier "$BINARY_IDENTIFIER" --arg binaryArchitectures "$(lipo -archs "$cli")" \
+            --arg helper "$HELPER_NAME" --arg helperIdentifier "$HELPER_IDENTIFIER" --arg helperArchitectures "$(lipo -archs "$helper")" \
+            --arg teamId "$TEAM_ID" \
+            '{schemaVersion:1,repository:$repository,teamId:$teamId,binaries:[{name:$binary,identifier:$binaryIdentifier,architectures:$binaryArchitectures},{name:$helper,identifier:$helperIdentifier,architectures:$helperArchitectures}]}' \
+            >release-assets/SIGNING-MANIFEST.json
+          rm -f "$p8" "$RUNNER_TEMP/notary.json"
+      - name: Freeze exact asset inventory and checksums
+        env:
+          CHECKSUM_FILENAME: ${{ inputs.checksum-filename }}
+          LINUX_ARCHIVE_NAME: ${{ inputs.linux-archive-name }}
+          MACOS_ARCHIVE_NAME: ${{ inputs.macos-archive-name }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
+        run: |
+          set -euo pipefail
+          cp "raw-linux/$LINUX_ARCHIVE_NAME" release-assets/
+          cp frozen-notes/RELEASE-NOTES.md release-assets/
+          mac_sha=$(shasum -a 256 "release-assets/$MACOS_ARCHIVE_NAME" | awk '{print $1}')
+          linux_sha=$(shasum -a 256 "release-assets/$LINUX_ARCHIVE_NAME" | awk '{print $1}')
+          mac_size=$(stat -f '%z' "release-assets/$MACOS_ARCHIVE_NAME")
+          linux_size=$(stat -f '%z' "release-assets/$LINUX_ARCHIVE_NAME")
+          jq -n --arg repository "$GITHUB_REPOSITORY" --arg tag "$TAG" --arg commit "$TARGET_SHA" \
+            --arg mac "$MACOS_ARCHIVE_NAME" --arg macSha "$mac_sha" --argjson macSize "$mac_size" \
+            --arg linux "$LINUX_ARCHIVE_NAME" --arg linuxSha "$linux_sha" --argjson linuxSize "$linux_size" \
+            '{schemaVersion:1,repository:$repository,tag:$tag,commit:$commit,payloads:[{name:$mac,size:$macSize,sha256:$macSha,target:"darwin_universal"},{name:$linux,size:$linuxSize,sha256:$linuxSha,target:"linux_amd64"}]}' \
+            >release-assets/ASSET-INVENTORY.json
+          (
+            cd release-assets
+            for file in ASSET-INVENTORY.json RELEASE-NOTES.md SIGNING-MANIFEST.json "$MACOS_ARCHIVE_NAME" "$LINUX_ARCHIVE_NAME"; do
+              shasum -a 256 "$file"
+            done | LC_ALL=C sort -k2 >"$CHECKSUM_FILENAME"
+          )
+          tar -czf swift-release-assets.tar.gz release-assets
+      - name: Upload immutable signed payload
+        id: payload
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: swift-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: swift-release-assets.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+      - name: Export signed payload name
+        run: echo "artifact-name=swift-release-assets-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >>"$GITHUB_OUTPUT"
+        id: payload-name
+      - name: Restore signing keychain
+        if: always()
+        env:
+          KEYCHAIN: ${{ steps.signer.outputs.keychain }}
+        run: |
+          set -euo pipefail
+          [[ -z "${KEYCHAIN:-}" || ! -e "$KEYCHAIN" ]] || security delete-keychain "$KEYCHAIN"
+
+  draft:
+    name: 4 · Create exact Swift draft
+    needs: [validate, sign]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    outputs:
+      release-id: ${{ steps.release.outputs.release-id }}
+      verification-artifact-name: ${{ needs.sign.outputs.artifact-name }}
+    steps:
+      - name: Download immutable signed payload
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: ${{ needs.sign.outputs.artifact-name }}
+      - name: Create draft and upload exact assets
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          tar -xzf swift-release-assets.tar.gz
+          mapfile -t assets < <(find release-assets -maxdepth 1 -type f -printf '%p\n' | LC_ALL=C sort)
+          (( ${#assets[@]} >= 6 ))
+          gh release create "$TAG" --draft --verify-tag --title "$TAG" --notes-file release-assets/RELEASE-NOTES.md "${assets[@]}"
+          release_id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq .id)
+          [[ "$release_id" =~ ^[0-9]+$ ]]
+          echo "release-id=$release_id" >>"$GITHUB_OUTPUT"
+
+  verify:
+    name: 5 · Independent Swift verify (${{ matrix.arch }})
+    needs: [validate, draft]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-14
+          - arch: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      actions: read
+    steps:
+      - name: Download immutable signed payload
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: ${{ needs.draft.outputs.verification-artifact-name }}
+      - name: Verify exact Swift inventory, signatures, architectures, and notarization
+        env:
+          BINARY_IDENTIFIER: ${{ inputs.binary-identifier }}
+          BINARY_NAME: ${{ inputs.binary-name }}
+          CHECKSUM_FILENAME: ${{ inputs.checksum-filename }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
+          HELPER_IDENTIFIER: ${{ inputs.helper-identifier }}
+          HELPER_NAME: ${{ inputs.helper-name }}
+          LINUX_ARCHIVE_NAME: ${{ inputs.linux-archive-name }}
+          MACOS_ARCHIVE_NAME: ${{ inputs.macos-archive-name }}
+          REPOSITORY_TYPE: ${{ inputs.repository-type }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
+        run: |
+          set -euo pipefail
+          tar -xzf swift-release-assets.tar.gz
+          cd release-assets
+          shasum -a 256 -c "$CHECKSUM_FILENAME"
+          jq -e --arg repo "$GITHUB_REPOSITORY" --arg tag "$TAG" --arg commit "$TARGET_SHA" '
+            .schemaVersion == 1 and .repository == $repo and .tag == $tag and .commit == $commit and
+            ([.payloads[].target] | sort) == ["darwin_universal","linux_amd64"]
+          ' ASSET-INVENTORY.json >/dev/null
+          unzip -q "$MACOS_ARCHIVE_NAME" -d macos
+          [[ -z "$(find macos -type l -print -quit)" ]]
+          cli="macos/$BINARY_NAME"
+          helper="macos/$HELPER_NAME"
+          [[ -x "$cli" && -f "$helper" ]]
+          [[ -n "$(find macos -maxdepth 1 -type d -name '*.bundle' -print -quit)" ]]
+          if [[ "$REPOSITORY_TYPE" == openclaw ]]; then team=FWJYW4S8P8; else team=Y5PE65HELJ; fi
+          cli_requirement="identifier \"$BINARY_IDENTIFIER\" and anchor apple generic and certificate leaf[subject.OU] = \"$team\""
+          helper_requirement="identifier \"$HELPER_IDENTIFIER\" and anchor apple generic and certificate leaf[subject.OU] = \"$team\""
+          codesign --verify --strict -R="$cli_requirement" "$cli"
+          codesign --verify --strict -R="$helper_requirement" "$helper"
+          codesign --verify --strict --check-notarization -R=notarized "$cli"
+          codesign --verify --strict --check-notarization -R=notarized "$helper"
+          [[ " $(lipo -archs "$cli") " == *' arm64 '* && " $(lipo -archs "$cli") " == *' x86_64 '* ]]
+          for arch in arm64e arm64 x86_64; do lipo -archs "$helper" | tr ' ' '\n' | grep -Fxq "$arch"; done
+          "./$cli" --version | grep -F "${TAG#v}"
+          mkdir linux
+          tar -xzf "$LINUX_ARCHIVE_NAME" -C linux
+          linux_cli=$(find linux -type f -name "$BINARY_NAME" -perm -111 -print -quit)
+          [[ -n "$linux_cli" ]]
+          file "$linux_cli" | grep -Eq 'ELF.*x86-64'
+          jq -n --arg repository "$GITHUB_REPOSITORY" --arg runId "$GITHUB_RUN_ID" \
+            --arg payloadArtifact "${{ needs.draft.outputs.verification-artifact-name }}" \
+            --arg tag "$TAG" --arg commit "$TARGET_SHA" --arg architecture "$EXPECTED_ARCH" \
+            --rawfile assetInventory ASSET-INVENTORY.json --rawfile sha256sums "$CHECKSUM_FILENAME" --rawfile releaseNotes RELEASE-NOTES.md \
+            '{schemaVersion:1,repository:$repository,runId:$runId,payloadArtifact:$payloadArtifact,tag:$tag,commit:$commit,architecture:$architecture,verdict:"verified",assetInventory:$assetInventory,sha256sums:$sha256sums,releaseNotes:$releaseNotes}' \
+            >verified-swift-attestation.json
+      - name: Upload verified Swift attestation
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: verified-swift-${{ matrix.arch }}-${{ needs.draft.outputs.verification-artifact-name }}
+          path: release-assets/verified-swift-attestation.json
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: 6 · Publish verified Swift draft
+    needs: [validate, draft, verify]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    outputs:
+      release-url: ${{ steps.publish.outputs.release-url }}
+    steps:
+      - name: Download arm64 attestation
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: verified-swift-arm64-${{ needs.draft.outputs.verification-artifact-name }}
+          path: attestations/arm64
+      - name: Download x86_64 attestation
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: verified-swift-x86_64-${{ needs.draft.outputs.verification-artifact-name }}
+          path: attestations/x86_64
+      - name: Bind draft bytes and publish
+        id: publish
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          CHECKSUM_FILENAME: ${{ inputs.checksum-filename }}
+          RELEASE_ID: ${{ needs.draft.outputs.release-id }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
+          VERIFICATION_ARTIFACT: ${{ needs.draft.outputs.verification-artifact-name }}
+        with:
+          script: |
+            const crypto = require('crypto');
+            const fs = require('fs');
+            const releaseId = Number(process.env.RELEASE_ID);
+            const paths = { arm64: 'attestations/arm64/verified-swift-attestation.json', x86_64: 'attestations/x86_64/verified-swift-attestation.json' };
+            const attestations = Object.fromEntries(Object.entries(paths).map(([architecture, file]) => [architecture, JSON.parse(fs.readFileSync(file, 'utf8'))]));
+            for (const [architecture, attestation] of Object.entries(attestations)) {
+              const expected = { schemaVersion: 1, repository: `${context.repo.owner}/${context.repo.repo}`, runId: String(context.runId), payloadArtifact: process.env.VERIFICATION_ARTIFACT, tag: process.env.TAG, commit: process.env.TARGET_SHA, architecture, verdict: 'verified' };
+              for (const [field, value] of Object.entries(expected)) if (attestation[field] !== value) throw new Error(`${architecture} attestation ${field} mismatch`);
+            }
+            for (const field of ['assetInventory', 'sha256sums', 'releaseNotes']) {
+              if (attestations.arm64[field] !== attestations.x86_64[field]) throw new Error(`architecture ${field} disagreement`);
+            }
+            const checksumLines = attestations.arm64.sha256sums.trimEnd().split('\n');
+            const expectedDigests = new Map();
+            for (const line of checksumLines) {
+              const match = /^([0-9a-f]{64})  ([^\r\n]+)$/.exec(line);
+              if (!match || expectedDigests.has(match[2])) throw new Error('invalid or duplicate checksum line');
+              expectedDigests.set(match[2], match[1]);
+            }
+            const before = await github.rest.repos.getRelease({ ...context.repo, release_id: releaseId });
+            if (!before.data.draft || before.data.tag_name !== process.env.TAG) throw new Error('draft identity changed');
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets, { ...context.repo, release_id: releaseId, per_page: 100 });
+            const downloaded = new Map();
+            for (const asset of assets) {
+              const response = await github.request('GET /repos/{owner}/{repo}/releases/assets/{asset_id}', { ...context.repo, asset_id: asset.id, headers: { accept: 'application/octet-stream' } });
+              downloaded.set(asset.name, Buffer.from(response.data));
+            }
+            const expectedNames = [...expectedDigests.keys(), process.env.CHECKSUM_FILENAME].sort();
+            if (JSON.stringify([...downloaded.keys()].sort()) !== JSON.stringify(expectedNames)) throw new Error('draft asset inventory mismatch');
+            if (downloaded.get(process.env.CHECKSUM_FILENAME).toString('utf8') !== attestations.arm64.sha256sums) throw new Error('draft checksum manifest differs from attestation');
+            for (const [name, digest] of expectedDigests) {
+              const observed = crypto.createHash('sha256').update(downloaded.get(name)).digest('hex');
+              if (observed !== digest) throw new Error(`draft digest mismatch for ${name}`);
+            }
+            if (!downloaded.get('ASSET-INVENTORY.json').equals(Buffer.from(attestations.arm64.assetInventory))) throw new Error('draft inventory differs from attestation');
+            if (!downloaded.get('RELEASE-NOTES.md').equals(Buffer.from(attestations.arm64.releaseNotes))) throw new Error('draft release notes differ from attestation');
+            const published = await github.rest.repos.updateRelease({ ...context.repo, release_id: releaseId, draft: false, body: attestations.arm64.releaseNotes });
+            if (published.data.draft || !published.data.published_at) throw new Error('release did not become public');
+            core.setOutput('release-url', published.data.html_url);
+      - name: Verify authenticated public release state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          response=$(curl --fail --silent --show-error -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" -H 'X-GitHub-Api-Version: 2022-11-28' "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$TAG")
+          [[ "$(jq -r '.draft' <<<"$response")" == false ]]
+          [[ "$(jq -r '.tag_name' <<<"$response")" == "$TAG" ]]
+
+  handoff:
+    name: 7 · Homebrew handoff
+    if: >-
+      ${{
+        always() && inputs.homebrew-formula != '' &&
+        needs.validate.result == 'success' && needs.draft.result == 'success' &&
+        needs.publish.result == 'success' && needs.verify.result == 'success'
+      }}
+    needs: [validate, draft, verify, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - name: Download arm64 attestation
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: verified-swift-arm64-${{ needs.draft.outputs.verification-artifact-name }}
+          path: attestations/arm64
+      - name: Download x86_64 attestation
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: verified-swift-x86_64-${{ needs.draft.outputs.verification-artifact-name }}
+          path: attestations/x86_64
+      - name: Dispatch and verify exact formula
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          FORMULA: ${{ inputs.homebrew-formula }}
+          HOMEBREW_TAP: ${{ inputs.homebrew-tap }}
+          MACOS_ARCHIVE_NAME: ${{ inputs.macos-archive-name }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          TAP_TOKEN_PRESENT: ${{ secrets.TAP_TOKEN != '' }}
+        with:
+          github-token: ${{ secrets.TAP_TOKEN }}
+          script: |
+            if (process.env.TAP_TOKEN_PRESENT !== 'true') throw new Error('TAP_TOKEN is required for Homebrew handoff');
+            const fs = require('fs');
+            const attestations = ['arm64', 'x86_64'].map((arch) => JSON.parse(fs.readFileSync(`attestations/${arch}/verified-swift-attestation.json`, 'utf8')));
+            if (attestations[0].assetInventory !== attestations[1].assetInventory || attestations[0].sha256sums !== attestations[1].sha256sums) throw new Error('architecture attestation disagreement');
+            const inventory = JSON.parse(attestations[0].assetInventory);
+            const asset = inventory.payloads.find((payload) => payload.target === 'darwin_universal');
+            if (!asset || asset.name !== process.env.MACOS_ARCHIVE_NAME || !/^[0-9a-f]{64}$/.test(asset.sha256)) throw new Error('verified macOS Homebrew asset missing');
+            const [owner, repo] = process.env.HOMEBREW_TAP.split('/');
+            const tap = await github.rest.repos.get({ owner, repo });
+            const workflowId = 'update-formula.yml';
+            const requestId = `swift-${context.repo.repo}-${context.runId}-${context.runAttempt}`;
+            const expectedTitle = `Update ${process.env.FORMULA} for ${process.env.TAG} (${requestId})`;
+            const before = await github.rest.actions.listWorkflowRuns({ owner, repo, workflow_id: workflowId, event: 'workflow_dispatch', per_page: 100 });
+            const prior = new Set(before.data.workflow_runs.map((run) => run.id));
+            await github.rest.actions.createWorkflowDispatch({
+              owner, repo, workflow_id: workflowId, ref: tap.data.default_branch,
+              inputs: { formula: process.env.FORMULA, tag: process.env.TAG, repository: `${context.repo.owner}/${context.repo.repo}`, macos_artifact: asset.name, request_id: requestId },
+            });
+            const deadline = Date.now() + 900000;
+            let run;
+            while (Date.now() < deadline) {
+              const response = await github.rest.actions.listWorkflowRuns({ owner, repo, workflow_id: workflowId, event: 'workflow_dispatch', per_page: 100 });
+              const candidates = response.data.workflow_runs.filter((candidate) => !prior.has(candidate.id) && candidate.display_title === expectedTitle);
+              if (candidates.length > 1) throw new Error('ambiguous Homebrew dispatch correlation');
+              [run] = candidates;
+              if (run) break;
+              await new Promise((resolve) => setTimeout(resolve, 15000));
+            }
+            if (!run) throw new Error('Homebrew dispatch was not observed');
+            while (run.status !== 'completed' && Date.now() < deadline) {
+              await new Promise((resolve) => setTimeout(resolve, 15000));
+              run = (await github.rest.actions.getWorkflowRun({ owner, repo, run_id: run.id })).data;
+            }
+            if (run.conclusion !== 'success') throw new Error(`Homebrew workflow concluded ${run.conclusion || run.status}`);
+            const formula = await github.rest.repos.getContent({ owner, repo, path: `Formula/${process.env.FORMULA}.rb`, ref: tap.data.default_branch });
+            const source = Buffer.from(formula.data.content, 'base64').toString('utf8');
+            const expectedUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/releases/download/${process.env.TAG}/${asset.name}`;
+            const url = source.match(/^\s*url\s+"([^"]+)"\s*$/m)?.[1];
+            const sha = source.match(/^\s*sha256\s+"([0-9a-f]{64})"\s*$/m)?.[1];
+            if (url !== expectedUrl || sha !== asset.sha256) throw new Error('Homebrew formula does not match verified release asset');
+            core.info(`Homebrew handoff verified: ${run.html_url}`);
+
+  closeout:
+    name: 8 · Open next Unreleased PR
+    if: >-
+      ${{
+        always() && needs.validate.result == 'success' && needs.publish.result == 'success' &&
+        (inputs.homebrew-formula == '' || needs.handoff.result == 'success')
+      }}
+    needs: [validate, publish, handoff]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out current default branch
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ needs.validate.outputs.default-branch }}
+      - name: Open next Unreleased section when missing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if grep -Eq '^## .*Unreleased' CHANGELOG.md; then
+            echo "CHANGELOG.md already has an Unreleased section"
+            exit 0
+          fi
+          ruby -e '
+            path = "CHANGELOG.md"
+            text = File.read(path)
+            marker = text.index(/^## /) || text.length
+            File.write(path, "#{text[0...marker].rstrip}\n\n## Unreleased\n\n#{text[marker..]}")
+          '
+          branch="release/next-unreleased-${TAG#v}-$GITHUB_RUN_ID"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git switch -c "$branch"
+          git add CHANGELOG.md
+          git commit -m "chore: open next unreleased section"
+          git push origin "$branch"
+          gh pr create --base "${{ needs.validate.outputs.default-branch }}" --head "$branch" --title "chore: open next Unreleased section" --body "Opens the next Unreleased changelog section after the verified Swift CLI release."

@@ -16,6 +16,7 @@ node scripts/test-release-target-resolution.mjs
 node scripts/test-ci-check-event-filter.mjs
 node scripts/test-build-artifact-matrix.mjs
 node scripts/test-split-host-build.mjs
+node scripts/test-swift-cli-workflow.mjs
 node scripts/test-reproducible-rebuild.mjs
 node scripts/test-go-cli-policy-inputs.mjs
 node scripts/test-release-notes-extraction.mjs

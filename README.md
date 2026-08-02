@@ -15,6 +15,16 @@ jobs:
     uses: openclaw/release-workflows/.github/workflows/release-go-cli.yml@v1
 ```
 
+## SwiftPM CLI archetype
+
+`release-swift-cli.yml` applies the same frozen-source, workflow-owned-tag, immutable-payload, dual-verifier, and exact-publication boundary to SwiftPM command-line tools. Its default contract matches `imsg`: the caller's version-generation and dependency-patch scripts prepare SwiftPM, the macOS build script emits a universal CLI, an `arm64e`/`arm64`/`x86_64` companion dylib, and resource bundles, while the Linux script emits a static-Swift x86_64 archive.
+
+The signing job never checks out or executes caller source. It re-signs the frozen raw macOS payload with the selected Developer ID policy, preserves stable CLI/helper identifiers, submits the exact published ZIP for notarization, requires online notarization on both Mach-O files, binds the macOS ZIP and Linux archive into `ASSET-INVENTORY.json` plus the configured checksum manifest, and uploads one immutable Actions payload. Independent arm64 and Intel jobs verify checksums, inventory identity, CLI/helper slices, resource bundles, identifiers, Team ID, notarization, native CLI execution, and the Linux executable format without release-write credentials. Publication re-downloads every draft asset and binds its bytes to both attestations before undrafting.
+
+When `homebrew-formula` is nonempty, the handoff dispatches the configured tap's `update-formula.yml` with the exact verified macOS archive, waits for the uniquely correlated run, then requires the resulting formula URL and SHA-256 to equal the attested release asset. A pre-existing versioned Unreleased changelog section satisfies closeout; otherwise the workflow opens a closeout PR.
+
+See [`examples/release-swift-cli-caller.yml`](examples/release-swift-cli-caller.yml) for the thin caller. The consumer must provision `MACOS_SIGNING_P12`, `MACOS_SIGNING_P12_PASSWORD`, `ASC_KEY_ID`, `ASC_ISSUER_ID`, and `ASC_PRIVATE_KEY_P8`; Homebrew handoff additionally needs `TAP_TOKEN`.
+
 ## Go CLI archetype
 
 `release-go-cli.yml` is the first fleet archetype. It requires:

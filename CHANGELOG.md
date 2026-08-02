@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.6.0 - 2026-08-02
+
+- Add a reusable SwiftPM CLI release pipeline with frozen-source tags, universal Darwin CLI and arm64e/arm64/x86_64 helper packaging, resource bundles, Developer ID signing and notarization, Linux archives, dual native verification, exact draft binding, Homebrew handoff, and closeout.
+
 ## v1.5.2 - 2026-08-02
 
 - Authenticate the post-publication GitHub API verification so anonymous rate limits cannot turn a successfully published release into a failed run before Homebrew handoff and closeout.
