@@ -206,11 +206,20 @@ for required_publish_binding_control in [
     'draft ASSET-INVENTORY.json bytes differ from verified attestation',
     'draft asset inventory mismatch',
     'body: verifiedReleaseNotes',
+    'GH_TOKEN: ${{ github.token }}',
+    '-H "Authorization: Bearer $GH_TOKEN"',
+    "-H 'X-GitHub-Api-Version: 2022-11-28'",
 ]:
     if required_publish_binding_control not in publish:
         raise SystemExit(f'missing publisher draft-binding control: {required_publish_binding_control}')
 if publish.index("crypto.createHash('sha256')") > publish.index('updateRelease'):
     raise SystemExit('publisher must hash draft assets before undrafting')
+github_api_calls = publish.count('https://api.github.com/')
+github_api_auth_headers = publish.count('Authorization: Bearer $GH_TOKEN')
+if github_api_calls != github_api_auth_headers:
+    raise SystemExit(
+        f'every direct GitHub API call must be authenticated: calls={github_api_calls} auth_headers={github_api_auth_headers}'
+    )
 
 handoff = workflow.split('\n  handoff:\n', 1)[1].split('\n  closeout:\n', 1)[0]
 for forbidden_handoff_contract in [
