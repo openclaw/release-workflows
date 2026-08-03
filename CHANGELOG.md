@@ -2,6 +2,8 @@
 
 ## v1.7.3 - Unreleased
 
+- Poll missing or pending exact-SHA CI signals before freezing a release tag, with a 15-minute bound and immediate failure for completed non-green checks.
+
 ## v1.7.2 - 2026-08-02
 
 - Make post-publication retries verify and reuse an identical public release, delete the redundant retry draft, and continue downstream handoff and closeout.
