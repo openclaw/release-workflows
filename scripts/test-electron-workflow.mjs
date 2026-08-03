@@ -48,6 +48,9 @@ assert.match(verify, /stapler validate/);
 assert.match(verify, /\.AppImage/);
 assert.match(verify, /PE32\|MS Windows/);
 assert.match(publish, /listReleaseAssets/);
+assert.match(publish, /status >= 500 && status <= 599/);
+assert.match(publish, /attempt === maxAttempts/);
+assert.match(publish, /retrying in \$\{delayMs\}ms/);
 assert.match(publish, /crypto\.createHash\('sha256'\)/);
 assert.match(publish, /draft asset inventory mismatch/);
 

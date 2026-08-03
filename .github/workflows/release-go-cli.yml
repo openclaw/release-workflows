@@ -2902,6 +2902,26 @@ jobs:
             if (!before.data.draft || before.data.tag_name !== process.env.TAG) {
               throw new Error('draft identity changed before content binding');
             }
+            const downloadReleaseAsset = async (asset, label) => {
+              const maxAttempts = 4;
+              for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+                try {
+                  const response = await github.request('GET /repos/{owner}/{repo}/releases/assets/{asset_id}', {
+                    ...context.repo,
+                    asset_id: asset.id,
+                    headers: { accept: 'application/octet-stream' },
+                  });
+                  return Buffer.from(response.data);
+                } catch (error) {
+                  const status = Number(error?.status);
+                  if (!(status >= 500 && status <= 599) || attempt === maxAttempts) throw error;
+                  const delayMs = 1000 * (2 ** (attempt - 1));
+                  core.warning(`GitHub returned ${status} while downloading ${label} asset ${JSON.stringify(asset.name)}; retrying in ${delayMs}ms (${attempt}/${maxAttempts - 1})`);
+                  await new Promise((resolve) => setTimeout(resolve, delayMs));
+                }
+              }
+              throw new Error(`unreachable release asset retry state for ${JSON.stringify(asset.name)}`);
+            };
             const downloadReleaseAssets = async (boundReleaseId, label) => {
               const assets = await github.paginate(github.rest.repos.listReleaseAssets, {
                 ...context.repo,
@@ -2913,12 +2933,7 @@ jobs:
                 if (downloaded.has(asset.name)) {
                   throw new Error(`duplicate ${label} asset name: ${JSON.stringify(asset.name)}`);
                 }
-                const response = await github.request('GET /repos/{owner}/{repo}/releases/assets/{asset_id}', {
-                  ...context.repo,
-                  asset_id: asset.id,
-                  headers: { accept: 'application/octet-stream' },
-                });
-                downloaded.set(asset.name, Buffer.from(response.data));
+                downloaded.set(asset.name, await downloadReleaseAsset(asset, label));
               }
               return downloaded;
             };
