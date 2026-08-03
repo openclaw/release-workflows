@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.7.5 - 2026-08-03
 
 - Retry transient GitHub 5xx responses while downloading verified release assets before publication across the Go, Swift, and Electron workflows.
 
