@@ -1,6 +1,8 @@
 # Changelog
 
-## v1.7.3 - Unreleased
+## v1.7.3 - 2026-08-03
+
+- Wait for pending or not-yet-created CI checks on the exact frozen release commit while preserving immediate failure for terminal non-green results.
 
 ## v1.7.2 - 2026-08-02
 
