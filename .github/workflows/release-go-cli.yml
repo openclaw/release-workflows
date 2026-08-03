@@ -1175,13 +1175,13 @@ jobs:
       actions: read
     steps:
       - name: Download primary matrix
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: raw-goreleaser-primary-${{ github.run_id }}
           path: primary
       - name: Download split matrix
         if: inputs.split-goreleaser-config != ''
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: raw-goreleaser-split-${{ github.run_id }}
           path: split
@@ -1278,7 +1278,7 @@ jobs:
       contents: read
     steps:
       - name: Download raw matrix
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: raw-goreleaser-dist-${{ github.run_id }}
       - name: Restore raw matrix
@@ -1941,13 +1941,13 @@ jobs:
     steps:
       - name: Download raw independent rebuild
         if: inputs.reproducible-rebuild != 'disabled'
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ needs.rebuild.outputs.artifact-name }}
           path: reproducible-source/dist
       - name: Download signed payload
         if: inputs.reproducible-rebuild != 'disabled'
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: signed-release-assets-${{ github.run_id }}
       - name: Require byte-identical independent rebuild
@@ -2131,17 +2131,17 @@ jobs:
       verification-artifact-name: ${{ steps.verification-payload.outputs.artifact-name }}
     steps:
       - name: Download frozen release notes
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ needs.validate.outputs.release-notes-artifact-name }}
           path: validated-release-notes
       - name: Download signed payload
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: signed-release-assets-${{ github.run_id }}
       - name: Download reproducible rebuild proof
         if: inputs.reproducible-rebuild != 'disabled'
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ needs.compare.outputs.artifact-name }}
           path: ${{ runner.temp }}/reproducible-rebuild-proof
@@ -2408,7 +2408,7 @@ jobs:
       actions: read
     steps:
       - name: Download immutable verification payload
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ needs.draft.outputs.verification-artifact-name }}
       - name: Extract immutable verification payload
@@ -2811,12 +2811,12 @@ jobs:
           }
           git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile="$policy" verify-tag "$TAG"
       - name: Download arm64 verified inventory attestation
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: verified-inventory-arm64-${{ needs.draft.outputs.verification-artifact-name }}
           path: verified-inventory-attestations/arm64
       - name: Download x86_64 verified inventory attestation
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: verified-inventory-x86_64-${{ needs.draft.outputs.verification-artifact-name }}
           path: verified-inventory-attestations/x86_64
@@ -3022,12 +3022,12 @@ jobs:
       actions: read
     steps:
       - name: Download arm64 verification attestation
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: verified-inventory-arm64-${{ needs.draft.outputs.verification-artifact-name }}
           path: verified-inventory-attestations/arm64
       - name: Download x86_64 verification attestation
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: verified-inventory-x86_64-${{ needs.draft.outputs.verification-artifact-name }}
           path: verified-inventory-attestations/x86_64
