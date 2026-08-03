@@ -190,6 +190,53 @@ end
 `;
 }
 
+function pairedPlatformFormula() {
+  const sha = (name) => digest(artifactData.get(name));
+  return `class Spogo < Formula
+  desc "Fixture"
+  homepage "https://github.com/${repository}"
+  version "1.2.3"
+  license "MIT"
+  version_scheme 1
+  head "https://github.com/${repository}.git", branch: "main"
+
+  on_macos do
+    if Hardware::CPU.arm?
+      url "https://github.com/${repository}/releases/download/${tag}/${targetNames.darwin_arm64}"
+      sha256 "${sha(targetNames.darwin_arm64)}"
+    end
+
+    if Hardware::CPU.intel?
+      url "https://github.com/${repository}/releases/download/${tag}/${targetNames.darwin_amd64}"
+      sha256 "${sha(targetNames.darwin_amd64)}"
+    end
+  end
+
+  on_linux do
+    if Hardware::CPU.arm? && Hardware::CPU.is_64_bit?
+      url "https://github.com/${repository}/releases/download/${tag}/${targetNames.linux_arm64}"
+      sha256 "${sha(targetNames.linux_arm64)}"
+    end
+
+    if Hardware::CPU.intel? && Hardware::CPU.is_64_bit?
+      url "https://github.com/${repository}/releases/download/${tag}/${targetNames.linux_amd64}"
+      sha256 "${sha(targetNames.linux_amd64)}"
+    end
+  end
+
+  depends_on "go" => :build if build.head?
+
+  def install
+    bin.install "spogo"
+  end
+
+  test do
+    assert_match "spogo", shell_output("#{bin}/spogo --help")
+  end
+end
+`;
+}
+
 function liveTapFixture(sourceRepository, sourceTag, assets) {
   const payloads = Object.entries(assets).map(([target, asset]) => ({
     name: asset.name,
@@ -587,6 +634,36 @@ for (const [name, fixture, expectedError] of [
 }
 
 {
+  const result = await runHandoff({ formulas: [pairedPlatformFormula()] });
+  assert.equal(result.thrown, undefined);
+  console.log('PASS paired complementary platform branches and literal version_scheme are accepted');
+}
+
+{
+  const incomplete = pairedPlatformFormula().replace(
+    /\n    if Hardware::CPU\.intel\?\n      url "[^"]+"\n      sha256 "[^"]+"\n    end/,
+    '',
+  );
+  const result = await runHandoff({ formulas: [incomplete] });
+  assert.match(result.thrown?.message, /timed out.*requires an adjacent complementary branch/);
+  console.log('PASS incomplete paired platform branches fail closed');
+}
+
+{
+  const duplicate = pairedPlatformFormula().replace('Hardware::CPU.intel?', 'Hardware::CPU.arm?');
+  const result = await runHandoff({ formulas: [duplicate] });
+  assert.match(result.thrown?.message, /timed out.*must be complementary/);
+  console.log('PASS duplicate paired platform architectures fail closed');
+}
+
+{
+  const dynamic = pairedPlatformFormula().replace('version_scheme 1', 'version_scheme ENV.fetch("SCHEME")');
+  const result = await runHandoff({ formulas: [dynamic] });
+  assert.match(result.thrown?.message, /timed out.*version_scheme requires one non-negative integer literal/);
+  console.log('PASS dynamic version_scheme fails closed');
+}
+
+{
   const inverted = platformMatrixFormula().replaceAll('Hardware::CPU.arm?', 'Hardware::CPU.intel?');
   const result = await runHandoff({ formulas: [inverted] });
   assert.match(result.thrown?.message, /timed out.*branch selects/);
@@ -774,4 +851,4 @@ end
   console.log('PASS missing TAP_TOKEN fails before tap access');
 }
 
-console.log(`Homebrew handoff tests passed (${inputMatrix.length + 34} scenarios)`);
+console.log(`Homebrew handoff tests passed (${inputMatrix.length + 38} scenarios)`);

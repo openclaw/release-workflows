@@ -3133,6 +3133,11 @@ jobs:
                   token_name(symbol[1], :@ident) || token_name(symbol[1], :@op) || token_name(symbol[1], :@kw)
                 end
 
+                def literal_nonnegative_integer(node)
+                  return nil unless node.is_a?(Array) && node[0] == :@int && node[1].is_a?(String)
+                  node[1] if node[1].match?(/\A(?:0|[1-9][0-9]*)\z/)
+                end
+
                 def static_assoc?(node)
                   return false unless node.is_a?(Array) && node[0] == :assoc_new
                   key = node[1]
@@ -3232,8 +3237,19 @@ jobs:
                       architecture = static_cpu_architecture(statement[1])
                       fail_grammar("CPU branch condition is not a whitelisted static Hardware::CPU predicate") if architecture.nil?
                       alternate = statement[3]
-                      fail_grammar("CPU branch requires else") unless alternate.is_a?(Array) && alternate[0] == :else
                       alternate_architecture = architecture == "arm64" ? "amd64" : "arm64"
+                      if alternate.nil?
+                        sibling = statements[index + 1]
+                        fail_grammar("CPU branch without else requires an adjacent complementary branch") unless
+                          sibling.is_a?(Array) && sibling[0] == :if && sibling[3].nil?
+                        sibling_architecture = static_cpu_architecture(sibling[1])
+                        fail_grammar("adjacent CPU branches must be complementary") unless sibling_architecture == alternate_architecture
+                        validate_fetch_statements(statement[2] || [], fetches, platform, "#{platform}_#{architecture}")
+                        validate_fetch_statements(sibling[2] || [], fetches, platform, "#{platform}_#{sibling_architecture}")
+                        index += 2
+                        next
+                      end
+                      fail_grammar("CPU branch alternate must be else") unless alternate.is_a?(Array) && alternate[0] == :else
                       validate_fetch_statements(statement[2] || [], fetches, platform, "#{platform}_#{architecture}")
                       validate_fetch_statements(alternate[1] || [], fetches, platform, "#{platform}_#{alternate_architecture}")
                       index += 1
@@ -3282,6 +3298,9 @@ jobs:
                   command = command_parts(statement)
                   if command && %w[desc homepage version license].include?(command[0])
                     fail_grammar("#{command[0]} requires one literal string") unless command[1].length == 1 && !literal_string(command[1][0]).nil?
+                  elsif command && command[0] == "version_scheme"
+                    fail_grammar("version_scheme requires one non-negative integer literal") unless
+                      command[1].length == 1 && !literal_nonnegative_integer(command[1][0]).nil?
                   elsif command && command[0] == "depends_on"
                     fail_grammar("depends_on requires static arguments") if command[1].empty? || !command[1].all? { |argument| static_literal?(argument) }
                   elsif command && command[0] == "head"

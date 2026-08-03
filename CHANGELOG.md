@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.7.1 - 2026-08-02
+
+- Accept literal Homebrew `version_scheme` metadata and adjacent complementary CPU branches while retaining fail-closed formula verification.
+
 ## v1.7.0 - 2026-08-02
 
 - Add a reusable Electron desktop release pipeline for Go server assets plus signed, notarized, and stapled macOS DMG/ZIP apps, Windows NSIS/ZIP, Linux AppImage/DEB, exact checksum inventory, dual native verification, bound publication, and closeout.
