@@ -2788,49 +2788,56 @@ jobs:
             if (!before.data.draft || before.data.tag_name !== process.env.TAG) {
               throw new Error('draft identity changed before content binding');
             }
-            const assets = await github.paginate(github.rest.repos.listReleaseAssets, {
-              ...context.repo,
-              release_id: releaseId,
-              per_page: 100,
-            });
-            const downloaded = new Map();
-            for (const asset of assets) {
-              if (downloaded.has(asset.name)) {
-                throw new Error(`duplicate draft asset name: ${JSON.stringify(asset.name)}`);
-              }
-              const response = await github.request('GET /repos/{owner}/{repo}/releases/assets/{asset_id}', {
+            const downloadReleaseAssets = async (boundReleaseId, label) => {
+              const assets = await github.paginate(github.rest.repos.listReleaseAssets, {
                 ...context.repo,
-                asset_id: asset.id,
-                headers: { accept: 'application/octet-stream' },
+                release_id: boundReleaseId,
+                per_page: 100,
               });
-              downloaded.set(asset.name, Buffer.from(response.data));
-            }
+              const downloaded = new Map();
+              for (const asset of assets) {
+                if (downloaded.has(asset.name)) {
+                  throw new Error(`duplicate ${label} asset name: ${JSON.stringify(asset.name)}`);
+                }
+                const response = await github.request('GET /repos/{owner}/{repo}/releases/assets/{asset_id}', {
+                  ...context.repo,
+                  asset_id: asset.id,
+                  headers: { accept: 'application/octet-stream' },
+                });
+                downloaded.set(asset.name, Buffer.from(response.data));
+              }
+              return downloaded;
+            };
 
             const expectedNames = [...expectedDigests.keys(), checksumFilename].sort();
-            const observedNames = [...downloaded.keys()].sort();
-            if (JSON.stringify(observedNames) !== JSON.stringify(expectedNames)) {
-              const missing = expectedNames.filter((name) => !downloaded.has(name));
-              const extra = observedNames.filter((name) => !expectedNames.includes(name));
-              throw new Error(`draft asset inventory mismatch: missing=${JSON.stringify(missing)} extra=${JSON.stringify(extra)}`);
-            }
-            const draftSha256sums = downloaded.get(checksumFilename).toString('utf8');
-            if (draftSha256sums !== verifiedSha256sums) {
-              throw new Error(`draft ${checksumFilename} bytes differ from verified attestation`);
-            }
-            for (const [name, expectedDigest] of expectedDigests) {
-              const observedDigest = crypto.createHash('sha256').update(downloaded.get(name)).digest('hex');
-              if (observedDigest !== expectedDigest) {
-                throw new Error(`draft asset digest mismatch for ${JSON.stringify(name)}: observed ${observedDigest}, expected ${expectedDigest}`);
+            const requireBoundAssets = (downloaded, label) => {
+              const observedNames = [...downloaded.keys()].sort();
+              if (JSON.stringify(observedNames) !== JSON.stringify(expectedNames)) {
+                const missing = expectedNames.filter((name) => !downloaded.has(name));
+                const extra = observedNames.filter((name) => !expectedNames.includes(name));
+                throw new Error(`${label} asset inventory mismatch: missing=${JSON.stringify(missing)} extra=${JSON.stringify(extra)}`);
               }
-            }
-            if (!downloaded.has('RELEASE-NOTES.md') ||
-                !downloaded.get('RELEASE-NOTES.md').equals(Buffer.from(verifiedReleaseNotes, 'utf8'))) {
-              throw new Error('draft RELEASE-NOTES.md bytes differ from verified attestation');
-            }
-            if (!downloaded.has('ASSET-INVENTORY.json') ||
-                !downloaded.get('ASSET-INVENTORY.json').equals(Buffer.from(verifiedAssetInventory, 'utf8'))) {
-              throw new Error('draft ASSET-INVENTORY.json bytes differ from verified attestation');
-            }
+              const observedSha256sums = downloaded.get(checksumFilename).toString('utf8');
+              if (observedSha256sums !== verifiedSha256sums) {
+                throw new Error(`${label} ${checksumFilename} bytes differ from verified attestation`);
+              }
+              for (const [name, expectedDigest] of expectedDigests) {
+                const observedDigest = crypto.createHash('sha256').update(downloaded.get(name)).digest('hex');
+                if (observedDigest !== expectedDigest) {
+                  throw new Error(`${label} asset digest mismatch for ${JSON.stringify(name)}: observed ${observedDigest}, expected ${expectedDigest}`);
+                }
+              }
+              if (!downloaded.has('RELEASE-NOTES.md') ||
+                  !downloaded.get('RELEASE-NOTES.md').equals(Buffer.from(verifiedReleaseNotes, 'utf8'))) {
+                throw new Error(`${label} RELEASE-NOTES.md bytes differ from verified attestation`);
+              }
+              if (!downloaded.has('ASSET-INVENTORY.json') ||
+                  !downloaded.get('ASSET-INVENTORY.json').equals(Buffer.from(verifiedAssetInventory, 'utf8'))) {
+                throw new Error(`${label} ASSET-INVENTORY.json bytes differ from verified attestation`);
+              }
+            };
+            const downloaded = await downloadReleaseAssets(releaseId, 'draft');
+            requireBoundAssets(downloaded, 'draft');
 
             const ref = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
             if (ref.data.object.type !== 'tag') {
@@ -2839,6 +2846,25 @@ jobs:
             const tagObject = await github.rest.git.getTag({ ...context.repo, tag_sha: ref.data.object.sha });
             if (tagObject.data.object.type !== 'commit' || tagObject.data.object.sha !== process.env.TARGET_SHA) {
               throw new Error('frozen tag target changed before publication');
+            }
+            let existingPublicRelease;
+            try {
+              existingPublicRelease = await github.rest.repos.getReleaseByTag({ ...context.repo, tag: process.env.TAG });
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            if (existingPublicRelease && existingPublicRelease.data.id !== releaseId) {
+              const existing = existingPublicRelease.data;
+              if (existing.draft || existing.tag_name !== process.env.TAG || !existing.published_at ||
+                  existing.body !== verifiedReleaseNotes) {
+                throw new Error('existing public release identity or notes differ from verified attestation');
+              }
+              const publicAssets = await downloadReleaseAssets(existing.id, 'existing public release');
+              requireBoundAssets(publicAssets, 'existing public release');
+              await github.rest.repos.deleteRelease({ ...context.repo, release_id: releaseId });
+              core.info(`verified existing public release and deleted redundant retry draft ${releaseId}`);
+              core.setOutput('release-url', existing.html_url);
+              return;
             }
             const published = await github.rest.repos.updateRelease({
               ...context.repo,

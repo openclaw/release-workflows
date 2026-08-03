@@ -85,7 +85,7 @@ function baseFixture(selectedChecksumFilename = checksumFilename) {
     releaseNotes,
     sha256sums,
   }]));
-  return { attestations, draftAssets };
+  return { attestations, draftAssets, publicAssets: new Map(draftAssets), publicRelease: null };
 }
 
 async function runScenario(mutate = () => {}, publisherRunAttempt = runAttempt, selectedChecksumFilename = checksumFilename) {
@@ -99,14 +99,19 @@ async function runScenario(mutate = () => {}, publisherRunAttempt = runAttempt, 
     writeFileSync(join(directory, 'verified-inventory-attestation.json'), JSON.stringify(fixture.attestations[architecture]));
   }
 
-  const assets = [...fixture.draftAssets].map(([name], index) => ({ id: index + 1, name }));
-  const dataById = new Map(assets.map((asset) => [asset.id, fixture.draftAssets.get(asset.name)]));
+  const draftAssets = [...fixture.draftAssets].map(([name], index) => ({ id: index + 1, name }));
+  const publicAssets = [...fixture.publicAssets].map(([name], index) => ({ id: index + 101, name }));
+  const dataById = new Map([
+    ...draftAssets.map((asset) => [asset.id, fixture.draftAssets.get(asset.name)]),
+    ...publicAssets.map((asset) => [asset.id, fixture.publicAssets.get(asset.name)]),
+  ]);
   let updateCalls = 0;
+  let deleteCalls = 0;
   const updateRequests = [];
   const outputs = new Map();
   const failures = [];
   const github = {
-    paginate: async () => assets,
+    paginate: async (_method, request) => request.release_id === fixture.publicRelease?.id ? publicAssets : draftAssets,
     request: async (_route, request) => ({ data: dataById.get(request.asset_id) }),
     rest: {
       git: {
@@ -114,8 +119,16 @@ async function runScenario(mutate = () => {}, publisherRunAttempt = runAttempt, 
         getTag: async () => ({ data: { object: { type: 'commit', sha: targetSha } } }),
       },
       repos: {
-        getRelease: async () => ({ data: { draft: true, tag_name: tag } }),
+        getRelease: async () => ({ data: { id: 42, draft: true, tag_name: tag } }),
+        getReleaseByTag: async () => {
+          if (fixture.publicRelease) return { data: fixture.publicRelease };
+          throw Object.assign(new Error('not found'), { status: 404 });
+        },
         listReleaseAssets: async () => {},
+        deleteRelease: async (request) => {
+          assert.equal(request.release_id, 42);
+          deleteCalls += 1;
+        },
         updateRelease: async (request) => {
           updateCalls += 1;
           updateRequests.push(request);
@@ -133,6 +146,7 @@ async function runScenario(mutate = () => {}, publisherRunAttempt = runAttempt, 
   };
   const context = { repo: { owner: 'openclaw', repo: 'fixture' } };
   const core = {
+    info: () => {},
     setFailed: (message) => failures.push(message),
     setOutput: (name, value) => outputs.set(name, value),
   };
@@ -156,7 +170,7 @@ async function runScenario(mutate = () => {}, publisherRunAttempt = runAttempt, 
     process.chdir(originalCwd);
     rmSync(fixtureRoot, { recursive: true, force: true });
   }
-  return { failures, outputs, thrown, updateCalls, updateRequests };
+  return { deleteCalls, failures, outputs, thrown, updateCalls, updateRequests };
 }
 
 const tests = [
@@ -172,6 +186,53 @@ const tests = [
     const result = await runScenario(() => {}, '2');
     assert.equal(result.thrown, undefined);
     assert.equal(result.updateCalls, 1);
+  }],
+  ['post-publication retry verifies public bytes and deletes only the redundant draft', async () => {
+    const result = await runScenario((fixture) => {
+      fixture.publicRelease = {
+        id: 99,
+        body: releaseNotes,
+        draft: false,
+        html_url: 'https://example.test/existing-release',
+        published_at: '2026-07-18T00:00:00Z',
+        tag_name: tag,
+      };
+    });
+    assert.equal(result.thrown, undefined);
+    assert.equal(result.updateCalls, 0);
+    assert.equal(result.deleteCalls, 1);
+    assert.equal(result.outputs.get('release-url'), 'https://example.test/existing-release');
+  }],
+  ['post-publication retry rejects changed public asset bytes without deleting the draft', async () => {
+    const result = await runScenario((fixture) => {
+      fixture.publicRelease = {
+        id: 99,
+        body: releaseNotes,
+        draft: false,
+        html_url: 'https://example.test/existing-release',
+        published_at: '2026-07-18T00:00:00Z',
+        tag_name: tag,
+      };
+      fixture.publicAssets.set('fixture.tar.gz', Buffer.from('changed'));
+    });
+    assert.match(result.thrown?.message, /existing public release asset digest mismatch/);
+    assert.equal(result.updateCalls, 0);
+    assert.equal(result.deleteCalls, 0);
+  }],
+  ['post-publication retry rejects changed public notes without deleting the draft', async () => {
+    const result = await runScenario((fixture) => {
+      fixture.publicRelease = {
+        id: 99,
+        body: `${releaseNotes}- changed\n`,
+        draft: false,
+        html_url: 'https://example.test/existing-release',
+        published_at: '2026-07-18T00:00:00Z',
+        tag_name: tag,
+      };
+    });
+    assert.match(result.thrown?.message, /identity or notes differ/);
+    assert.equal(result.updateCalls, 0);
+    assert.equal(result.deleteCalls, 0);
   }],
   ['custom checksum filename publishes the exact bound draft', async () => {
     const result = await runScenario(() => {}, runAttempt, 'checksums.txt');

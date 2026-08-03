@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.7.2 - 2026-08-02
+
+- Make post-publication retries verify and reuse an identical public release, delete the redundant retry draft, and continue downstream handoff and closeout.
+
 ## v1.7.1 - 2026-08-02
 
 - Accept literal Homebrew `version_scheme` metadata and adjacent complementary CPU branches while retaining fail-closed formula verification.
