@@ -585,12 +585,8 @@ jobs:
           script: |
             const acceptableConclusions = new Set(['success', 'neutral', 'skipped']);
             const currentRunMarker = `/actions/runs/${context.runId}`;
-            const allCheckRuns = await github.paginate(github.rest.checks.listForRef, {
-              ...context.repo,
-              ref: process.env.TARGET_SHA,
-              per_page: 100,
-              filter: 'latest',
-            });
+            const allowedCheckEvents = new Set(JSON.parse(process.env.CI_CHECK_EVENTS));
+            const normalizeContext = (name) => name.toLowerCase();
             // ci-check-event-filter-begin
             const filterCheckRunsByEvent = ({ checkRuns, allowedEvents, currentRunMarker, workflowRunEvents, info }) => {
               const accepted = [];
@@ -612,40 +608,139 @@ jobs:
               return accepted;
             };
             // ci-check-event-filter-end
-            const allowedCheckEvents = new Set(JSON.parse(process.env.CI_CHECK_EVENTS));
-            const workflowRunEvents = new Map();
-            if (allowedCheckEvents.size > 0) {
-              try {
-                const workflowRuns = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
-                  ...context.repo,
-                  head_sha: process.env.TARGET_SHA,
-                  per_page: 100,
-                });
-                for (const run of workflowRuns) workflowRunEvents.set(run.id, run.event);
-              } catch (error) {
-                core.warning(`Could not resolve Actions events for CI filtering; retaining all checks: ${error.message}`);
+            // ci-check-gate-helpers-begin
+            const evaluateAllChecks = ({ checkRuns, latestStatuses, acceptableConclusions }) => {
+              const pending = [];
+              const failures = [];
+              if (checkRuns.length === 0 && latestStatuses.size === 0) {
+                pending.push('no independent CI check or commit status');
               }
-            }
-            const checkRuns = filterCheckRunsByEvent({
-              checkRuns: allCheckRuns,
-              allowedEvents: allowedCheckEvents,
-              currentRunMarker,
-              workflowRunEvents,
-              info: (message) => core.info(message),
-            });
-            const allStatuses = await github.paginate(github.rest.repos.listCommitStatusesForRef, {
-              ...context.repo,
-              ref: process.env.TARGET_SHA,
-              per_page: 100,
-            });
-            const latestStatuses = new Map();
-            for (const status of allStatuses) {
-              const normalizedContext = status.context.toLowerCase();
-              if (!latestStatuses.has(normalizedContext)) latestStatuses.set(normalizedContext, status);
-            }
+              for (const check of checkRuns) {
+                const observed = `${check.name}=${check.status}/${check.conclusion}`;
+                if (check.status !== 'completed') {
+                  pending.push(observed);
+                } else if (!acceptableConclusions.has(check.conclusion)) {
+                  failures.push(observed);
+                }
+              }
+              for (const status of latestStatuses.values()) {
+                if (status.state === 'success') continue;
+                const observed = `${status.context}=status/${status.state}`;
+                if (status.state === 'pending') {
+                  pending.push(observed);
+                } else {
+                  failures.push(observed);
+                }
+              }
+              if (failures.length > 0) return { state: 'failure', mode: 'all', observed: failures };
+              if (pending.length > 0) return { state: 'pending', mode: 'all', observed: pending };
+              return { state: 'success', mode: 'all', observed: [] };
+            };
+            const evaluateRequiredChecks = async ({
+              required,
+              checkRuns,
+              allStatuses,
+              latestStatuses,
+              acceptableConclusions,
+              normalizeContext,
+              statusAppId,
+            }) => {
+              const pending = [];
+              const failures = [];
+              for (const requirement of required.values()) {
+                const matchingRuns = checkRuns.filter((check) =>
+                  normalizeContext(check.name) === requirement.normalizedName &&
+                  (requirement.appId === null || check.app?.id === requirement.appId)
+                );
+                let matchingStatus = latestStatuses.get(requirement.normalizedName);
+                if (matchingStatus && requirement.appId !== null &&
+                    await statusAppId(matchingStatus) !== requirement.appId) {
+                  matchingStatus = undefined;
+                  for (const status of allStatuses) {
+                    if (normalizeContext(status.context) === requirement.normalizedName &&
+                        await statusAppId(status) === requirement.appId) {
+                      matchingStatus = status;
+                      break;
+                    }
+                  }
+                }
+                const requirementName = `${requirement.name}${requirement.appId === null ? '' : `@app:${requirement.appId}`}`;
+                if (matchingRuns.length === 0 && matchingStatus === undefined) {
+                  pending.push(`${requirementName}=missing`);
+                  continue;
+                }
+                for (const check of matchingRuns) {
+                  const observed = `${requirementName}=${check.status}/${check.conclusion}`;
+                  if (check.status !== 'completed') {
+                    pending.push(observed);
+                  } else if (!acceptableConclusions.has(check.conclusion)) {
+                    failures.push(observed);
+                  }
+                }
+                if (matchingStatus !== undefined && matchingStatus.state !== 'success') {
+                  const observed = `${requirementName}=status/${matchingStatus.state}`;
+                  if (matchingStatus.state === 'pending') {
+                    pending.push(observed);
+                  } else {
+                    failures.push(observed);
+                  }
+                }
+              }
+              if (failures.length > 0) return { state: 'failure', mode: 'required', observed: failures };
+              if (pending.length > 0) return { state: 'pending', mode: 'required', observed: pending };
+              return { state: 'success', mode: 'required', observed: [] };
+            };
+            const evaluateCiGate = async ({
+              required,
+              strictChecks,
+              checkRuns,
+              allStatuses,
+              latestStatuses,
+              acceptableConclusions,
+              normalizeContext,
+              statusAppId,
+            }) => {
+              let requiredResult = null;
+              if (required.size > 0) {
+                requiredResult = await evaluateRequiredChecks({
+                  required,
+                  checkRuns,
+                  allStatuses,
+                  latestStatuses,
+                  acceptableConclusions,
+                  normalizeContext,
+                  statusAppId,
+                });
+                if (!strictChecks) return requiredResult;
+              }
+              const allResult = evaluateAllChecks({ checkRuns, latestStatuses, acceptableConclusions });
+              if (requiredResult?.state === 'failure') return requiredResult;
+              if (allResult.state === 'failure') return allResult;
+              if (requiredResult?.state === 'pending') return requiredResult;
+              return allResult;
+            };
+            const waitForCiGate = async ({
+              loadEvaluation,
+              timeoutMs,
+              intervalMs,
+              now,
+              sleep,
+              info,
+            }) => {
+              const deadline = now() + timeoutMs;
+              while (true) {
+                const evaluation = await loadEvaluation();
+                if (evaluation.state !== 'pending') return evaluation;
+                const remainingMs = deadline - now();
+                if (remainingMs <= 0) return { ...evaluation, state: 'failure', timedOut: true };
+                const delayMs = Math.min(intervalMs, remainingMs);
+                info(`CI checks pending: ${evaluation.observed.join(', ')}; retrying in ${Math.ceil(delayMs / 1000)}s`);
+                await sleep(delayMs);
+              }
+            };
+            // ci-check-gate-helpers-end
 
             const required = new Map();
-            const normalizeContext = (name) => name.toLowerCase();
             const addRequired = (name, appId = null) => {
               if (!name) return;
               const normalizedName = normalizeContext(name);
@@ -692,73 +787,92 @@ jobs:
             }
 
             const strictChecks = process.env.STRICT_CHECKS === 'true';
-            if (required.size > 0) {
-              const appIdsByBotLogin = new Map();
-              const statusAppId = async (status) => {
-                const login = status.creator?.login;
-                if (status.creator?.type !== 'Bot' || !login?.endsWith('[bot]')) return null;
-                if (!appIdsByBotLogin.has(login)) {
-                  const slug = login.slice(0, -'[bot]'.length);
-                  appIdsByBotLogin.set(login, github.rest.apps.getBySlug({ app_slug: slug })
-                    .then((response) => response.data.id)
-                    .catch((error) => {
-                      if (error.status === 404) return null;
-                      throw error;
-                    }));
-                }
-                return appIdsByBotLogin.get(login);
-              };
-              const failures = [];
-              for (const requirement of required.values()) {
-                const matchingRuns = checkRuns.filter((check) =>
-                  normalizeContext(check.name) === requirement.normalizedName &&
-                  (requirement.appId === null || check.app?.id === requirement.appId)
-                );
-                let matchingStatus = latestStatuses.get(requirement.normalizedName);
-                if (matchingStatus && requirement.appId !== null &&
-                    await statusAppId(matchingStatus) !== requirement.appId) {
-                  matchingStatus = undefined;
-                  for (const status of allStatuses) {
-                    if (normalizeContext(status.context) === requirement.normalizedName &&
-                        await statusAppId(status) === requirement.appId) {
-                      matchingStatus = status;
-                      break;
-                    }
-                  }
-                }
-                const greenRuns = matchingRuns.every((check) =>
-                  check.status === 'completed' && acceptableConclusions.has(check.conclusion)
-                );
-                const hasSignal = matchingRuns.length > 0 || matchingStatus !== undefined;
-                const greenStatus = matchingStatus === undefined || matchingStatus.state === 'success';
-                if (!hasSignal || !greenRuns || !greenStatus) {
-                  const observed = [
-                    ...matchingRuns.map((check) => `${check.status}/${check.conclusion}`),
-                    ...(matchingStatus ? [`status/${matchingStatus.state}`] : []),
-                  ];
-                  failures.push(`${requirement.name}${requirement.appId === null ? '' : `@app:${requirement.appId}`}=${observed.join('|') || 'missing'}`);
-                }
+            const appIdsByBotLogin = new Map();
+            const statusAppId = async (status) => {
+              const login = status.creator?.login;
+              if (status.creator?.type !== 'Bot' || !login?.endsWith('[bot]')) return null;
+              if (!appIdsByBotLogin.has(login)) {
+                const slug = login.slice(0, -'[bot]'.length);
+                appIdsByBotLogin.set(login, github.rest.apps.getBySlug({ app_slug: slug })
+                  .then((response) => response.data.id)
+                  .catch((error) => {
+                    if (error.status === 404) return null;
+                    throw error;
+                  }));
               }
+              return appIdsByBotLogin.get(login);
+            };
+            if (required.size > 0) {
               core.info(`Required CI contexts: ${[...required.values()].map((entry) => entry.name).join(', ')}`);
-              if (failures.length > 0) core.setFailed(`required checks not green: ${failures.join(', ')}`);
-              if (!strictChecks) return;
             }
 
-            core.info(`CI gate mode: ${strictChecks ? 'strict all-checks' : 'all-check fallback (no required contexts)'}`);
-            if (checkRuns.length === 0 && latestStatuses.size === 0) {
-              core.setFailed('frozen target has no independent CI check or commit status');
-              return;
+            if (required.size === 0 || strictChecks) {
+              core.info(`CI gate mode: ${strictChecks ? 'strict all-checks' : 'all-check fallback (no required contexts)'}`);
             }
-            const badChecks = checkRuns.filter((check) =>
-              check.status !== 'completed' || !acceptableConclusions.has(check.conclusion)
-            );
-            const badStatuses = [...latestStatuses.values()].filter((status) => status.state !== 'success');
-            if (badChecks.length > 0 || badStatuses.length > 0) {
-              const failures = [
-                ...badChecks.map((check) => `${check.name}=${check.status}/${check.conclusion}`),
-                ...badStatuses.map((status) => `${status.context}=status/${status.state}`),
-              ];
-              core.setFailed(`non-green checks: ${failures.join(', ')}`);
+
+            const loadSignals = async () => {
+              const allCheckRuns = await github.paginate(github.rest.checks.listForRef, {
+                ...context.repo,
+                ref: process.env.TARGET_SHA,
+                per_page: 100,
+                filter: 'latest',
+              });
+              const workflowRunEvents = new Map();
+              if (allowedCheckEvents.size > 0) {
+                try {
+                  const workflowRuns = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
+                    ...context.repo,
+                    head_sha: process.env.TARGET_SHA,
+                    per_page: 100,
+                  });
+                  for (const run of workflowRuns) workflowRunEvents.set(run.id, run.event);
+                } catch (error) {
+                  core.warning(`Could not resolve Actions events for CI filtering; retaining all checks: ${error.message}`);
+                }
+              }
+              const checkRuns = filterCheckRunsByEvent({
+                checkRuns: allCheckRuns,
+                allowedEvents: allowedCheckEvents,
+                currentRunMarker,
+                workflowRunEvents,
+                info: (message) => core.info(message),
+              });
+              const allStatuses = await github.paginate(github.rest.repos.listCommitStatusesForRef, {
+                ...context.repo,
+                ref: process.env.TARGET_SHA,
+                per_page: 100,
+              });
+              const latestStatuses = new Map();
+              for (const status of allStatuses) {
+                const normalizedContext = normalizeContext(status.context);
+                if (!latestStatuses.has(normalizedContext)) latestStatuses.set(normalizedContext, status);
+              }
+              return { checkRuns, allStatuses, latestStatuses };
+            };
+
+            const result = await waitForCiGate({
+              loadEvaluation: async () => {
+                const signals = await loadSignals();
+                return evaluateCiGate({
+                  required,
+                  strictChecks,
+                  ...signals,
+                  acceptableConclusions,
+                  normalizeContext,
+                  statusAppId,
+                });
+              },
+              timeoutMs: 15 * 60 * 1000,
+              intervalMs: 10 * 1000,
+              now: () => Date.now(),
+              sleep: (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
+              info: (message) => core.info(message),
+            });
+            if (result.state === 'failure') {
+              const prefix = result.timedOut
+                ? (result.mode === 'required' ? 'timed out waiting for required checks' : 'timed out waiting for CI checks')
+                : (result.mode === 'required' ? 'required checks not green' : 'non-green checks');
+              core.setFailed(`${prefix}: ${result.observed.join(', ')}`);
             }
 
   tag:
