@@ -60,6 +60,9 @@ assert.match(verify, /arm64e arm64 x86_64/);
 assert.match(verify, /ELF\.\*x86-64/);
 
 assert.match(publish, /github\.paginate\(github\.rest\.repos\.listReleaseAssets/);
+assert.match(publish, /status >= 500 && status <= 599/);
+assert.match(publish, /attempt === maxAttempts/);
+assert.match(publish, /retrying in \$\{delayMs\}ms/);
 assert.match(publish, /crypto\.createHash\('sha256'\)/);
 assert.match(publish, /Authorization: Bearer \$GH_TOKEN/);
 assert.equal(publish.match(/https:\/\/api\.github\.com\//g)?.length, publish.match(/Authorization: Bearer \$GH_TOKEN/g)?.length);

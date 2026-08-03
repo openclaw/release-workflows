@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Retry transient GitHub 5xx responses while downloading verified release assets before publication across the Go, Swift, and Electron workflows.
+
 ## v1.7.4 - 2026-08-03
 
 - Upgrade artifact downloads to `actions/download-artifact` v8.0.1 for the Node 24 runtime and fail-closed digest verification.

@@ -599,7 +599,23 @@ jobs:
             const digests = new Map(attestations.arm64.sha256sums.trimEnd().split('\n').map((line) => { const m = /^([0-9a-f]{64})  ([^\r\n]+)$/.exec(line); if (!m) throw new Error('invalid checksum line'); return [m[2], m[1]]; }));
             const releaseId = Number(process.env.RELEASE_ID); const release = await github.rest.repos.getRelease({ ...context.repo, release_id: releaseId }); if (!release.data.draft) throw new Error('release is not draft');
             const assets = await github.paginate(github.rest.repos.listReleaseAssets, { ...context.repo, release_id: releaseId, per_page: 100 }); const downloaded = new Map();
-            for (const asset of assets) { const response = await github.request('GET /repos/{owner}/{repo}/releases/assets/{asset_id}', { ...context.repo, asset_id: asset.id, headers: { accept: 'application/octet-stream' } }); downloaded.set(asset.name, Buffer.from(response.data)); }
+            const downloadReleaseAsset = async (asset) => {
+              const maxAttempts = 4;
+              for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+                try {
+                  const response = await github.request('GET /repos/{owner}/{repo}/releases/assets/{asset_id}', { ...context.repo, asset_id: asset.id, headers: { accept: 'application/octet-stream' } });
+                  return Buffer.from(response.data);
+                } catch (error) {
+                  const status = Number(error?.status);
+                  if (!(status >= 500 && status <= 599) || attempt === maxAttempts) throw error;
+                  const delayMs = 1000 * (2 ** (attempt - 1));
+                  core.warning(`GitHub returned ${status} while downloading draft asset ${JSON.stringify(asset.name)}; retrying in ${delayMs}ms (${attempt}/${maxAttempts - 1})`);
+                  await new Promise((resolve) => setTimeout(resolve, delayMs));
+                }
+              }
+              throw new Error(`unreachable release asset retry state for ${JSON.stringify(asset.name)}`);
+            };
+            for (const asset of assets) downloaded.set(asset.name, await downloadReleaseAsset(asset));
             if (JSON.stringify([...downloaded.keys()].sort()) !== JSON.stringify([...digests.keys(), process.env.CHECKSUM_FILENAME].sort())) throw new Error('draft asset inventory mismatch');
             if (downloaded.get(process.env.CHECKSUM_FILENAME).toString('utf8') !== attestations.arm64.sha256sums) throw new Error('draft checksum mismatch');
             for (const [name, digest] of digests) if (crypto.createHash('sha256').update(downloaded.get(name)).digest('hex') !== digest) throw new Error(`draft digest mismatch: ${name}`);

@@ -85,7 +85,13 @@ function baseFixture(selectedChecksumFilename = checksumFilename) {
     releaseNotes,
     sha256sums,
   }]));
-  return { attestations, draftAssets, publicAssets: new Map(draftAssets), publicRelease: null };
+  return {
+    attestations,
+    downloadFailureStatuses: new Map(),
+    draftAssets,
+    publicAssets: new Map(draftAssets),
+    publicRelease: null,
+  };
 }
 
 async function runScenario(mutate = () => {}, publisherRunAttempt = runAttempt, selectedChecksumFilename = checksumFilename) {
@@ -107,12 +113,21 @@ async function runScenario(mutate = () => {}, publisherRunAttempt = runAttempt, 
   ]);
   let updateCalls = 0;
   let deleteCalls = 0;
+  const downloadCalls = new Map();
   const updateRequests = [];
   const outputs = new Map();
   const failures = [];
   const github = {
     paginate: async (_method, request) => request.release_id === fixture.publicRelease?.id ? publicAssets : draftAssets,
-    request: async (_route, request) => ({ data: dataById.get(request.asset_id) }),
+    request: async (_route, request) => {
+      downloadCalls.set(request.asset_id, (downloadCalls.get(request.asset_id) ?? 0) + 1);
+      const failures = fixture.downloadFailureStatuses.get(request.asset_id) ?? [];
+      if (failures.length > 0) {
+        const status = failures.shift();
+        throw Object.assign(new Error(`fixture HTTP ${status}`), { status });
+      }
+      return { data: dataById.get(request.asset_id) };
+    },
     rest: {
       git: {
         getRef: async () => ({ data: { object: { type: 'tag', sha: 'b'.repeat(40) } } }),
@@ -149,6 +164,7 @@ async function runScenario(mutate = () => {}, publisherRunAttempt = runAttempt, 
     info: () => {},
     setFailed: (message) => failures.push(message),
     setOutput: (name, value) => outputs.set(name, value),
+    warning: () => {},
   };
   let thrown;
   try {
@@ -170,7 +186,7 @@ async function runScenario(mutate = () => {}, publisherRunAttempt = runAttempt, 
     process.chdir(originalCwd);
     rmSync(fixtureRoot, { recursive: true, force: true });
   }
-  return { deleteCalls, failures, outputs, thrown, updateCalls, updateRequests };
+  return { deleteCalls, downloadCalls, failures, outputs, thrown, updateCalls, updateRequests };
 }
 
 const tests = [
@@ -181,6 +197,22 @@ const tests = [
     assert.equal(result.updateCalls, 1);
     assert.equal(result.updateRequests[0].body, releaseNotes);
     assert.equal(result.outputs.get('release-url'), 'https://example.test/release');
+  }],
+  ['transient GitHub asset 500 is retried before publication', async () => {
+    const result = await runScenario((fixture) => {
+      fixture.downloadFailureStatuses.set(1, [500]);
+    });
+    assert.equal(result.thrown, undefined);
+    assert.equal(result.downloadCalls.get(1), 2);
+    assert.equal(result.updateCalls, 1);
+  }],
+  ['non-transient GitHub asset error is not retried', async () => {
+    const result = await runScenario((fixture) => {
+      fixture.downloadFailureStatuses.set(1, [403]);
+    });
+    assert.equal(result.thrown?.status, 403);
+    assert.equal(result.downloadCalls.get(1), 1);
+    assert.equal(result.updateCalls, 0);
   }],
   ['partial publisher rerun reuses producer-bound attestations', async () => {
     const result = await runScenario(() => {}, '2');
