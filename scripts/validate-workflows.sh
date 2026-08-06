@@ -13,6 +13,7 @@ done < <(find .github/workflows examples -type f \( -name '*.yml' -o -name '*.ya
 actionlint "${workflow_files[@]}"
 
 node scripts/test-release-target-resolution.mjs
+node scripts/test-required-workflows.mjs
 node scripts/test-signing-credential-preflight.mjs
 node scripts/test-tag-freeze.mjs
 node scripts/test-ci-check-event-filter.mjs
