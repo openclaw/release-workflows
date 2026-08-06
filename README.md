@@ -15,6 +15,21 @@ jobs:
     uses: openclaw/release-workflows/.github/workflows/release-go-cli.yml@v1
 ```
 
+## Ruleset workflows
+
+`crabbox-release-check.yml` is an organization-ruleset workflow for
+`openclaw/crabbox`. GitHub loads the workflow from this repository's protected
+default branch, then runs the credential-free macOS release snapshot against
+the target pull request merge commit. A Crabbox pull request therefore cannot
+rewrite the required release check that gates its own merge.
+
+Target only `openclaw/crabbox`, bind the rule to this workflow on `main`, and
+configure no bypass actors. The workflow source paths are CODEOWNED by
+`openclaw-secops`; the source repository must require a non-bypassable
+code-owner approval before changing them. Keep the ordinary Crabbox CI workflow
+separate; the ruleset workflow is the independent trust anchor for
+release-build proof.
+
 ## SwiftPM CLI archetype
 
 `release-swift-cli.yml` applies the same frozen-source, workflow-owned-tag, immutable-payload, dual-verifier, and exact-publication boundary to SwiftPM command-line tools. Its default contract matches `imsg`: the caller's version-generation and dependency-patch scripts prepare SwiftPM, the macOS build script emits a universal CLI, an `arm64e`/`arm64`/`x86_64` companion dylib, and resource bundles, while the Linux script emits a static-Swift x86_64 archive.
