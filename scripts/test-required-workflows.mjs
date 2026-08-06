@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 
 const workflow = fs.readFileSync(".github/workflows/crabbox-release-check.yml", "utf8");
+const codeowners = fs.readFileSync(".github/CODEOWNERS", "utf8");
 
 assert.match(workflow, /^name: Crabbox Release Check$/m);
 assert.match(workflow, /^  pull_request:$/m);
@@ -23,5 +24,8 @@ assert.match(workflow, /release --snapshot --clean --skip=publish --parallelism 
 assert.match(workflow, /crabbox-apple-vm-helper/);
 assert.match(workflow, /"embedded":true/);
 assert.doesNotMatch(workflow, /secrets\.|contents: write|pull-requests: write|statuses: write|checks: write/);
+assert.match(codeowners, /^\/\.github\/workflows\/ @openclaw\/openclaw-secops$/m);
+assert.match(codeowners, /^\/scripts\/test-required-workflows\.mjs @openclaw\/openclaw-secops$/m);
+assert.match(codeowners, /^\/scripts\/validate-workflows\.sh @openclaw\/openclaw-secops$/m);
 
 console.log("required workflow contracts passed");

@@ -24,8 +24,11 @@ the target pull request merge commit. A Crabbox pull request therefore cannot
 rewrite the required release check that gates its own merge.
 
 Target only `openclaw/crabbox`, bind the rule to this workflow on `main`, and
-configure no bypass actors. Keep the ordinary Crabbox CI workflow separate;
-the ruleset workflow is the independent trust anchor for release-build proof.
+configure no bypass actors. The workflow source paths are CODEOWNED by
+`openclaw-secops`; the source repository must require a non-bypassable
+code-owner approval before changing them. Keep the ordinary Crabbox CI workflow
+separate; the ruleset workflow is the independent trust anchor for
+release-build proof.
 
 ## SwiftPM CLI archetype
 
