@@ -441,6 +441,9 @@ jobs:
     needs: [validate, tag]
     runs-on: ubuntu-latest
     container: ${{ inputs.swift-linux-image }}
+    defaults:
+      run:
+        shell: bash
     permissions:
       contents: read
     steps:
