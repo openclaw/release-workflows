@@ -75,6 +75,7 @@ assert.match(draft, /Check out frozen tag metadata/);
 assert.match(draft, /persist-credentials: false/);
 assert.match(draft, /ref: \$\{\{ needs\.validate\.outputs\.tag \}\}/);
 assert.match(draft, /gh release create .* --verify-tag/);
+assert.match(draft, /gh release view "\$TAG" --json databaseId/);
 
 assert.match(publish, /github\.paginate\(github\.rest\.repos\.listReleaseAssets/);
 assert.match(publish, /status >= 500 && status <= 599/);
