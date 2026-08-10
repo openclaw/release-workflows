@@ -523,8 +523,12 @@ jobs:
           private_key="$RUNNER_TEMP/swift-release-private-key.pem"
           trap 'rm -f "$p12" "$certificate" "$private_key"' EXIT
           printf '%s' "$P12_BASE64" | base64 --decode >"$p12"
-          openssl pkcs12 -legacy -in "$p12" -clcerts -nokeys -out "$certificate" -passin env:P12_PASSWORD
-          openssl pkcs12 -legacy -in "$p12" -nocerts -nodes -out "$private_key" -passin env:P12_PASSWORD
+          pkcs12_compat=()
+          if openssl pkcs12 -help 2>&1 | grep -q -- '-legacy'; then
+            pkcs12_compat=(-legacy)
+          fi
+          openssl pkcs12 "${pkcs12_compat[@]}" -in "$p12" -clcerts -nokeys -out "$certificate" -passin env:P12_PASSWORD
+          openssl pkcs12 "${pkcs12_compat[@]}" -in "$p12" -nocerts -nodes -out "$private_key" -passin env:P12_PASSWORD
           chmod 600 "$p12" "$certificate" "$private_key"
           security create-keychain -p "$password" "$keychain"
           security set-keychain-settings -lut 21600 "$keychain"

@@ -47,9 +47,10 @@ for (const build of [buildMac, buildLinux]) {
 assert.match(buildMac, /CODESIGN_IDENTITY=-/);
 assert.match(buildMac, /at least one resource bundle is required/);
 assert.match(buildLinux, /defaults:\n\s+run:\n\s+shell: bash/);
-assert.match(sign, /openssl pkcs12 -legacy/);
-assert.match(sign, /openssl pkcs12 .* -clcerts -nokeys/);
-assert.match(sign, /openssl pkcs12 .* -nocerts -nodes/);
+assert.match(sign, /openssl pkcs12 -help.*grep -q -- '-legacy'/s);
+assert.match(sign, /pkcs12_compat=\(-legacy\)/);
+assert.match(sign, /openssl pkcs12 "\$\{pkcs12_compat\[@\]\}" .* -clcerts -nokeys/);
+assert.match(sign, /openssl pkcs12 "\$\{pkcs12_compat\[@\]\}" .* -nocerts -nodes/);
 assert.doesNotMatch(sign, /security import "\$p12"/);
 assert.match(sign, /security import "\$certificate"/);
 assert.match(sign, /security import "\$private_key"/);
