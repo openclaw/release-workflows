@@ -24,6 +24,7 @@ for (const input of [
 const buildMac = section('build-macos', 'build-linux');
 const buildLinux = section('build-linux', 'sign');
 const sign = section('sign', 'draft');
+const draft = section('draft', 'verify');
 const verify = section('verify', 'publish');
 const publish = section('publish', 'handoff');
 const handoff = section('handoff', 'closeout');
@@ -69,6 +70,11 @@ assert.match(verify, /macos-15-intel/);
 assert.match(verify, /macos-14/);
 assert.match(verify, /arm64e arm64 x86_64/);
 assert.match(verify, /ELF\.\*x86-64/);
+
+assert.match(draft, /Check out frozen tag metadata/);
+assert.match(draft, /persist-credentials: false/);
+assert.match(draft, /ref: \$\{\{ needs\.validate\.outputs\.tag \}\}/);
+assert.match(draft, /gh release create .* --verify-tag/);
 
 assert.match(publish, /github\.paginate\(github\.rest\.repos\.listReleaseAssets/);
 assert.match(publish, /status >= 500 && status <= 599/);
