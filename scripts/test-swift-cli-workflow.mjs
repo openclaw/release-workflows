@@ -54,6 +54,7 @@ assert.match(sign, /extract_pkcs12\(\)/);
 assert.match(sign, /extract_pkcs12 .* -clcerts -nokeys/);
 assert.match(sign, /extract_pkcs12 .* -nocerts -nodes/);
 assert.doesNotMatch(sign, /security import "\$p12"/);
+assert.match(sign, /security list-keychains -d user -s "\$keychain"/);
 assert.match(sign, /security import "\$certificate"/);
 assert.match(sign, /security import "\$private_key"/);
 assert.match(sign, /arm64e arm64 x86_64|for arch in arm64e arm64 x86_64/);
