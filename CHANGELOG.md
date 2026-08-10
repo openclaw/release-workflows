@@ -2,7 +2,6 @@
 
 ## Unreleased
 
-- Run Swift Linux container steps with Bash so the workflow's `pipefail` contract works on images whose default shell is `sh`.
 - Add a protected organization-ruleset workflow that independently runs the
   Crabbox macOS release snapshot gate outside the target repository.
 
