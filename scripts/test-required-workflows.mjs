@@ -26,19 +26,19 @@ assert.match(workflow, /"embedded":true/);
 assert.doesNotMatch(workflow, /secrets\.|contents: write|pull-requests: write|statuses: write|checks: write/);
 assert.match(
   codeowners,
-  /^\/\.github\/CODEOWNERS @openclaw\/openclaw-secops @vincentkoc$/m,
+  /^\/\.github\/CODEOWNERS @vincentkoc @steipete$/m,
 );
 assert.match(
   codeowners,
-  /^\/\.github\/workflows\/ @openclaw\/openclaw-secops @vincentkoc$/m,
+  /^\/\.github\/workflows\/ @vincentkoc @steipete$/m,
 );
 assert.match(
   codeowners,
-  /^\/scripts\/test-required-workflows\.mjs @openclaw\/openclaw-secops @vincentkoc$/m,
+  /^\/scripts\/test-required-workflows\.mjs @vincentkoc @steipete$/m,
 );
 assert.match(
   codeowners,
-  /^\/scripts\/validate-workflows\.sh @openclaw\/openclaw-secops @vincentkoc$/m,
+  /^\/scripts\/validate-workflows\.sh @vincentkoc @steipete$/m,
 );
 
 console.log("required workflow contracts passed");

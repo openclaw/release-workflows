@@ -1,5 +1,5 @@
 # Ruleset workflows are cross-repository trust anchors.
-/.github/CODEOWNERS @openclaw/openclaw-secops @vincentkoc
-/.github/workflows/ @openclaw/openclaw-secops @vincentkoc
-/scripts/validate-workflows.sh @openclaw/openclaw-secops @vincentkoc
-/scripts/test-required-workflows.mjs @openclaw/openclaw-secops @vincentkoc
+/.github/CODEOWNERS @vincentkoc @steipete
+/.github/workflows/ @vincentkoc @steipete
+/scripts/validate-workflows.sh @vincentkoc @steipete
+/scripts/test-required-workflows.mjs @vincentkoc @steipete
