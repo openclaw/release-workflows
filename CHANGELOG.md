@@ -4,6 +4,7 @@
 
 - Add a protected organization-ruleset workflow that independently runs the
   Crabbox macOS release snapshot gate outside the target repository.
+- Add the repository owner as a co-owner for release-workflow trust anchors.
 
 ## v1.7.5 - 2026-08-03
 
