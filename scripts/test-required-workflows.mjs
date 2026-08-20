@@ -24,8 +24,21 @@ assert.match(workflow, /release --snapshot --clean --skip=publish --parallelism 
 assert.match(workflow, /crabbox-apple-vm-helper/);
 assert.match(workflow, /"embedded":true/);
 assert.doesNotMatch(workflow, /secrets\.|contents: write|pull-requests: write|statuses: write|checks: write/);
-assert.match(codeowners, /^\/\.github\/workflows\/ @openclaw\/openclaw-secops$/m);
-assert.match(codeowners, /^\/scripts\/test-required-workflows\.mjs @openclaw\/openclaw-secops$/m);
-assert.match(codeowners, /^\/scripts\/validate-workflows\.sh @openclaw\/openclaw-secops$/m);
+assert.match(
+  codeowners,
+  /^\/\.github\/CODEOWNERS @openclaw\/openclaw-secops @vincentkoc$/m,
+);
+assert.match(
+  codeowners,
+  /^\/\.github\/workflows\/ @openclaw\/openclaw-secops @vincentkoc$/m,
+);
+assert.match(
+  codeowners,
+  /^\/scripts\/test-required-workflows\.mjs @openclaw\/openclaw-secops @vincentkoc$/m,
+);
+assert.match(
+  codeowners,
+  /^\/scripts\/validate-workflows\.sh @openclaw\/openclaw-secops @vincentkoc$/m,
+);
 
 console.log("required workflow contracts passed");
