@@ -36,6 +36,8 @@ release-build proof.
 
 The signing job never checks out or executes caller source. It re-signs the frozen raw macOS payload with the selected Developer ID policy, preserves stable CLI/helper identifiers, submits the exact published ZIP for notarization, requires online notarization on both Mach-O files, binds the macOS ZIP and Linux archive into `ASSET-INVENTORY.json` plus the configured checksum manifest, and uploads one immutable Actions payload. Independent arm64 and Intel jobs verify checksums, inventory identity, CLI/helper slices, resource bundles, identifiers, Team ID, notarization, native CLI execution, and the Linux executable format without release-write credentials. Publication re-downloads every draft asset and binds its bytes to both attestations before undrafting.
 
+The signer snapshots the user keychain search list before creating its ephemeral keychain. Always-run cleanup restores that list and deletes the temporary keychain even if import fails before signer outputs are available; restoration and deletion failures are reported independently.
+
 When `homebrew-formula` is nonempty, the handoff dispatches the configured tap's `update-formula.yml` with the exact verified macOS archive, waits for the uniquely correlated run, then requires the resulting formula URL and SHA-256 to equal the attested release asset. A pre-existing versioned Unreleased changelog section satisfies closeout; otherwise the workflow opens a closeout PR.
 
 See [`examples/release-swift-cli-caller.yml`](examples/release-swift-cli-caller.yml) for the thin caller. The consumer must provision `MACOS_SIGNING_P12`, `MACOS_SIGNING_P12_PASSWORD`, `ASC_KEY_ID`, `ASC_ISSUER_ID`, and `ASC_PRIVATE_KEY_P8`; Homebrew handoff additionally needs `TAP_TOKEN`.
@@ -195,3 +197,5 @@ scripts/validate-workflows.sh
 ```
 
 This runs actionlint on reusable, CI, and example workflows; parses every YAML document with Psych safe loading; executes adversarial frozen-tag, native-build selection, nFPM target/inventory, draft-binding, Homebrew tap-selection, explicit-assets, fallback, live slacrawl/graincrawl platform-formula, and post-dispatch formula-binding scenarios; and enforces the required job/input topology, actions-read-only dual-architecture verifier, publisher hash binding, and immutable action references.
+
+Swift keychain lifecycle tests execute the workflow's signer and cleanup shell blocks with synthetic key material and a simulated security command, without changing local keychains. CI also runs `node scripts/test-swift-keychain-lifecycle.mjs --real-keychains` on a disposable hosted macOS runner, exercising native keychain creation, search-list restoration, deletion, and injected failures without release credentials. This native mode refuses to run outside GitHub-hosted macOS CI; it does not test real certificate import or notarization.

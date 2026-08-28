@@ -24,6 +24,7 @@ for (const input of [
 const buildMac = section('build-macos', 'build-linux');
 const buildLinux = section('build-linux', 'sign');
 const sign = section('sign', 'draft');
+const draft = section('draft', 'verify');
 const verify = section('verify', 'publish');
 const publish = section('publish', 'handoff');
 const handoff = section('handoff', 'closeout');
@@ -46,6 +47,17 @@ for (const build of [buildMac, buildLinux]) {
 
 assert.match(buildMac, /CODESIGN_IDENTITY=-/);
 assert.match(buildMac, /at least one resource bundle is required/);
+assert.match(buildLinux, /defaults:\n\s+run:\n\s+shell: bash/);
+assert.match(sign, /openssl pkcs12 -help.*grep -q -- '-legacy'/s);
+assert.match(sign, /pkcs12_legacy=0/);
+assert.match(sign, /pkcs12_legacy=1/);
+assert.match(sign, /extract_pkcs12\(\)/);
+assert.match(sign, /extract_pkcs12 .* -clcerts -nokeys/);
+assert.match(sign, /extract_pkcs12 .* -nocerts -nodes/);
+assert.doesNotMatch(sign, /security import "\$p12"/);
+assert.match(sign, /security list-keychains -d user -s "\$keychain"/);
+assert.match(sign, /security import "\$certificate"/);
+assert.match(sign, /security import "\$private_key"/);
 assert.match(sign, /arm64e arm64 x86_64|for arch in arm64e arm64 x86_64/);
 assert.match(sign, /notarytool submit/);
 assert.match(sign, /--check-notarization/);
@@ -58,6 +70,12 @@ assert.match(verify, /macos-15-intel/);
 assert.match(verify, /macos-14/);
 assert.match(verify, /arm64e arm64 x86_64/);
 assert.match(verify, /ELF\.\*x86-64/);
+
+assert.match(draft, /Check out frozen tag metadata/);
+assert.match(draft, /persist-credentials: false/);
+assert.match(draft, /ref: \$\{\{ needs\.validate\.outputs\.tag \}\}/);
+assert.match(draft, /gh release create .* --verify-tag/);
+assert.match(draft, /gh release view "\$TAG" --json databaseId/);
 
 assert.match(publish, /github\.paginate\(github\.rest\.repos\.listReleaseAssets/);
 assert.match(publish, /status >= 500 && status <= 599/);
