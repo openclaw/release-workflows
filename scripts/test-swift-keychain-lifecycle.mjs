@@ -83,6 +83,10 @@ function runScenario(name, { empty = false, importFailure = '', cleanupFailure =
       nativeSecurity(['list-keychains', '-d', 'user', '-s', ...original]);
     }
     writeFileSync(statePath, JSON.stringify({ keychains: original }));
+    // macOS can expose the login keychain after an empty search-list request.
+    const expectedOriginal = readSearchList();
+    if (!empty) assert.deepEqual(expectedOriginal, original, 'fixture search list must be installed');
+    if (realKeychains && empty) console.log(`Native empty-list request exposes ${expectedOriginal.length} keychain(s) before signing`);
     const bin = path.join(root, 'bin');
     mkdirSync(bin);
     for (const command of ['security', 'openssl']) writeFileSync(path.join(bin, command), fixtureCommand, { mode: 0o755 });
@@ -109,7 +113,7 @@ function runScenario(name, { empty = false, importFailure = '', cleanupFailure =
       env: { ...env, KEYCHAIN: exportedKeychain, PHASE: 'cleanup', FAIL_SECURITY: cleanupFailure }, encoding: 'utf8',
     });
     assert.equal(result.status, cleanupFailure ? 1 : 0, `${name}: cleanup\n${result.stderr}`);
-    if (cleanupFailure !== 'restore') assert.deepEqual(readSearchList(), original, `${name}: original search list must be restored`);
+    if (cleanupFailure !== 'restore') assert.deepEqual(readSearchList(), expectedOriginal, `${name}: original search list must be restored`);
     if (cleanupFailure !== 'delete-keychain') assert.equal(existsSync(keychain), false, `${name}: ephemeral keychain must be deleted`);
     for (const file of ['swift-release.p12', 'swift-release-certificate.pem', 'swift-release-private-key.pem']) {
       assert.equal(existsSync(path.join(root, file)), false, `${name}: temporary material must be removed`);
