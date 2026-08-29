@@ -76,6 +76,8 @@ Because the write default is repository-wide, every workflow should still declar
 
 When enabling Homebrew handoff, choose the formula's actual tap independently from the signing identity and provision `TAP_TOKEN` against that exact repository. The token must have Contents read and Actions write access to the configured tap; the handoff validates repository and workflow access before dispatch. The configured tap's `update-formula.yml` must accept the optional `assets` JSON input required by the `@v1` compatibility contract. Both fleet taps retain their legacy filename-guessing fallback for older callers.
 
+Tap repository and workflow preflight failures include the HTTP status and sanitized GitHub error message, preserving details such as token expiry, permission denial, or rate limiting when GitHub provides them. Diagnostics redact credentials, omit request/response objects, and bound the message to one line of at most 1,000 characters.
+
 See [`examples/release-go-cli-caller.yml`](examples/release-go-cli-caller.yml) for the complete thin caller.
 
 Inputs:
