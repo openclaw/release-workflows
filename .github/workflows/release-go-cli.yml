@@ -286,7 +286,7 @@ jobs:
 
       - name: Resolve protected release target
         id: repository
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           TAG: ${{ steps.inputs.outputs.tag }}
         with:
@@ -356,7 +356,7 @@ jobs:
             core.setOutput('target-source', targetSource);
 
       - name: Check out exact release target
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ inputs.require-signed-tag && steps.inputs.outputs.tag || steps.repository.outputs.target-sha }}
@@ -567,7 +567,7 @@ jobs:
           echo "release-notes-artifact-name=release-notes-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >>"$GITHUB_OUTPUT"
 
       - name: Upload frozen release notes
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ steps.metadata.outputs.release-notes-artifact-name }}
           path: ${{ runner.temp }}/RELEASE-NOTES.md
@@ -575,7 +575,7 @@ jobs:
           retention-days: 30
 
       - name: Require independent CI green on frozen target
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           CI_CHECK_EVENTS: ${{ inputs.ci-check-events }}
           DEFAULT_BRANCH: ${{ steps.repository.outputs.default-branch }}
@@ -883,7 +883,7 @@ jobs:
       contents: write
     steps:
       - name: Create immutable annotated tag
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           EXPECTED_TAG_OBJECT: ${{ needs.validate.outputs.tag-object-sha }}
           REPOSITORY_TYPE: ${{ inputs.repository-type }}
@@ -959,7 +959,7 @@ jobs:
       nfpm-enabled: ${{ steps.build-mode.outputs.nfpm-enabled }}
     steps:
       - name: Check out frozen tag
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ needs.validate.outputs.tag }}
@@ -971,7 +971,7 @@ jobs:
           set -euo pipefail
           [[ "$(git rev-parse HEAD)" == "$TARGET_SHA" ]]
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -1091,7 +1091,7 @@ jobs:
             tar -czf raw-goreleaser-dist.tar.gz dist
           fi
       - name: Upload raw matrix
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: raw-goreleaser-primary-${{ github.run_id }}
           path: raw-goreleaser-dist.tar.gz
@@ -1109,7 +1109,7 @@ jobs:
       goreleaser-args: ${{ steps.build-mode.outputs.args }}
     steps:
       - name: Check out frozen tag
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ needs.validate.outputs.tag }}
@@ -1121,7 +1121,7 @@ jobs:
           set -euo pipefail
           [[ "$(git rev-parse HEAD)" == "$TARGET_SHA" ]]
       - name: Set up exact Go toolchain
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ needs.build.outputs.go-setup-version }}
           cache: true
@@ -1154,7 +1154,7 @@ jobs:
           goreleaser "${goreleaser_args[@]}"
           tar -czf raw-goreleaser-split.tar.gz dist
       - name: Upload raw split matrix
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: raw-goreleaser-split-${{ github.run_id }}
           path: raw-goreleaser-split.tar.gz
@@ -1256,7 +1256,7 @@ jobs:
           fi
           tar -czf raw-goreleaser-dist.tar.gz -C merged .
       - name: Upload immutable merged matrix
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: raw-goreleaser-dist-${{ github.run_id }}
           path: raw-goreleaser-dist.tar.gz
@@ -1783,7 +1783,7 @@ jobs:
           NODE
           tar -czf signed-release-assets.tar.gz release-assets
       - name: Upload signed release payload
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: signed-release-assets-${{ github.run_id }}
           path: signed-release-assets.tar.gz
@@ -1834,7 +1834,7 @@ jobs:
     steps:
       - name: Check out clean source for independent rebuild
         if: inputs.reproducible-rebuild != 'disabled'
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: reproducible-source
           persist-credentials: false
@@ -1850,7 +1850,7 @@ jobs:
           [[ -z "$(git -C reproducible-source status --porcelain --untracked-files=all)" ]]
       - name: Set up independent Go toolchain
         if: inputs.reproducible-rebuild != 'disabled'
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ needs.build.outputs.go-setup-version }}
           cache: false
@@ -1914,7 +1914,7 @@ jobs:
         run: echo "artifact-name=independent-rebuild-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >>"$GITHUB_OUTPUT"
       - name: Upload raw independent rebuild
         if: inputs.reproducible-rebuild != 'disabled'
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ steps.rebuild-artifact-name.outputs.artifact-name }}
           path: reproducible-source/dist
@@ -2105,7 +2105,7 @@ jobs:
         run: echo "artifact-name=reproducible-rebuild-proof-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >>"$GITHUB_OUTPUT"
       - name: Upload reproducible rebuild proof
         if: inputs.reproducible-rebuild != 'disabled'
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ steps.proof-artifact-name.outputs.artifact-name }}
           path: ${{ runner.temp }}/reproducible-rebuild.json
@@ -2320,7 +2320,7 @@ jobs:
           tar -czf release-verification-payload.tar.gz release-assets
           echo "artifact-name=release-verification-payload-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >>"$GITHUB_OUTPUT"
       - name: Upload immutable verification payload
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ steps.verification-payload.outputs.artifact-name }}
           path: release-verification-payload.tar.gz
@@ -2329,7 +2329,7 @@ jobs:
 
       - name: Create draft and upload exact assets
         id: release
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           CHECKSUM_FILENAME: ${{ inputs.checksum-filename }}
           RELEASE_VERSION: ${{ needs.validate.outputs.release-version }}
@@ -2758,7 +2758,7 @@ jobs:
             >"$RUNNER_TEMP/verified-inventory-attestation.json"
 
       - name: Upload verified inventory attestation
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: verified-inventory-${{ matrix.arch }}-${{ needs.draft.outputs.verification-artifact-name }}
           path: ${{ runner.temp }}/verified-inventory-attestation.json
@@ -2785,7 +2785,7 @@ jobs:
     steps:
       - name: Check out frozen source for signed-tag policy
         if: inputs.require-signed-tag
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ needs.validate.outputs.tag }}
@@ -2822,7 +2822,7 @@ jobs:
           path: verified-inventory-attestations/x86_64
       - name: Bind draft bytes to verified inventory and publish
         id: publish
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           CHECKSUM_FILENAME: ${{ inputs.checksum-filename }}
           RELEASE_ID: ${{ needs.draft.outputs.release-id }}
@@ -3047,7 +3047,7 @@ jobs:
           name: verified-inventory-x86_64-${{ needs.draft.outputs.verification-artifact-name }}
           path: verified-inventory-attestations/x86_64
       - name: Dispatch configured tap and verify formula hashes
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           CHECKSUM_FILENAME: ${{ inputs.checksum-filename }}
           FORMULA: ${{ inputs.homebrew-formula }}
@@ -3600,7 +3600,7 @@ jobs:
       pull-requests: write
     steps:
       - name: Check out current default branch
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.validate.outputs.default-branch }}
       - name: Add Unreleased section and open PR

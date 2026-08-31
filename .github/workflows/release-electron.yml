@@ -15,11 +15,11 @@ on:
         type: string
       pnpm-version:
         required: false
-        default: '11.19.0'
+        default: '11.25.0'
         type: string
       goreleaser-version:
         required: false
-        default: v2.17.0
+        default: v2.18.0
         type: string
       desktop-package:
         required: false
@@ -123,7 +123,7 @@ jobs:
 
       - name: Resolve protected release target
         id: source
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           TAG: ${{ steps.inputs.outputs.tag }}
         with:
@@ -152,7 +152,7 @@ jobs:
             core.setOutput('target-sha', targetSha);
 
       - name: Check out exact release target
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
@@ -182,7 +182,7 @@ jobs:
           echo "release-notes-artifact-name=electron-release-notes-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >>"$GITHUB_OUTPUT"
 
       - name: Upload frozen release notes
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ steps.metadata.outputs.release-notes-artifact-name }}
           path: ${{ runner.temp }}/RELEASE-NOTES.md
@@ -190,7 +190,7 @@ jobs:
           retention-days: 30
 
       - name: Require independent CI green on frozen target
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           CI_CHECK_EVENTS: ${{ inputs.ci-check-events }}
           TARGET_SHA: ${{ steps.source.outputs.target-sha }}
@@ -218,7 +218,7 @@ jobs:
       contents: write
     steps:
       - name: Create or reuse exact annotated tag
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           EXPECTED_TAG_OBJECT: ${{ needs.validate.outputs.tag-object-sha }}
           TAG: ${{ needs.validate.outputs.tag }}
@@ -244,16 +244,16 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ needs.validate.outputs.tag }}
           fetch-depth: 0
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
-      - uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
           version: ${{ inputs.pnpm-version }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -274,7 +274,7 @@ jobs:
           mkdir server-assets
           while IFS= read -r file; do cp "$file" server-assets/; done < <(find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.deb' -o -name '*.rpm' -o -name 'sha256sums.txt' \) | LC_ALL=C sort)
           [[ -n "$(find server-assets -type f -print -quit)" ]]
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: electron-server-${{ github.run_id }}
           path: server-assets
@@ -300,11 +300,11 @@ jobs:
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ needs.validate.outputs.tag }}
-      - uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
           version: ${{ inputs.pnpm-version }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -320,7 +320,7 @@ jobs:
       - name: Write platform checksums
         shell: bash
         run: node "${{ inputs.desktop-directory }}/scripts/release-artifacts.mjs" "${{ matrix.platform }}" "${{ needs.validate.outputs.release-version }}" "${{ inputs.desktop-directory }}/release"
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: electron-desktop-${{ matrix.platform }}-${{ github.run_id }}
           path: |
@@ -339,11 +339,11 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ needs.validate.outputs.tag }}
-      - uses: pnpm/action-setup@008330803749db0355799c700092d9a85fd074e9 # v6.0.9
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
           version: ${{ inputs.pnpm-version }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -411,7 +411,7 @@ jobs:
           done
           node "$DESKTOP_DIRECTORY/scripts/release-artifacts.mjs" mac "$VERSION" "$DESKTOP_DIRECTORY/release"
           rm -f "$p8"
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: electron-desktop-mac-${{ github.run_id }}
           path: |
@@ -478,7 +478,7 @@ jobs:
           tar -czf electron-release-assets.tar.gz release-assets
       - id: name
         run: echo "artifact-name=electron-release-assets-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >>"$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ steps.name.outputs.artifact-name }}
           path: electron-release-assets.tar.gz
@@ -556,7 +556,7 @@ jobs:
           find . -maxdepth 1 -name '*.AppImage' -print -quit | grep -q .; file ./*.AppImage | grep -q ELF
           find . -maxdepth 1 -name '*.exe' -print -quit | grep -q .; file ./*.exe | grep -Eq 'PE32|MS Windows'
           jq -n --arg repository "$GITHUB_REPOSITORY" --arg runId "$GITHUB_RUN_ID" --arg payloadArtifact "${{ needs.draft.outputs.verification-artifact-name }}" --arg tag "$TAG" --arg commit "$TARGET_SHA" --arg architecture "$EXPECTED_ARCH" --rawfile assetInventory ASSET-INVENTORY.json --rawfile sha256sums "$CHECKSUM_FILENAME" --rawfile releaseNotes RELEASE-NOTES.md '{schemaVersion:1,repository:$repository,runId:$runId,payloadArtifact:$payloadArtifact,tag:$tag,commit:$commit,architecture:$architecture,verdict:"verified",assetInventory:$assetInventory,sha256sums:$sha256sums,releaseNotes:$releaseNotes}' >verified-electron-attestation.json
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: verified-electron-${{ matrix.arch }}-${{ needs.draft.outputs.verification-artifact-name }}
           path: release-assets/verified-electron-attestation.json
@@ -582,7 +582,7 @@ jobs:
           name: verified-electron-x86_64-${{ needs.draft.outputs.verification-artifact-name }}
           path: attestations/x86_64
       - id: publish
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           CHECKSUM_FILENAME: ${{ inputs.checksum-filename }}
           RELEASE_ID: ${{ needs.draft.outputs.release-id }}
@@ -629,7 +629,7 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.validate.outputs.default-branch }}
       - name: Open Unreleased section when missing
