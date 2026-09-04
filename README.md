@@ -78,6 +78,8 @@ When enabling Homebrew handoff, choose the formula's actual tap independently fr
 
 Tap repository and workflow preflight failures include the HTTP status and sanitized GitHub error message, preserving details such as token expiry, permission denial, or rate limiting when GitHub provides them. Diagnostics redact credentials, omit request/response objects, and bound the message to one line of at most 1,000 characters.
 
+The `homebrew-preflight-integration` CI job executes the production preflight block through `actions/github-script` against the public OpenClaw tap. It deliberately sends a synthetic invalid token to each read endpoint, verifies GitHub's real 401 diagnostic, and never dispatches a workflow. Regression tests separately cover credential redaction and other failure responses.
+
 See [`examples/release-go-cli-caller.yml`](examples/release-go-cli-caller.yml) for the complete thin caller.
 
 Inputs:
