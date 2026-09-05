@@ -485,6 +485,7 @@ jobs:
     name: 3c · Sign, notarize, and freeze Swift assets
     needs: [validate, build-macos, build-linux]
     runs-on: macos-15
+    timeout-minutes: 45
     permissions:
       actions: read
     outputs:
@@ -575,7 +576,7 @@ jobs:
           printf '%s' "$ASC_PRIVATE_KEY_P8" >"$p8"
           chmod 600 "$p8"
           /usr/bin/ditto --norsrc -c -k payload "release-assets/$MACOS_ARCHIVE_NAME"
-          xcrun notarytool submit "release-assets/$MACOS_ARCHIVE_NAME" --key "$p8" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --no-s3-acceleration --wait --output-format json >"$RUNNER_TEMP/notary.json"
+          xcrun notarytool submit "release-assets/$MACOS_ARCHIVE_NAME" --key "$p8" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --no-s3-acceleration --wait --timeout 900 --output-format json >"$RUNNER_TEMP/notary.json"
           [[ "$(jq -r '.status' "$RUNNER_TEMP/notary.json")" == Accepted ]]
           codesign --verify --strict --check-notarization -R=notarized "$cli"
           codesign --verify --strict --check-notarization -R=notarized "$helper"

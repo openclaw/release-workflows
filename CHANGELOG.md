@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Bound `notarytool submit --wait` with `--timeout 900` and set `timeout-minutes: 45` on the Swift, Electron, and Go sign/notarize jobs so a stuck Apple Notary service cannot pin a macOS runner for the 6h Actions default.
 - Add a protected organization-ruleset workflow that independently runs the
   Crabbox macOS release snapshot gate outside the target repository.
 - Add the repository owner as a co-owner for release-workflow trust anchors.

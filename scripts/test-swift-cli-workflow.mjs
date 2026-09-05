@@ -47,7 +47,9 @@ for (const build of [buildMac, buildLinux]) {
 assert.match(buildMac, /CODESIGN_IDENTITY=-/);
 assert.match(buildMac, /at least one resource bundle is required/);
 assert.match(sign, /arm64e arm64 x86_64|for arch in arm64e arm64 x86_64/);
+assert.match(sign, /timeout-minutes: 45/);
 assert.match(sign, /notarytool submit/);
+assert.match(sign, /--wait --timeout 900/);
 assert.match(sign, /--check-notarization/);
 assert.match(sign, /SIGNING-MANIFEST\.json/);
 assert.match(sign, /ASSET-INVENTORY\.json/);

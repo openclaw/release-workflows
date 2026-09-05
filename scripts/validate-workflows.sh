@@ -293,6 +293,9 @@ for required_signing_control in [
     'security list-keychains -d user -s "${signing_search[@]}"',
     'if: always()',
     'security list-keychains -d user -s "${original_keychains[@]}"',
+    'timeout-minutes: 45',
+    'notarytool submit',
+    '--wait --timeout 900',
 ]:
     if required_signing_control not in sign:
         raise SystemExit(f'missing signing keychain control: {required_signing_control}')

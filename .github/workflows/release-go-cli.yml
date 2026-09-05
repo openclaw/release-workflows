@@ -1274,6 +1274,7 @@ jobs:
       }}
     needs: [validate, build, merge-builds]
     runs-on: macos-14
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:
@@ -1524,7 +1525,7 @@ jobs:
             submission="$work/submissions/$(printf '%s' "$identifier" | tr '.' '-')-$(shasum -a 256 <<<"$candidate" | cut -c1-10).zip"
             ditto -c -k --keepParent "$candidate" "$submission"
             xcrun notarytool submit "$submission" --key "$p8" --key-id "$ASC_KEY_ID" \
-              --issuer "$ASC_ISSUER_ID" --no-s3-acceleration --wait --output-format json >"$submission.json"
+              --issuer "$ASC_ISSUER_ID" --no-s3-acceleration --wait --timeout 900 --output-format json >"$submission.json"
             [[ "$(jq -r '.status' "$submission.json")" == Accepted ]]
             ready=0
             delay=5

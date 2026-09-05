@@ -336,6 +336,7 @@ jobs:
     name: 3c · Sign, notarize, and staple macOS desktop
     needs: [validate, tag]
     runs-on: macos-15
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:
@@ -402,7 +403,7 @@ jobs:
             [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" == "$BUNDLE_IDENTIFIER" ]]
             codesign --verify --strict --deep "$app"
             submission="$RUNNER_TEMP/$PRODUCT_NAME-$arch.zip"; ditto -c -k --sequesterRsrc --keepParent "$app" "$submission"
-            xcrun notarytool submit "$submission" --key "$p8" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --no-s3-acceleration --wait --output-format json >"$submission.json"
+            xcrun notarytool submit "$submission" --key "$p8" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --no-s3-acceleration --wait --timeout 900 --output-format json >"$submission.json"
             [[ "$(jq -r '.status' "$submission.json")" == Accepted ]]
             xcrun stapler staple "$app"; xcrun stapler validate "$app"; spctl --assess --type execute "$app"
             pnpm --filter "${{ inputs.desktop-package }}" exec electron-builder --prepackaged "$app" --mac dmg zip --"$arch" --config.extraMetadata.version="$VERSION" --publish never

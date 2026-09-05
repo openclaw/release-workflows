@@ -37,7 +37,9 @@ assert.match(desktop, /--linux AppImage deb --x64/);
 for (const secret of ['MACOS_SIGNING_P12', 'MACOS_SIGNING_P12_PASSWORD', 'ASC_KEY_ID', 'ASC_ISSUER_ID', 'ASC_PRIVATE_KEY_P8']) {
   assert.match(macos, new RegExp(`secrets\\.${secret}`));
 }
+assert.match(macos, /timeout-minutes: 45/);
 assert.match(macos, /notarytool submit/);
+assert.match(macos, /--wait --timeout 900/);
 assert.match(macos, /stapler staple/);
 assert.match(macos, /--prepackaged/);
 assert.match(macos, /--mac dmg zip/);
