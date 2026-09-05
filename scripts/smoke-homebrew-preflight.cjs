@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
+const { randomUUID } = require('node:crypto');
 const path = require('node:path');
 
 module.exports = async ({ github, core }) => {
@@ -16,17 +17,15 @@ module.exports = async ({ github, core }) => {
   assert.ok(start >= 0 && end > start, 'production preflight block must be present');
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
   const preflight = new AsyncFunction('github', 'core', 'process', handoff.slice(start, end));
-  const tap = 'openclaw/homebrew-tap';
-  const params = { owner: 'openclaw', repo: 'homebrew-tap' };
-  const workflowParams = { ...params, workflow_id: 'update-formula.yml' };
-
-  // Confirm these are real resources before deliberately rejecting each GET.
-  assert.equal((await github.rest.repos.get(params)).data.full_name.toLowerCase(), tap);
-  assert.equal((await github.rest.actions.getWorkflow(workflowParams)).data.state, 'active');
-  const invalidToken = 'release-workflows-deliberately-invalid-test-token';
-  // Octokit's auth hook overwrites per-request Authorization headers.
-  const invalidGithub = new github.constructor({ auth: invalidToken });
+  const realTap = { owner: 'openclaw', repo: 'homebrew-tap' };
+  assert.equal((await github.rest.repos.get(realTap)).data.full_name.toLowerCase(), 'openclaw/homebrew-tap');
+  assert.equal((await github.rest.actions.getWorkflow({ ...realTap, workflow_id: 'update-formula.yml' })).data.state, 'active');
+  // Missing resources exercise real API failures without failed-login throttling.
+  const missingResource = `release-workflows-preflight-missing-${randomUUID()}`;
   for (const failure of ['repository', 'workflow']) {
+    const params = failure === 'repository' ? { ...realTap, repo: missingResource } : realTap;
+    const tap = `${params.owner}/${params.repo}`;
+    const workflowParams = { ...params, workflow_id: 'update-formula.yml' };
     const requests = [];
     const client = {
       rest: {
@@ -34,14 +33,14 @@ module.exports = async ({ github, core }) => {
           get: async (args) => {
             assert.deepEqual(args, params);
             requests.push('repository');
-            return (failure === 'repository' ? invalidGithub : github).rest.repos.get(args);
+            return github.rest.repos.get(args);
           },
         },
         actions: {
           getWorkflow: async (args) => {
             assert.deepEqual(args, workflowParams);
             requests.push('workflow');
-            return invalidGithub.rest.actions.getWorkflow(args);
+            return github.rest.actions.getWorkflow({ ...args, workflow_id: `${missingResource}.yml` });
           },
           createWorkflowDispatch: () => {
             requests.push('dispatch');
@@ -53,13 +52,12 @@ module.exports = async ({ github, core }) => {
     const prefix = failure === 'repository'
       ? `TAP_TOKEN cannot access configured Homebrew tap ${tap}`
       : `TAP_TOKEN cannot read update-formula.yml in configured Homebrew tap ${tap}`;
-    const expected = `${prefix} (HTTP 401): Bad credentials`;
+    const expected = `${prefix} (HTTP 404): Not Found`;
     await assert.rejects(
       preflight(client, core, { env: { HOMEBREW_TAP: tap } }),
       (error) => {
         assert.equal(error.message, expected);
         assert.equal(error.cause, undefined);
-        assert.ok(!error.stack.includes(invalidToken));
         return true;
       },
     );
