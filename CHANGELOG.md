@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Sign and notarize Electron macOS apps from frozen unsigned artifacts
+  without running caller `pnpm` or packaging scripts in the credentialed job.
 - Add a protected organization-ruleset workflow that independently runs the
   Crabbox macOS release snapshot gate outside the target repository.
 - Add the repository owner as a co-owner for release-workflow trust anchors.

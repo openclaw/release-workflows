@@ -333,11 +333,13 @@ jobs:
           retention-days: 1
 
   build-macos:
-    name: 3c · Sign, notarize, and staple macOS desktop
+    name: 3c · Build unsigned macOS desktop
     needs: [validate, tag]
     runs-on: macos-15
     permissions:
       contents: read
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
@@ -351,7 +353,43 @@ jobs:
           node-version: ${{ inputs.node-version }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Import Foundation signing identity
+      - run: pnpm --filter "${{ inputs.desktop-package }}" build
+      - name: Package unsigned unpacked apps
+        run: pnpm --filter "${{ inputs.desktop-package }}" exec electron-builder --mac dir --x64 --arm64 --config.mac.identity=null --config.extraMetadata.version=${{ needs.validate.outputs.release-version }} --publish never
+      - name: Stage unsigned macOS apps
+        env:
+          BUNDLE_IDENTIFIER: ${{ inputs.bundle-identifier }}
+          DESKTOP_DIRECTORY: ${{ inputs.desktop-directory }}
+          PRODUCT_NAME: ${{ inputs.product-name }}
+        run: |
+          set -euo pipefail
+          mkdir -p raw-macos
+          for pair in x64:mac arm64:mac-arm64; do
+            arch=${pair%%:*}; directory=${pair#*:}; app="$DESKTOP_DIRECTORY/release/$directory/$PRODUCT_NAME.app"
+            [[ -d "$app" ]]
+            [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" == "$BUNDLE_IDENTIFIER" ]]
+            ditto -c -k --sequesterRsrc --keepParent "$app" "raw-macos/$PRODUCT_NAME-$arch.app.zip"
+          done
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: raw-electron-macos-${{ github.run_id }}
+          path: raw-macos
+          if-no-files-found: error
+          retention-days: 1
+
+  sign:
+    name: 3d · Sign, notarize, and staple macOS desktop
+    needs: [validate, build-macos]
+    runs-on: macos-15
+    permissions:
+      actions: read
+    steps:
+      - name: Download unsigned macOS apps
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: raw-electron-macos-${{ github.run_id }}
+          path: raw-macos
+      - name: Import policy signer into ephemeral keychain
         id: signer
         env:
           P12_BASE64: ${{ secrets.MACOS_SIGNING_P12 }}
@@ -359,65 +397,148 @@ jobs:
           REPOSITORY_TYPE: ${{ inputs.repository-type }}
         run: |
           set -euo pipefail
-          keychain="$RUNNER_TEMP/electron-release.keychain-db"; password=$(openssl rand -hex 32); p12="$RUNNER_TEMP/electron-release.p12"
+          keychain="$RUNNER_TEMP/electron-release.keychain-db"
+          password=$(openssl rand -hex 32)
+          p12="$RUNNER_TEMP/electron-release.p12"
           printf '%s' "$P12_BASE64" | base64 --decode >"$p12"
-          security create-keychain -p "$password" "$keychain"; security unlock-keychain -p "$password" "$keychain"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
           security import "$p12" -k "$keychain" -P "$P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
           security list-keychains -d user | sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//' >"$RUNNER_TEMP/electron-original-keychains.txt"
           keychains=("$keychain")
           while IFS= read -r existing; do [[ -z "$existing" || "$existing" == "$keychain" ]] || keychains+=("$existing"); done <"$RUNNER_TEMP/electron-original-keychains.txt"
           security list-keychains -d user -s "${keychains[@]}"
-          if [[ "$REPOSITORY_TYPE" == openclaw ]]; then team=FWJYW4S8P8; qualifier='OpenClaw Foundation (FWJYW4S8P8)'; else team=Y5PE65HELJ; qualifier='Peter Steinberger (Y5PE65HELJ)'; fi
+          if [[ "$REPOSITORY_TYPE" == openclaw ]]; then
+            team=FWJYW4S8P8
+            authority="Developer ID Application: OpenClaw Foundation ($team)"
+          else
+            team=Y5PE65HELJ
+            authority="Developer ID Application: Peter Steinberger ($team)"
+          fi
+          identity=$(security find-identity -v -p codesigning "$keychain" | awk -v authority="$authority" 'index($0, "\"" authority "\"") && $2 ~ /^[0-9A-Fa-f]{40}$/ { print $2; exit }')
+          [[ "$identity" =~ ^[0-9A-Fa-f]{40}$ ]] || { echo "required signing identity missing: $authority" >&2; exit 1; }
           {
+            echo "identity=$identity"
             echo "keychain=$keychain"
-            echo "qualifier=$qualifier"
             echo "team=$team"
           } >>"$GITHUB_OUTPUT"
           rm -f "$p12"
-      - name: Build signed unpacked apps
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: 'true'
-          CSC_NAME: ${{ steps.signer.outputs.qualifier }}
-        run: |
-          set -euo pipefail
-          pnpm --filter "${{ inputs.desktop-package }}" build
-          pnpm --filter "${{ inputs.desktop-package }}" exec electron-builder --mac dir --x64 --arm64 --config.mac.identity="$CSC_NAME" --config.extraMetadata.version=${{ needs.validate.outputs.release-version }} --publish never
-      - name: Notarize, staple, and package macOS apps
+      - name: Sign, notarize, staple, and package macOS apps
         env:
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_PRIVATE_KEY_P8: ${{ secrets.ASC_PRIVATE_KEY_P8 }}
           BUNDLE_IDENTIFIER: ${{ inputs.bundle-identifier }}
-          DESKTOP_DIRECTORY: ${{ inputs.desktop-directory }}
+          IDENTITY: ${{ steps.signer.outputs.identity }}
+          KEYCHAIN: ${{ steps.signer.outputs.keychain }}
           PRODUCT_NAME: ${{ inputs.product-name }}
           TEAM_ID: ${{ steps.signer.outputs.team }}
           VERSION: ${{ needs.validate.outputs.release-version }}
         run: |
           set -euo pipefail
+          inherit="$RUNNER_TEMP/electron-inherit.plist"
+          main_entitlements="$RUNNER_TEMP/electron-app.plist"
+          cat >"$inherit" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>com.apple.security.cs.allow-jit</key>
+            <true/>
+            <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+            <true/>
+            <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+            <true/>
+            <key>com.apple.security.cs.disable-library-validation</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+          cp "$inherit" "$main_entitlements"
+          sign_path() {
+            local target=$1 entitlements=$2
+            codesign --force --timestamp --options runtime --entitlements "$entitlements" --keychain "$KEYCHAIN" --sign "$IDENTITY" "$target"
+          }
+          is_macho() {
+            local desc
+            desc=$(file -b "$1")
+            [[ "$desc" == Mach-O* ]]
+          }
+          sort_paths_deepest_first() {
+            local -a raw=()
+            while IFS= read -r -d '' item; do
+              [[ -n "$item" ]] || continue
+              raw+=("$item")
+            done
+            local i j tmp n=${#raw[@]}
+            for ((i=0; i<n; i++)); do
+              for ((j=i+1; j<n; j++)); do
+                if (( ${#raw[j]} > ${#raw[i]} )); then
+                  tmp=${raw[i]}; raw[i]=${raw[j]}; raw[j]=$tmp
+                fi
+              done
+            done
+            (( n > 0 )) || return 0
+            printf '%s\0' "${raw[@]}"
+          }
+          sign_app() {
+            local app=$1 item
+            while IFS= read -r -d '' item; do
+              is_macho "$item" || continue
+              sign_path "$item" "$inherit"
+            done < <(find "$app" -type f \( -name '*.dylib' -o -name '*.so' -o -name '*.node' -o -perm +111 \) -print0 | sort_paths_deepest_first)
+            while IFS= read -r -d '' item; do
+              sign_path "$item" "$inherit"
+            done < <(find "$app" -name '*.framework' -print0 | sort_paths_deepest_first)
+            while IFS= read -r -d '' item; do
+              if [[ "$item" == "$app" ]]; then
+                continue
+              fi
+              sign_path "$item" "$inherit"
+            done < <(find "$app" -name '*.app' -print0 | sort_paths_deepest_first)
+            local requirement="identifier \"$BUNDLE_IDENTIFIER\" and anchor apple generic and certificate leaf[subject.OU] = \"$TEAM_ID\""
+            codesign --force --timestamp --options runtime --identifier "$BUNDLE_IDENTIFIER" --requirements "=designated => $requirement" --entitlements "$main_entitlements" --keychain "$KEYCHAIN" --sign "$IDENTITY" "$app"
+            codesign --verify --strict --deep -R="$requirement" "$app"
+          }
+          mkdir -p signed-macos
           p8="$RUNNER_TEMP/AuthKey_${ASC_KEY_ID}.p8"; printf '%s' "$ASC_PRIVATE_KEY_P8" >"$p8"; chmod 600 "$p8"
-          for pair in x64:mac arm64:mac-arm64; do
-            arch=${pair%%:*}; directory=${pair#*:}; app="$DESKTOP_DIRECTORY/release/$directory/$PRODUCT_NAME.app"
+          for arch in x64 arm64; do
+            mkdir -p "unsigned/$arch"
+            ditto -x -k "raw-macos/$PRODUCT_NAME-$arch.app.zip" "unsigned/$arch"
+            app="unsigned/$arch/$PRODUCT_NAME.app"
             [[ -d "$app" ]]
             [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" == "$BUNDLE_IDENTIFIER" ]]
-            codesign --verify --strict --deep "$app"
+            sign_app "$app"
             submission="$RUNNER_TEMP/$PRODUCT_NAME-$arch.zip"; ditto -c -k --sequesterRsrc --keepParent "$app" "$submission"
             xcrun notarytool submit "$submission" --key "$p8" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --no-s3-acceleration --wait --output-format json >"$submission.json"
             [[ "$(jq -r '.status' "$submission.json")" == Accepted ]]
             xcrun stapler staple "$app"; xcrun stapler validate "$app"; spctl --assess --type execute "$app"
-            pnpm --filter "${{ inputs.desktop-package }}" exec electron-builder --prepackaged "$app" --mac dmg zip --"$arch" --config.extraMetadata.version="$VERSION" --publish never
-            dmg="$DESKTOP_DIRECTORY/release/$PRODUCT_NAME-$VERSION-mac-$arch.dmg"
-            [[ -f "$dmg" ]]; xcrun stapler staple "$dmg"; xcrun stapler validate "$dmg"
+            ditto -c -k --sequesterRsrc --keepParent "$app" "signed-macos/$PRODUCT_NAME-$VERSION-mac-$arch.zip"
+            stage="$RUNNER_TEMP/dmg-$arch"
+            rm -rf "$stage"
+            mkdir -p "$stage"
+            ditto "$app" "$stage/$PRODUCT_NAME.app"
+            ln -s /Applications "$stage/Applications"
+            hdiutil create -volname "$PRODUCT_NAME $VERSION" -srcfolder "$stage" -ov -format UDZO -imagekey zlib-level=9 "signed-macos/$PRODUCT_NAME-$VERSION-mac-$arch.dmg"
+            xcrun stapler staple "signed-macos/$PRODUCT_NAME-$VERSION-mac-$arch.dmg"
+            xcrun stapler validate "signed-macos/$PRODUCT_NAME-$VERSION-mac-$arch.dmg"
           done
-          node "$DESKTOP_DIRECTORY/scripts/release-artifacts.mjs" mac "$VERSION" "$DESKTOP_DIRECTORY/release"
+          (
+            cd signed-macos
+            for file in *.dmg *.zip; do
+              shasum -a 256 "$file"
+            done | LC_ALL=C sort -k2 >"$PRODUCT_NAME-$VERSION-mac-SHA256SUMS.txt"
+          )
           rm -f "$p8"
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: electron-desktop-mac-${{ github.run_id }}
           path: |
-            ${{ inputs.desktop-directory }}/release/*.dmg
-            ${{ inputs.desktop-directory }}/release/*.zip
-            ${{ inputs.desktop-directory }}/release/*SHA256SUMS.txt
+            signed-macos/*.dmg
+            signed-macos/*.zip
+            signed-macos/*SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 1
       - name: Delete ephemeral keychain
@@ -435,7 +556,7 @@ jobs:
 
   assemble:
     name: 4 · Freeze exact Electron payload
-    needs: [validate, build-server, build-desktop, build-macos]
+    needs: [validate, build-server, build-desktop, sign]
     runs-on: ubuntu-latest
     permissions:
       actions: read
