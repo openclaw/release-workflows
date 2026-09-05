@@ -71,9 +71,8 @@ assert.match(verify, /macos-14/);
 assert.match(verify, /arm64e arm64 x86_64/);
 assert.match(verify, /ELF\.\*x86-64/);
 
-assert.match(draft, /Check out frozen tag metadata/);
-assert.match(draft, /persist-credentials: false/);
-assert.match(draft, /ref: \$\{\{ needs\.validate\.outputs\.tag \}\}/);
+assert.doesNotMatch(draft, /actions\/checkout@/);
+assert.match(draft, /GH_REPO: \$\{\{ github\.repository \}\}/);
 assert.match(draft, /gh release create .* --verify-tag/);
 assert.match(draft, /gh release view "\$TAG" --json databaseId/);
 

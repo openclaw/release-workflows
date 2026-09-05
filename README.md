@@ -38,6 +38,8 @@ The signing job never checks out or executes caller source. It re-signs the froz
 
 The signer snapshots the user keychain search list before creating its ephemeral keychain. Always-run cleanup restores that list and deletes the temporary keychain even if import fails before signer outputs are available; restoration and deletion failures are reported independently.
 
+Draft creation resolves the GitHub repository explicitly and downloads only the immutable signed payload into a fresh job workspace. It does not check out caller source, so tracked files named `release-assets/*` cannot contaminate the draft uploads.
+
 When `homebrew-formula` is nonempty, the handoff dispatches the configured tap's `update-formula.yml` with the exact verified macOS archive, waits for the uniquely correlated run, then requires the resulting formula URL and SHA-256 to equal the attested release asset. A pre-existing versioned Unreleased changelog section satisfies closeout; otherwise the workflow opens a closeout PR.
 
 See [`examples/release-swift-cli-caller.yml`](examples/release-swift-cli-caller.yml) for the thin caller. The consumer must provision `MACOS_SIGNING_P12`, `MACOS_SIGNING_P12_PASSWORD`, `ASC_KEY_ID`, `ASC_ISSUER_ID`, and `ASC_PRIVATE_KEY_P8`; Homebrew handoff additionally needs `TAP_TOKEN`.
