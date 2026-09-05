@@ -70,6 +70,15 @@ assert.match(verify, /macos-15-intel/);
 assert.match(verify, /macos-14/);
 assert.match(verify, /arm64e arm64 x86_64/);
 assert.match(verify, /ELF\.\*x86-64/);
+assert.match(verify, /unset[^\n]*GITHUB_TOKEN/);
+assert.match(verify, /unset[^\n]*ACTIONS_RUNTIME_TOKEN/);
+assert.match(
+  verify,
+  /unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_RESULTS_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL/,
+);
+const lastUnset = verify.lastIndexOf('unset ');
+assert.notEqual(lastUnset, -1, 'verify must unset Actions tokens before running the CLI');
+assert.match(verify.slice(lastUnset), /"\.\/\$cli"/, 'unpacked CLI must run after the last unset');
 
 assert.doesNotMatch(draft, /actions\/checkout@/);
 assert.match(draft, /GH_REPO: \$\{\{ github\.repository \}\}/);

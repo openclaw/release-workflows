@@ -763,6 +763,7 @@ jobs:
           codesign --verify --strict --check-notarization -R=notarized "$helper"
           [[ " $(lipo -archs "$cli") " == *' arm64 '* && " $(lipo -archs "$cli") " == *' x86_64 '* ]]
           for arch in arm64e arm64 x86_64; do lipo -archs "$helper" | tr ' ' '\n' | grep -Fxq "$arch"; done
+          unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_RESULTS_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
           "./$cli" --version | grep -F "${TAG#v}"
           mkdir linux
           tar -xzf "$LINUX_ARCHIVE_NAME" -C linux
