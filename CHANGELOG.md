@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 1.8.0 - 2026-09-06
 
 **Highlights:** A new protected organization-ruleset workflow independently checks Crabbox releases. Swift release repairs restore reliable container execution, signing-key import, draft creation, and keychain cleanup.
