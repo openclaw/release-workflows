@@ -2,10 +2,15 @@
 
 ## Unreleased
 
-- Repair Swift release container execution, signing-key import and draft lookup; isolate draft assets from caller source, restore the keychain search list, and remove temporary keychains even when setup fails. Thanks @steipete.
-- Add a protected organization-ruleset workflow that independently runs the
-  Crabbox macOS release snapshot gate outside the target repository.
-- Add the repository owner as a co-owner for release-workflow trust anchors.
+**Highlights:** A new protected organization-ruleset workflow independently checks Crabbox releases. Swift release repairs restore reliable container execution, signing-key import, draft creation, and keychain cleanup.
+
+- Add a protected organization-ruleset workflow that independently runs the Crabbox macOS release snapshot gate outside the target repository; thanks @vincentkoc.
+- Repair Swift release container execution, signing-key import, and draft lookup; isolate draft uploads from caller source and restore signing-keychain state even when setup fails; thanks @steipete.
+- Clear Actions credential variables before Swift independent verification executes the unpacked CLI; thanks @SebTardif.
+- Preserve bounded, sanitized GitHub error details when Homebrew tap repository or workflow preflight fails, with authenticated live failure coverage; thanks @steipete.
+- Refresh pinned release actions to checkout v7, setup-go v7, github-script v9, and upload-artifact v7, and update Electron build defaults to pnpm 11.25.0 and GoReleaser 2.18.0; thanks @steipete.
+- Add the repository owner as a co-owner and use valid CODEOWNERS entries for release-workflow trust anchors; thanks @vincentkoc.
+- Add an MIT license; thanks @vincentkoc.
 
 ## v1.7.5 - 2026-08-03
 
