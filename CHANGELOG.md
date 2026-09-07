@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+**Highlights:** Electron releases pick up current GoReleaser fixes and pnpm 11 maintenance without changing the package-manager major version.
+
+- Update Electron build defaults to GoReleaser 2.18.1 and pnpm 11.26.0, with pnpm/action-setup 6.1.0 pinned by commit.
+- Bring the Homebrew preflight integration check onto the same checkout v7 and github-script v9 pins as the release workflows.
+
 ## 1.8.0 - 2026-09-06
 
 **Highlights:** A new protected organization-ruleset workflow independently checks Crabbox releases. Swift release repairs restore reliable container execution, signing-key import, draft creation, and keychain cleanup.
