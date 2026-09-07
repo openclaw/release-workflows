@@ -28,3 +28,12 @@ jobs:
           sudo install -m 0755 actionlint /usr/local/bin/actionlint
       - name: Validate workflows
         run: scripts/validate-workflows.sh
+
+  swift-keychain-lifecycle:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - name: Exercise Swift keychain cleanup on native macOS
+        run: node scripts/test-swift-keychain-lifecycle.mjs --real-keychains

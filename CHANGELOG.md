@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Repair Swift release container execution, signing-key import and draft lookup; isolate draft assets from caller source, restore the keychain search list, and remove temporary keychains even when setup fails. Thanks @steipete.
 - Add a protected organization-ruleset workflow that independently runs the
   Crabbox macOS release snapshot gate outside the target repository.
 - Add the repository owner as a co-owner for release-workflow trust anchors.
