@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.8.1 - 2026-09-07
 
 **Highlights:** Electron releases pick up current GoReleaser fixes and pnpm 11 maintenance without changing the package-manager major version.
 
