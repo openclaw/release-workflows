@@ -3163,11 +3163,26 @@ jobs:
 
             const [owner, repo] = process.env.HOMEBREW_TAP.split('/');
             const workflowId = 'update-formula.yml';
+            const tapErrorDetail = (error) => {
+              const status = Number.isInteger(error?.status) ? error.status : 'unknown';
+              const apiMessage = error?.response?.data?.message;
+              let message = [apiMessage, error?.message].find((value) => typeof value === 'string' && value.trim()) || 'No GitHub error message provided';
+              // Only report the message, never the request/response objects or cause.
+              const token = core.getInput('github-token');
+              if (token) message = message.split(token).join('[REDACTED]');
+              message = message
+                .replace(/\b(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]+\b/g, '[REDACTED]')
+                .replace(/\b(Authorization\s*:\s*(?:Bearer|Basic|token))\s+\S+/gi, '$1 [REDACTED]')
+                .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+              return `(HTTP ${status}): ${message.slice(0, 1000)}`;
+            };
             let tapRepository;
             try {
               tapRepository = await github.rest.repos.get({ owner, repo });
             } catch (error) {
-              throw new Error(`TAP_TOKEN cannot access configured Homebrew tap ${process.env.HOMEBREW_TAP} (HTTP ${error.status || 'unknown'})`);
+              throw new Error(`TAP_TOKEN cannot access configured Homebrew tap ${process.env.HOMEBREW_TAP} ${tapErrorDetail(error)}`);
             }
             if (tapRepository.data.full_name.toLowerCase() !== process.env.HOMEBREW_TAP.toLowerCase()) {
               throw new Error(`TAP_TOKEN resolved an unexpected Homebrew tap: ${tapRepository.data.full_name}`);
@@ -3176,7 +3191,7 @@ jobs:
             try {
               tapWorkflow = await github.rest.actions.getWorkflow({ owner, repo, workflow_id: workflowId });
             } catch (error) {
-              throw new Error(`TAP_TOKEN cannot read ${workflowId} in configured Homebrew tap ${process.env.HOMEBREW_TAP} (HTTP ${error.status || 'unknown'})`);
+              throw new Error(`TAP_TOKEN cannot read ${workflowId} in configured Homebrew tap ${process.env.HOMEBREW_TAP} ${tapErrorDetail(error)}`);
             }
             if (tapWorkflow.data.state !== 'active') {
               throw new Error(`${process.env.HOMEBREW_TAP}/${workflowId} is not active`);

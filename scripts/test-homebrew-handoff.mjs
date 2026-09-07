@@ -400,7 +400,9 @@ async function runHandoff({
   runConclusion = 'success',
   runStartsQueued = false,
   tapFullName = homebrewTap,
+  tapToken = 'fixture-tap-token.with-$-characters',
   tapTokenPresent = true,
+  workflowError,
   workflowState = 'active',
 } = {}) {
   const fixtureRoot = mkdtempSync(join(tmpdir(), 'release-homebrew-handoff-'));
@@ -444,7 +446,10 @@ async function runHandoff({
           events.push('run-completed');
           return { data: tapRun };
         },
-        getWorkflow: async () => ({ data: { state: workflowState } }),
+        getWorkflow: async () => {
+          if (workflowError) throw workflowError;
+          return { data: { state: workflowState } };
+        },
         listWorkflowRuns: async () => {
           if (!dispatched) return { data: { workflow_runs: [{ id: 1 }] } };
           const runs = [tapRun];
@@ -479,6 +484,10 @@ async function runHandoff({
   const [sourceOwner, sourceRepo] = fixture.repository.split('/');
   const context = { repo: { owner: sourceOwner, repo: sourceRepo }, runId };
   const core = {
+    getInput: (name) => {
+      assert.equal(name, 'github-token');
+      return tapTokenPresent ? tapToken : '';
+    },
     info: (message) => info.push(message),
     setFailed: (message) => failures.push(message),
   };
@@ -844,6 +853,57 @@ end
   console.log('PASS TAP_TOKEN is validated against configured tap');
 }
 
+const tapErrorScenarios = [
+  ['expired token', { status: 403, message: 'Your token has expired.' }, '(HTTP 403): Your token has expired.'],
+  ['insufficient permissions', { status: 403, message: 'Resource not accessible by personal access token' }, '(HTTP 403): Resource not accessible by personal access token'],
+  ['rate limit', { status: 403, message: 'API rate limit exceeded' }, '(HTTP 403): API rate limit exceeded'],
+  ['bad credentials', { status: 401, message: 'Bad credentials' }, '(HTTP 401): Bad credentials'],
+  ['missing workflow or repository', { status: 404, message: 'Not Found' }, '(HTTP 404): Not Found'],
+  ['network failure', { message: 'connect ETIMEDOUT' }, '(HTTP unknown): connect ETIMEDOUT'],
+  ['missing detail', { status: 403 }, '(HTTP 403): No GitHub error message provided'],
+  ['malformed detail', { status: 403, message: { token: 'must-not-serialize' } }, '(HTTP 403): No GitHub error message provided'],
+  ['API response detail', { status: 403, message: 'Forbidden', response: { data: { message: 'Resource not accessible by integration' } } }, '(HTTP 403): Resource not accessible by integration'],
+  ['empty API detail fallback', { status: 403, message: 'Forbidden', response: { data: { message: '  ' } } }, '(HTTP 403): Forbidden'],
+  ['blank detail', { status: 403, message: '\r\n\t' }, '(HTTP 403): No GitHub error message provided'],
+  ['bounded detail', { status: 403, message: 'x'.repeat(1500) }, `(HTTP 403): ${'x'.repeat(1000)}`],
+];
+const tapErrorCallSites = [
+  ['repositoryError', 'TAP_TOKEN cannot access configured Homebrew tap steipete/homebrew-tap'],
+  ['workflowError', 'TAP_TOKEN cannot read update-formula.yml in configured Homebrew tap steipete/homebrew-tap'],
+];
+for (const [callSite, prefix] of tapErrorCallSites) {
+  for (const [name, error, detail] of tapErrorScenarios) {
+    const result = await runHandoff({ [callSite]: error });
+    assert.equal(result.thrown?.message, `${prefix} ${detail}`);
+    assert.equal(result.dispatches.length, 0);
+    assert.equal(result.formulaReads, 0);
+    console.log(`PASS ${callSite} preserves ${name} detail before dispatch`);
+  }
+
+  for (const messageField of ['message', 'response']) {
+    const tapToken = 'fixture-tap-token.with-$-characters';
+    const otherToken = `github_pat_${'fixture'.repeat(5)}`;
+    const classicToken = `ghp_${'fixture'.repeat(5)}`;
+    const basicCredential = Buffer.from('fixture-user:fixture-password').toString('base64');
+    const message = `Forbidden\r\n\t${tapToken} ${tapToken} ${otherToken} ${classicToken} Authorization: Basic ${basicCredential}; Authorization: Bearer opaque-fixture-credential`;
+    const error = {
+      status: 403,
+      request: { headers: { authorization: 'request-header-must-not-appear' } },
+      response: { headers: { 'x-private': 'response-header-must-not-appear' } },
+      ...(messageField === 'response' ? { response: { data: { message } } } : { message }),
+    };
+    const result = await runHandoff({ [callSite]: error, tapToken });
+    assert.equal(result.thrown?.message, `${prefix} (HTTP 403): Forbidden [REDACTED] [REDACTED] [REDACTED] [REDACTED] Authorization: Basic [REDACTED] Authorization: Bearer [REDACTED]`);
+    const output = [result.thrown?.stack, ...result.failures, ...result.info].join('\n');
+    for (const secret of [tapToken, otherToken, classicToken, basicCredential, 'opaque-fixture-credential', 'request-header-must-not-appear', 'response-header-must-not-appear']) {
+      assert.ok(!output.includes(secret), `${callSite} must not expose ${messageField} credentials or headers`);
+    }
+    assert.equal(result.thrown?.cause, undefined);
+    assert.equal(result.dispatches.length, 0);
+    console.log(`PASS ${callSite} sanitizes ${messageField} without exposing request/response objects`);
+  }
+}
+
 {
   const result = await runHandoff({ tapTokenPresent: false });
   assert.deepEqual(result.failures, ['TAP_TOKEN is required when homebrew-formula is set']);
@@ -851,4 +911,4 @@ end
   console.log('PASS missing TAP_TOKEN fails before tap access');
 }
 
-console.log(`Homebrew handoff tests passed (${inputMatrix.length + 38} scenarios)`);
+console.log(`Homebrew handoff tests passed (${inputMatrix.length + 38 + tapErrorCallSites.length * (tapErrorScenarios.length + 2)} scenarios)`);
