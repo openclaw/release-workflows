@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.8.2 - 2026-09-07
 
 **Highlights:** Homebrew handoffs now accept formulas that preserve signed binaries with literal `skip_clean` paths.
 
