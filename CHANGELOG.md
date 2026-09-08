@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+**Highlights:** Homebrew handoffs now accept formulas that preserve signed binaries with literal `skip_clean` paths.
+
+- Fix Go CLI Homebrew handoffs rejecting literal `skip_clean` paths after a successful tap update; retain strict formula hash checks and verify the clawdex 0.2.2 regression against both architecture attestations and published assets.
+
 ## 1.8.1 - 2026-09-07
 
 **Highlights:** Electron releases pick up current GoReleaser fixes and pnpm 11 maintenance without changing the package-manager major version.
