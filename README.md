@@ -46,7 +46,7 @@ See [`examples/release-swift-cli-caller.yml`](examples/release-swift-cli-caller.
 
 ## Electron desktop archetype
 
-`release-electron.yml` freezes a protected source commit and builds GoReleaser server archives/packages alongside Electron desktop artifacts. Credential-free jobs produce Windows NSIS/ZIP and Linux AppImage/DEB outputs. The macOS job imports an ephemeral Developer ID keychain, builds native x64 and arm64 `.app` bundles, submits and staples each app, then packages architecture-specific DMG and ZIP assets. All server and desktop bytes are merged into one immutable Actions payload with `ASSET-INVENTORY.json`, `RELEASE-NOTES.md`, and the configured checksum manifest.
+`release-electron.yml` freezes a protected source commit and builds GoReleaser server archives/packages alongside Electron desktop artifacts. Credential-free jobs produce Windows NSIS/ZIP, Linux AppImage/DEB, and unsigned native x64 and arm64 `.app` bundles. The signing job never checks out or executes caller source. It re-signs the frozen unsigned apps with the selected Developer ID policy, submits and staples each app, then packages architecture-specific DMG and ZIP assets with workflow-owned `hdiutil` and `ditto`. All server and desktop bytes are merged into one immutable Actions payload with `ASSET-INVENTORY.json`, `RELEASE-NOTES.md`, and the configured checksum manifest.
 
 Independent arm64 and Intel macOS jobs verify the full checksum set, exact source identity, sealed bundle identifier and Team ID, Gatekeeper acceptance, stapled tickets in both ZIP and DMG payloads, native architecture, plus Windows PE and Linux AppImage formats. Publication re-downloads every draft asset and requires exact name and digest equality with both attestations before undrafting.
 
