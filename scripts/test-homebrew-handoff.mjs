@@ -34,6 +34,10 @@ const extracted = JSON.parse(execFileSync(
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const executeHandoff = new AsyncFunction('github', 'context', 'core', 'process', 'require', extracted.handoff);
 const require = createRequire(import.meta.url);
+const { verifyEvidence } = require('./smoke-homebrew-formula.cjs');
+
+assert.equal(verifyEvidence().ok, true);
+console.log('PASS clawdex v0.2.2 formula against both original architecture attestations');
 
 const repository = 'openclaw/spogo';
 const tag = 'v1.2.3';
@@ -679,6 +683,37 @@ for (const [name, fixture, expectedError] of [
   console.log('PASS architecture-inverted static branches fail closed');
 }
 
+for (const declaration of ['skip_clean "bin/spogo"', 'skip_clean "bin/spogo", "lib/helper.dylib"']) {
+  const formula = formulaFor().replace('  def install', `  ${declaration}\n\n  def install`);
+  const result = await runHandoff({ formulas: [formula] });
+  assert.equal(result.thrown, undefined);
+  console.log(`PASS literal ${declaration} metadata is accepted`);
+}
+
+for (const declaration of [
+  'skip_clean ENV.fetch("PAYLOAD")',
+  'skip_clean "#{system(\'false\')}"',
+  'skip_clean *["bin/spogo"]',
+  'skip_clean "bin/spogo", system("false")',
+  'skip_clean "bin/spogo", &method(:system)',
+  'skip_clean :all',
+  'skip_clean "bin/spogo" do; system("false"); end',
+  'skip_clean',
+]) {
+  const formula = formulaFor().replace('  def install', `  ${declaration}\n\n  def install`);
+  const result = await runHandoff({ formulas: [formula] });
+  assert.match(result.thrown?.message, /timed out.*violates closed load-time grammar/);
+  console.log(`PASS dynamic or unsupported ${declaration} fails closed`);
+}
+
+{
+  const formula = formulaFor({ [targetNames.darwin_arm64]: 'f'.repeat(64) })
+    .replace('  def install', '  skip_clean "bin/spogo"\n\n  def install');
+  const result = await runHandoff({ formulas: [formula] });
+  assert.match(result.thrown?.message, /timed out.*sha256 mismatch/);
+  console.log('PASS skip_clean metadata cannot bypass formula digest binding');
+}
+
 for (const [formulaName, fixture, formula] of [
   ['slacrawl', slacrawlFixture, slacrawlFormula],
   ['graincrawl', graincrawlFixture, graincrawlFormula],
@@ -911,4 +946,4 @@ for (const [callSite, prefix] of tapErrorCallSites) {
   console.log('PASS missing TAP_TOKEN fails before tap access');
 }
 
-console.log(`Homebrew handoff tests passed (${inputMatrix.length + 38 + tapErrorCallSites.length * (tapErrorScenarios.length + 2)} scenarios)`);
+console.log('Homebrew handoff tests passed');

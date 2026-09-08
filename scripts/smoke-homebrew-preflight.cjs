@@ -64,4 +64,5 @@ module.exports = async ({ github, core }) => {
     assert.deepEqual(requests, failure === 'repository' ? ['repository'] : ['repository', 'workflow']);
     core.info(`PASS live ${failure} preflight: ${expected}; no dispatch`);
   }
+  await require('./smoke-homebrew-formula.cjs').smoke({ github, core });
 };

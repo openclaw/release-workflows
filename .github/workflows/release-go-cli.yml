@@ -3471,6 +3471,9 @@ jobs:
                   elsif command && command[0] == "version_scheme"
                     fail_grammar("version_scheme requires one non-negative integer literal") unless
                       command[1].length == 1 && !literal_nonnegative_integer(command[1][0]).nil?
+                  elsif command && command[0] == "skip_clean"
+                    fail_grammar("skip_clean requires literal path strings") if
+                      command[1].empty? || !command[1].all? { |argument| !literal_string(argument).nil? }
                   elsif command && command[0] == "depends_on"
                     fail_grammar("depends_on requires static arguments") if command[1].empty? || !command[1].all? { |argument| static_literal?(argument) }
                   elsif command && command[0] == "head"
