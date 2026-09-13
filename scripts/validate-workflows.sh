@@ -26,6 +26,7 @@ node scripts/test-electron-workflow.mjs
 node scripts/test-reproducible-rebuild.mjs
 node scripts/test-go-cli-policy-inputs.mjs
 node scripts/test-release-notes-extraction.mjs
+node scripts/test-release-notes-headings.mjs
 node scripts/test-draft-binding.mjs
 node scripts/test-homebrew-handoff.mjs
 scripts/test-signature-assertions.sh

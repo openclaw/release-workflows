@@ -451,10 +451,27 @@ jobs:
           date_pattern = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
           heading_pattern = re.compile(r"^##[ \t]+")
           fence_pattern = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})")
+          def fence_marker(content):
+              opening = fence_pattern.match(content)
+              if opening and (opening.group(1)[0] == "~" or "`" not in content[opening.end():]):
+                  return opening.group(1)
+              return None
+
+          def paragraph_tail(start):
+              tail = text[start:]
+              boundary = re.search(r"\n(?:[ \t]*\r?\n|[ ]{0,3}#{1,6}(?:[ \t]|$)|[ ]{0,3}<!--)", tail, re.M)
+              if boundary:
+                  tail = tail[:boundary.start()]
+              for candidate in re.finditer(r"\n([^\r\n]*)", tail):
+                  if fence_marker(candidate.group(1)):
+                      return tail[:candidate.start()]
+              return tail
+
           headings = []
           offset = 0
           fence = None
           in_comment = False
+          inline_end = -1
           for line in text.splitlines(keepends=True):
               content = line.rstrip("\r\n")
               if fence is not None:
@@ -465,10 +482,9 @@ jobs:
                   continue
 
               if not in_comment:
-                  opening = fence_pattern.match(content)
+                  opening = fence_marker(content)
                   if opening:
-                      marker = opening.group(1)
-                      fence = (marker[0], len(marker))
+                      fence = (opening[0], len(opening))
                       offset += len(line)
                       continue
                   if heading_pattern.match(content):
@@ -476,12 +492,41 @@ jobs:
 
               cursor = 0
               while cursor < len(content):
-                  marker = "-->" if in_comment else "<!--"
-                  marker_at = content.find(marker, cursor)
-                  if marker_at < 0:
-                      break
-                  in_comment = not in_comment
-                  cursor = marker_at + len(marker)
+                  if in_comment:
+                      closing = content.find("-->", cursor)
+                      if closing < 0:
+                          break
+                      in_comment = False
+                      cursor = closing + 3
+                  elif offset + cursor < inline_end:
+                      cursor = min(len(content), inline_end - offset)
+                  elif content[cursor] == "\\":
+                      cursor += 2
+                  elif content[cursor] == "`":
+                      marker = re.match(r"`+", content[cursor:]).group()
+                      tail_start = offset + cursor + len(marker)
+                      tail = paragraph_tail(tail_start)
+                      closing = re.search(r"(?<!`)" + marker + r"(?!`)", tail)
+                      if closing:
+                          inline_end = tail_start + closing.end()
+                      cursor += len(marker)
+                  elif content.startswith("<!--", cursor):
+                      block_start = cursor <= 3 and content[:cursor] == " " * cursor
+                      if content.startswith("<!--->", cursor):
+                          cursor += 6
+                      elif content.startswith("<!-->", cursor):
+                          cursor += 5
+                      elif block_start:
+                          in_comment = True
+                          cursor += 4
+                      else:
+                          tail_start = offset + cursor + 4
+                          closing = paragraph_tail(tail_start).find("-->")
+                          if closing >= 0:
+                              inline_end = tail_start + closing + 3
+                          cursor += 4
+                  else:
+                      cursor += 1
               offset += len(line)
 
           matches = [
