@@ -214,7 +214,7 @@ This runs actionlint on reusable, CI, and example workflows; parses every YAML d
 
 The keychain lifecycle suite (`scripts/test-swift-keychain-lifecycle.mjs`) executes all three workflows' signer and cleanup shell blocks with synthetic key material and a simulated security command, without changing local keychains. Every signer snapshots the search list before creation; cleanup restores that snapshot and attempts deletion independently, including failed imports without step outputs and empty original lists under Bash 3. CI runs the same suite with `--real-keychains` on a disposable hosted macOS runner, exercising native creation, search-list restoration, deletion and injected failures without release credentials. This native mode refuses to run outside GitHub-hosted macOS CI; it does not test real certificate import or notarization.
 
-CI also exercises the pinned actions with a named artifact upload/download and a read-only GitHub API request. Its build smoke check uses the Electron workflow's Node, pnpm, and GoReleaser defaults to build an unsigned native snapshot, unpack and run its binary against this README, and perform a frozen-lockfile pnpm install and build. With Go, GoReleaser, Node, and pnpm installed, run the same check locally:
+CI also exercises the pinned actions with a named artifact upload/download and a read-only GitHub API request. Its build smoke check uses the Electron workflow's Node, pnpm, and GoReleaser defaults to build an unsigned native snapshot, unpack and run its binary against this README, and perform a frozen-lockfile pnpm install and build. The Electron default and example caller use pnpm 11.27.0. With Go, GoReleaser, Node, and pnpm installed, run the same check locally:
 
 ```sh
 scripts/smoke-release-build.sh

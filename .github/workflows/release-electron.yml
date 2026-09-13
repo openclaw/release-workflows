@@ -15,7 +15,7 @@ on:
         type: string
       pnpm-version:
         required: false
-        default: '11.26.0'
+        default: '11.27.0'
         type: string
       goreleaser-version:
         required: false
