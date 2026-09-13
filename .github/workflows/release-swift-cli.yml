@@ -215,49 +215,73 @@ jobs:
           TAG: ${{ steps.inputs.outputs.tag }}
         with:
           script: |
-            const repository = await github.rest.repos.get(context.repo);
-            const defaultBranch = repository.data.default_branch;
-            const expectedRef = `refs/heads/${defaultBranch}`;
-            const expectedWorkflowSuffix = `@refs/heads/${defaultBranch}`;
-            if (
-              context.ref !== expectedRef ||
-              !process.env.GITHUB_WORKFLOW_REF.endsWith(expectedWorkflowSuffix)
-            ) {
-              core.setFailed(`caller must run from protected ${defaultBranch}`);
+            const repo = await github.rest.repos.get(context.repo);
+            const branchName = repo.data.default_branch;
+            if (!process.env.GITHUB_WORKFLOW_REF.endsWith(`@refs/heads/${branchName}`)) {
+              core.setFailed(`caller workflow must run from protected ${branchName}`);
               return;
             }
-            const branch = await github.rest.repos.getBranch({ ...context.repo, branch: defaultBranch });
+            const branch = await github.rest.repos.getBranch({
+              ...context.repo,
+              branch: branchName,
+            });
+            if (!branch.data.protected) {
+              core.setFailed(`default branch ${branchName} is not protected`);
+              return;
+            }
             const branchHead = branch.data.commit.sha;
-            if (context.sha !== branchHead) {
-              core.setFailed(
-                `caller workflow SHA ${context.sha} is not current ${defaultBranch} head ${branchHead}`,
-              );
+            if (context.ref !== `refs/heads/${branchName}` || context.sha !== branchHead) {
+              core.setFailed(`caller must run at protected ${branchName} head ${branchHead}; got ${context.ref}@${context.sha}`);
               return;
             }
+
             let targetSha = branchHead;
+            let targetSource = 'protected-head';
             let tagObjectSha = '';
+            let existingTag = null;
             try {
-              const ref = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
-              if (ref.data.object.type !== 'tag') throw new Error('existing release tag must be annotated');
-              tagObjectSha = ref.data.object.sha;
-              const tagObject = await github.rest.git.getTag({ ...context.repo, tag_sha: tagObjectSha });
-              if (tagObject.data.object.type !== 'commit')
-                throw new Error('release tag must peel directly to a commit');
-              targetSha = tagObject.data.object.sha;
+              existingTag = await github.rest.git.getRef({
+                ...context.repo,
+                ref: `tags/${process.env.TAG}`,
+              });
             } catch (error) {
               if (error.status !== 404) throw error;
             }
-            const comparison = await github.rest.repos.compareCommitsWithBasehead({
-              ...context.repo,
-              basehead: `${targetSha}...${branchHead}`,
-            });
-            if (!['ahead', 'identical'].includes(comparison.data.status)) {
-              core.setFailed(`release target ${targetSha} is not reachable from ${defaultBranch}`);
-              return;
+
+            if (existingTag !== null) {
+              if (existingTag.data.object.type !== 'tag') {
+                core.setFailed(`existing tag is lightweight, not annotated: ${process.env.TAG}`);
+                return;
+              }
+              tagObjectSha = existingTag.data.object.sha;
+              const tagObject = await github.rest.git.getTag({
+                ...context.repo,
+                tag_sha: tagObjectSha,
+              });
+              if (tagObject.data.object.type !== 'commit') {
+                core.setFailed(`annotated tag does not peel directly to a commit: ${process.env.TAG}`);
+                return;
+              }
+              targetSha = tagObject.data.object.sha;
+              targetSource = 'annotated-tag';
+
+              const comparison = await github.rest.repos.compareCommitsWithBasehead({
+                ...context.repo,
+                basehead: `${targetSha}...${branchHead}`,
+                per_page: 1,
+              });
+              if (!['ahead', 'identical'].includes(comparison.data.status)) {
+                core.setFailed(`tag commit ${targetSha} is not reachable from protected ${branchName} head ${branchHead}`);
+                return;
+              }
+              core.info(`retry target frozen by annotated tag ${process.env.TAG} at ${targetSha}`);
+            } else {
+              core.info(`first-attempt target is protected ${branchName} head ${branchHead}`);
             }
-            core.setOutput('default-branch', defaultBranch);
+            core.setOutput('default-branch', branchName);
             core.setOutput('tag-object-sha', tagObjectSha);
             core.setOutput('target-sha', targetSha);
+            core.setOutput('target-source', targetSource);
 
       - name: Check out exact release target
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

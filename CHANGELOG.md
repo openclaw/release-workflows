@@ -6,6 +6,7 @@
 - Keep later release headings visible after literal HTML-comment markers in inline code or escaped Markdown across all three archetypes.
 - Restore Go/Electron keychain search lists captured before creation, clean up failed imports without step outputs, and attempt keychain deletion even when restoration fails.
 - Resolve the Electron draft repository explicitly without checking out caller source, and validate the draft ID before handing it to publication.
+- Require protected branches for Swift/Electron releases and fail on missing annotated-tag objects instead of falling back to the current branch head.
 - Pin the Swift 6.3.3 Linux image by digest and make validation CI select its Node/Go toolchains explicitly, with bounded jobs and cancellation of superseded pull-request runs.
 
 ## 1.8.2 - 2026-09-07

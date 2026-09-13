@@ -7,6 +7,8 @@ Fleet-standard reusable release pipelines. Every archetype follows one trust bou
 3. independently verify that artifact on arm64 and x86_64 without signing or release-write credentials, emitting the exact verified `ASSET-INVENTORY.json`, configured checksum asset (`SHA256SUMS` by default), plus a verdict;
 4. let the publisher re-download every draft asset and require exact name and digest equality with both verifier attestations before un-drafting.
 
+All archetypes reject an unprotected default branch. Only a missing tag ref starts a release from the protected head; a missing or unreadable annotated-tag object fails validation without exporting a build target.
+
 Callers pin the stable `@v1` compatibility tag, never a branch or pre-release tag:
 
 ```yaml
