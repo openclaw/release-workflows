@@ -202,6 +202,8 @@ Run:
 scripts/validate-workflows.sh
 ```
 
+The shell entry point orchestrates actionlint, executable regression tests and safe YAML loading. `scripts/validate-workflow-contracts.py` checks the release job topology, permissions, required controls and action pins; run it from the repository root for focused contract validation. Both validation entry points are code-owned with the workflow sources.
+
 This runs actionlint on reusable, CI, and example workflows; parses every YAML document with Psych safe loading; executes adversarial frozen-tag, native-build selection, nFPM target/inventory, draft-binding, Homebrew tap-selection, explicit-assets, fallback, live slacrawl/graincrawl platform-formula, and post-dispatch formula-binding scenarios; and enforces the required job/input topology, actions-read-only dual-architecture verifier, publisher hash binding, and immutable action references.
 
 Swift keychain lifecycle tests execute the workflow's signer and cleanup shell blocks with synthetic key material and a simulated security command, without changing local keychains. CI also runs `node scripts/test-swift-keychain-lifecycle.mjs --real-keychains` on a disposable hosted macOS runner, exercising native keychain creation, search-list restoration, deletion, and injected failures without release credentials. This native mode refuses to run outside GitHub-hosted macOS CI; it does not test real certificate import or notarization.
