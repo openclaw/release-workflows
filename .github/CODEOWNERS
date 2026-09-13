@@ -2,4 +2,5 @@
 /.github/CODEOWNERS @vincentkoc @steipete
 /.github/workflows/ @vincentkoc @steipete
 /scripts/validate-workflows.sh @vincentkoc @steipete
+/scripts/validate-workflow-contracts.py @vincentkoc @steipete
 /scripts/test-required-workflows.mjs @vincentkoc @steipete
