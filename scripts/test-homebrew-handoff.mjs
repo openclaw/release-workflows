@@ -7,30 +7,13 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
-import { fileURLToPath } from 'node:url';
+import { loadWorkflow, workflowStep } from './workflow-source.cjs';
 
-const workflowPath = fileURLToPath(new URL('../.github/workflows/release-go-cli.yml', import.meta.url));
-const rubyExtractor = String.raw`
-  workflow = Psych.safe_load(
-    File.read(ARGV.fetch(0)),
-    permitted_classes: [],
-    permitted_symbols: [],
-    aliases: false
-  )
-  inputs_step = workflow.fetch('jobs').fetch('validate').fetch('steps').find do |candidate|
-    candidate['name'] == 'Validate inputs'
-  end
-  handoff_step = workflow.fetch('jobs').fetch('handoff').fetch('steps').find do |candidate|
-    candidate['name'] == 'Dispatch configured tap and verify formula hashes'
-  end
-  abort 'input or handoff step not found' unless inputs_step && handoff_step
-  print JSON.generate(inputs: inputs_step.fetch('run'), handoff: handoff_step.fetch('with').fetch('script'))
-`;
-const extracted = JSON.parse(execFileSync(
-  'ruby',
-  ['-rpsych', '-rjson', '-e', rubyExtractor, workflowPath],
-  { encoding: 'utf8' },
-));
+const workflow = loadWorkflow();
+const extracted = {
+  inputs: workflowStep(workflow, 'validate', 'name', 'Validate inputs').run,
+  handoff: workflowStep(workflow, 'handoff', 'name', 'Dispatch configured tap and verify formula hashes').with.script,
+};
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const executeHandoff = new AsyncFunction('github', 'context', 'core', 'process', 'require', extracted.handoff);
 const require = createRequire(import.meta.url);

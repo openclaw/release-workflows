@@ -5,7 +5,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { loadWorkflow, workflowStep } from './workflow-source.cjs';
 
 const realKeychains = process.argv.includes('--real-keychains');
 if (realKeychains) {
@@ -14,13 +14,9 @@ if (realKeychains) {
   assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted', 'native keychain tests require a disposable hosted runner');
 }
 
-const workflowPath = fileURLToPath(new URL('../.github/workflows/release-swift-cli.yml', import.meta.url));
-const steps = JSON.parse(execFileSync('ruby', ['-rpsych', '-rjson', '-e', String.raw`
-  workflow = Psych.safe_load(File.read(ARGV.fetch(0)), aliases: false)
-  puts JSON.generate(workflow.fetch('jobs').fetch('sign').fetch('steps'))
-`, workflowPath], { encoding: 'utf8' }));
-const signer = steps.find((step) => step.id === 'signer');
-const cleanup = steps.find((step) => step.name === 'Restore signing keychain');
+const workflow = loadWorkflow('release-swift-cli.yml');
+const signer = workflowStep(workflow, 'sign', 'id', 'signer');
+const cleanup = workflowStep(workflow, 'sign', 'name', 'Restore signing keychain');
 assert.equal(cleanup.if, 'always()');
 
 const nativeSecurity = (args) => execFileSync('/usr/bin/security', args, { encoding: 'utf8' });

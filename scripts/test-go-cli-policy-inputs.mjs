@@ -5,26 +5,10 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { loadWorkflow, workflowStep } from './workflow-source.cjs';
 
-const workflowPath = fileURLToPath(new URL('../.github/workflows/release-go-cli.yml', import.meta.url));
-const extractor = String.raw`
-  workflow = Psych.safe_load(
-    File.read(ARGV.fetch(0)),
-    permitted_classes: [],
-    permitted_symbols: [],
-    aliases: false
-  )
-  job, name = ARGV.fetch(1), ARGV.fetch(2)
-  step = workflow.fetch('jobs').fetch(job).fetch('steps').find { |candidate| candidate['name'] == name }
-  abort "workflow step not found: #{job} #{name}" unless step
-  print step.fetch('run')
-`;
-const extractStep = (job, name) => execFileSync(
-  'ruby',
-  ['-rpsych', '-e', extractor, workflowPath, job, name],
-  { encoding: 'utf8' },
-);
+const workflow = loadWorkflow();
+const extractStep = (job, name) => workflowStep(workflow, job, 'name', name).run;
 
 const inputScript = extractStep('validate', 'Validate inputs');
 const signedTagScript = extractStep('validate', 'Verify required SSH-signed tag');

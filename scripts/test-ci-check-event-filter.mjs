@@ -1,40 +1,14 @@
 #!/usr/bin/env node
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { extractMarkedSource, loadWorkflow, workflowStep } from './workflow-source.cjs';
 
-const workflowPath = fileURLToPath(new URL('../.github/workflows/release-go-cli.yml', import.meta.url));
-const extractor = String.raw`
-  workflow = Psych.safe_load(
-    File.read(ARGV.fetch(0)),
-    permitted_classes: [],
-    permitted_symbols: [],
-    aliases: false
-  )
-  step = workflow.fetch('jobs').fetch('validate').fetch('steps').find do |candidate|
-    candidate['name'] == 'Require independent CI green on frozen target'
-  end
-  abort 'CI gate step not found' unless step
-  print step.fetch('with').fetch('script')
-`;
-const script = execFileSync('ruby', ['-rpsych', '-e', extractor, workflowPath], { encoding: 'utf8' });
-const begin = '// ci-check-event-filter-begin';
-const end = '// ci-check-event-filter-end';
-const start = script.indexOf(begin);
-const finish = script.indexOf(end);
-assert.notEqual(start, -1);
-assert.notEqual(finish, -1);
-const source = `${script.slice(start + begin.length, finish)}\nreturn filterCheckRunsByEvent;`;
+const script = workflowStep(loadWorkflow(), 'validate', 'name', 'Require independent CI green on frozen target').with.script;
+const source = `${extractMarkedSource(script, '// ci-check-event-filter-begin', '// ci-check-event-filter-end')}
+return filterCheckRunsByEvent;`;
 const loadFilter = new Function(source);
 const filterCheckRunsByEvent = loadFilter();
-const gateBegin = '// ci-check-gate-helpers-begin';
-const gateEnd = '// ci-check-gate-helpers-end';
-const gateStart = script.indexOf(gateBegin);
-const gateFinish = script.indexOf(gateEnd);
-assert.notEqual(gateStart, -1);
-assert.notEqual(gateFinish, -1);
-const gateSource = `${script.slice(gateStart + gateBegin.length, gateFinish)}
+const gateSource = `${extractMarkedSource(script, '// ci-check-gate-helpers-begin', '// ci-check-gate-helpers-end')}
 return { evaluateAllChecks, evaluateRequiredChecks, evaluateCiGate, waitForCiGate };`;
 const loadGateHelpers = new Function(gateSource);
 const { evaluateAllChecks, evaluateRequiredChecks, evaluateCiGate, waitForCiGate } = loadGateHelpers();

@@ -2,34 +2,15 @@
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
-import { fileURLToPath } from 'node:url';
+import { loadWorkflow, workflowStep } from './workflow-source.cjs';
 
-const workflowPath = fileURLToPath(new URL('../.github/workflows/release-go-cli.yml', import.meta.url));
-const rubyExtractor = String.raw`
-  workflow = Psych.safe_load(
-    File.read(ARGV.fetch(0)),
-    permitted_classes: [],
-    permitted_symbols: [],
-    aliases: false
-  )
-  step = workflow.fetch('jobs').fetch('publish').fetch('steps').find do |candidate|
-    candidate['id'] == 'publish'
-  end
-  abort 'draft binding publisher step not found' unless step
-  print step.fetch('with').fetch('script')
-`;
-const publisherScript = execFileSync(
-  'ruby',
-  ['-rpsych', '-e', rubyExtractor, workflowPath],
-  { encoding: 'utf8' },
-);
+const publisherScript = workflowStep(loadWorkflow(), 'publish', 'id', 'publish').with.script;
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-const executePublisher = new AsyncFunction('github', 'context', 'core', 'process', 'require', publisherScript);
+const executePublisher = new AsyncFunction('github', 'context', 'core', 'process', 'require', 'setTimeout', publisherScript);
 const require = createRequire(import.meta.url);
 
 const repository = 'openclaw/fixture';
@@ -114,6 +95,7 @@ async function runScenario(mutate = () => {}, publisherRunAttempt = runAttempt, 
   let updateCalls = 0;
   let deleteCalls = 0;
   const downloadCalls = new Map();
+  const retryDelays = [];
   const updateRequests = [];
   const outputs = new Map();
   const failures = [];
@@ -179,14 +161,17 @@ async function runScenario(mutate = () => {}, publisherRunAttempt = runAttempt, 
         TARGET_SHA: targetSha,
         VERIFICATION_PAYLOAD_ARTIFACT: verificationPayloadArtifact,
       },
-    }, require);
+    }, require, (callback, delay) => {
+      retryDelays.push(delay);
+      callback();
+    });
   } catch (error) {
     thrown = error;
   } finally {
     process.chdir(originalCwd);
     rmSync(fixtureRoot, { recursive: true, force: true });
   }
-  return { deleteCalls, downloadCalls, failures, outputs, thrown, updateCalls, updateRequests };
+  return { deleteCalls, downloadCalls, failures, outputs, retryDelays, thrown, updateCalls, updateRequests };
 }
 
 const tests = [
@@ -204,6 +189,7 @@ const tests = [
     });
     assert.equal(result.thrown, undefined);
     assert.equal(result.downloadCalls.get(1), 2);
+    assert.deepEqual(result.retryDelays, [1000]);
     assert.equal(result.updateCalls, 1);
   }],
   ['non-transient GitHub asset error is not retried', async () => {
@@ -212,6 +198,7 @@ const tests = [
     });
     assert.equal(result.thrown?.status, 403);
     assert.equal(result.downloadCalls.get(1), 1);
+    assert.deepEqual(result.retryDelays, []);
     assert.equal(result.updateCalls, 0);
   }],
   ['partial publisher rerun reuses producer-bound attestations', async () => {

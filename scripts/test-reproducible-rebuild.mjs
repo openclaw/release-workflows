@@ -6,24 +6,12 @@ import { createRequire } from 'node:module';
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { extractMarkedSource, loadWorkflow, workflowStep } from './workflow-source.cjs';
 
 const require = createRequire(import.meta.url);
-const workflowPath = fileURLToPath(new URL('../.github/workflows/release-go-cli.yml', import.meta.url));
-const extractor = String.raw`
-  workflow = Psych.safe_load(File.read(ARGV.fetch(0)), permitted_classes: [], permitted_symbols: [], aliases: false)
-  step = workflow.fetch('jobs').fetch('compare').fetch('steps').find { |candidate| candidate['name'] == 'Require byte-identical independent rebuild' }
-  abort 'reproducible rebuild step not found' unless step
-  print step.fetch('run')
-`;
-const script = execFileSync('ruby', ['-rpsych', '-e', extractor, workflowPath], { encoding: 'utf8' });
-const begin = '// reproducible-rebuild-verifier-begin';
-const end = '// reproducible-rebuild-verifier-end';
-const start = script.indexOf(begin);
-const finish = script.indexOf(end);
-assert.notEqual(start, -1);
-assert.notEqual(finish, -1);
-const verify = new Function('require', 'process', script.slice(start + begin.length, finish));
+const script = workflowStep(loadWorkflow(), 'compare', 'name', 'Require byte-identical independent rebuild').run;
+const verify = new Function('require', 'process',
+  extractMarkedSource(script, '// reproducible-rebuild-verifier-begin', '// reproducible-rebuild-verifier-end'));
 
 const targets = [
   ['linux', 'amd64', 'fixture'],

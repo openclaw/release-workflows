@@ -1,17 +1,9 @@
 const assert = require('node:assert/strict');
-const { execFileSync } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
-const path = require('node:path');
+const { loadWorkflow, workflowStep } = require('./workflow-source.cjs');
 
 module.exports = async ({ github, core }) => {
-  const workflowPath = path.join(__dirname, '../.github/workflows/release-go-cli.yml');
-  const handoff = execFileSync('ruby', ['-rpsych', '-e', `
-    workflow = Psych.safe_load(File.read(ARGV.fetch(0)), aliases: false)
-    step = workflow.fetch('jobs').fetch('handoff').fetch('steps').find do |candidate|
-      candidate['name'] == 'Dispatch configured tap and verify formula hashes'
-    end
-    print step.fetch('with').fetch('script')
-  `, workflowPath], { encoding: 'utf8' });
+  const handoff = workflowStep(loadWorkflow(), 'handoff', 'name', 'Dispatch configured tap and verify formula hashes').with.script;
   const start = handoff.indexOf("const [owner, repo] = process.env.HOMEBREW_TAP.split('/');");
   const end = handoff.indexOf('const sleep = ', start);
   assert.ok(start >= 0 && end > start, 'production preflight block must be present');

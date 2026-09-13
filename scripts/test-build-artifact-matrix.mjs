@@ -13,34 +13,11 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { extractMarkedSource, loadWorkflow, workflowStep } from './workflow-source.cjs';
 
 const require = createRequire(import.meta.url);
-const workflowPath = fileURLToPath(new URL('../.github/workflows/release-go-cli.yml', import.meta.url));
-const extractor = String.raw`
-  workflow = Psych.safe_load(
-    File.read(ARGV.fetch(0)),
-    permitted_classes: [],
-    permitted_symbols: [],
-    aliases: false
-  )
-  job, selector, value = ARGV.fetch(1), ARGV.fetch(2), ARGV.fetch(3)
-  step = workflow.fetch('jobs').fetch(job).fetch('steps').find { |candidate| candidate[selector] == value }
-  abort "workflow step not found: #{job} #{selector}=#{value}" unless step
-  print step.fetch('run')
-`;
-const extractStep = (job, selector, value) => execFileSync(
-  'ruby',
-  ['-rpsych', '-e', extractor, workflowPath, job, selector, value],
-  { encoding: 'utf8' },
-);
-const extractMarkedSource = (script, begin, end) => {
-  const start = script.indexOf(begin);
-  const finish = script.indexOf(end);
-  assert.notEqual(start, -1, `missing marker: ${begin}`);
-  assert.notEqual(finish, -1, `missing marker: ${end}`);
-  return script.slice(start + begin.length, finish);
-};
+const workflow = loadWorkflow();
+const extractStep = (job, selector, value) => workflowStep(workflow, job, selector, value).run;
 
 const buildModeScript = extractStep('build', 'id', 'build-mode');
 const assemblerScript = extractStep('sign', 'name', 'Assemble signed archives and nFPM packages');

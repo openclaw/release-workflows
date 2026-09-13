@@ -4,15 +4,12 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join, resolve } from 'node:path';
+import { loadWorkflow, workflowStep } from './workflow-source.cjs';
 
-const workflowPath = process.argv[2] ?? fileURLToPath(new URL('../.github/workflows/release-swift-cli.yml', import.meta.url));
-const steps = JSON.parse(execFileSync('ruby', ['-rpsych', '-rjson', '-e', `
-  workflow = Psych.safe_load(File.read(ARGV.fetch(0)), aliases: false)
-  puts JSON.generate(workflow.fetch('jobs').fetch('draft').fetch('steps'))
-`, workflowPath], { encoding: 'utf8' }));
-const release = steps.find((step) => step.id === 'release');
+const workflow = loadWorkflow(process.argv[2] ? resolve(process.argv[2]) : 'release-swift-cli.yml');
+const steps = workflow.jobs.draft.steps;
+const release = workflowStep(workflow, 'draft', 'id', 'release');
 const root = mkdtempSync(join(tmpdir(), 'swift-draft-isolation-'));
 const workspace = join(root, 'workspace');
 const source = join(root, 'tagged-source');

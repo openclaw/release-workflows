@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import {
   mkdtempSync,
@@ -13,49 +12,12 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { extractMarkedSource, loadWorkflow, workflowStep } from './workflow-source.cjs';
 
 const require = createRequire(import.meta.url);
-const workflowPath = fileURLToPath(new URL('../.github/workflows/release-go-cli.yml', import.meta.url));
-const extractor = String.raw`
-  workflow = Psych.safe_load(
-    File.read(ARGV.fetch(0)),
-    permitted_classes: [],
-    permitted_symbols: [],
-    aliases: false
-  )
-  step = workflow.fetch('jobs').fetch('merge-builds').fetch('steps').find do |candidate|
-    candidate['name'] == 'Merge host payloads without collisions'
-  end
-  abort 'split-host merge step not found' unless step
-  print step.fetch('run')
-`;
-const mergeStep = execFileSync(
-  'ruby',
-  ['-rpsych', '-e', extractor, workflowPath],
-  { encoding: 'utf8' },
-);
-const gateExtractor = String.raw`
-  require "json"
-  workflow = Psych.safe_load(
-    File.read(ARGV.fetch(0)),
-    permitted_classes: [],
-    permitted_symbols: [],
-    aliases: false
-  )
-  jobs = workflow.fetch("jobs")
-  print JSON.generate(
-    %w[sign compare draft verify publish handoff closeout].to_h do |name|
-      job = jobs.fetch(name)
-      [name, { "if" => job.fetch("if"), "needs" => Array(job.fetch("needs")) }]
-    end
-  )
-`;
-const continuationGates = JSON.parse(execFileSync(
-  'ruby',
-  ['-rpsych', '-e', gateExtractor, workflowPath],
-  { encoding: 'utf8' },
-));
+const workflow = loadWorkflow();
+const mergeStep = workflowStep(workflow, 'merge-builds', 'name', 'Merge host payloads without collisions').run;
+const continuationGates = workflow.jobs;
 
 const requiredContinuationNeeds = {
   sign: ['validate', 'build', 'merge-builds'],
@@ -81,13 +43,8 @@ assert.match(continuationGates.closeout.if, /needs\.handoff\.result == 'success'
 assert.match(continuationGates.closeout.if, /needs\.handoff\.result == 'skipped'/);
 console.log('PASS optional split skip cannot bypass release continuation gates');
 
-const begin = '// split-host-artifact-merger-begin';
-const end = '// split-host-artifact-merger-end';
-const start = mergeStep.indexOf(begin);
-const finish = mergeStep.indexOf(end);
-assert.notEqual(start, -1, `missing marker: ${begin}`);
-assert.notEqual(finish, -1, `missing marker: ${end}`);
-const executeMerger = new Function('require', 'process', mergeStep.slice(start + begin.length, finish));
+const executeMerger = new Function('require', 'process',
+  extractMarkedSource(mergeStep, '// split-host-artifact-merger-begin', '// split-host-artifact-merger-end'));
 
 const artifact = (platform, type = 'Binary') => {
   const [goos, goarch] = platform.split('/');

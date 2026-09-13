@@ -1,28 +1,9 @@
 #!/usr/bin/env node
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { loadWorkflow, workflowStep } from './workflow-source.cjs';
 
-const workflowPath = fileURLToPath(new URL('../.github/workflows/release-go-cli.yml', import.meta.url));
-const rubyExtractor = String.raw`
-  workflow = Psych.safe_load(
-    File.read(ARGV.fetch(0)),
-    permitted_classes: [],
-    permitted_symbols: [],
-    aliases: false
-  )
-  step = workflow.fetch('jobs').fetch('validate').fetch('steps').find do |candidate|
-    candidate['id'] == 'repository'
-  end
-  abort 'release target resolver step not found' unless step
-  print step.fetch('with').fetch('script')
-`;
-const resolverScript = execFileSync(
-  'ruby',
-  ['-rpsych', '-e', rubyExtractor, workflowPath],
-  { encoding: 'utf8' },
-);
+const resolverScript = workflowStep(loadWorkflow(), 'validate', 'id', 'repository').with.script;
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const executeResolver = new AsyncFunction('github', 'context', 'core', 'process', resolverScript);
 

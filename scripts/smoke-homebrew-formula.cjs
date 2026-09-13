@@ -1,8 +1,8 @@
 const assert = require('node:assert/strict');
-const { execFileSync } = require('node:child_process');
 const { createHash } = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { loadWorkflow, workflowStep } = require('./workflow-source.cjs');
 
 const fixtureRoot = path.join(__dirname, 'fixtures/homebrew-clawdex-v0.2.2');
 const attestations = Object.fromEntries(['arm64', 'x86_64'].map((architecture) => [
@@ -12,13 +12,7 @@ const formula = fs.readFileSync(path.join(fixtureRoot, 'clawdex.rb'), 'utf8');
 
 // Execute the production evidence and formula validators, excluding tap dispatch/polling.
 function verifyEvidence(source = formula, evidence = attestations) {
-  const handoff = execFileSync('ruby', ['-rpsych', '-e', `
-    workflow = Psych.safe_load(File.read(ARGV.fetch(0)), aliases: false)
-    step = workflow.fetch('jobs').fetch('handoff').fetch('steps').find do |candidate|
-      candidate['name'] == 'Dispatch configured tap and verify formula hashes'
-    end
-    print step.fetch('with').fetch('script')
-  `, path.join(__dirname, '../.github/workflows/release-go-cli.yml')], { encoding: 'utf8' });
+  const handoff = workflowStep(loadWorkflow(), 'handoff', 'name', 'Dispatch configured tap and verify formula hashes').with.script;
   const evidenceStart = handoff.indexOf("const fs = require('fs');");
   const evidenceEnd = handoff.indexOf("const [owner, repo] = process.env.HOMEBREW_TAP.split('/');");
   const formulaStart = handoff.indexOf('const verifyFormula = (source) => {');
