@@ -17,7 +17,6 @@ function runMetadata(changelog, version = '1.2.3', packageManifest = { name: 'fi
   writeFileSync(join(fixtureRoot, 'CHANGELOG.md'), changelog);
   writeFileSync(join(fixtureRoot, 'go.mod'), 'module example.test/fixture\n\ngo 1.24\n');
   writeFileSync(join(fixtureRoot, '.goreleaser.yml'), 'version: 2\n');
-  // Keep Bash 3.2 nounset behavior deterministic by making package_files non-empty.
   writeFileSync(join(fixtureRoot, 'package.json'), JSON.stringify(packageManifest));
 
   let thrown;
