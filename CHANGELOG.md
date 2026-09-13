@@ -4,6 +4,7 @@
 
 - Preserve exact Swift/Electron release notes, including CRLF, and ignore headings inside fenced code or HTML comments when selecting the dated release section.
 - Keep later release headings visible after literal HTML-comment markers in inline code or escaped Markdown across all three archetypes.
+- Restore Go/Electron keychain search lists captured before creation, clean up failed imports without step outputs, and attempt keychain deletion even when restoration fails.
 - Pin the Swift 6.3.3 Linux image by digest and make validation CI select its Node/Go toolchains explicitly, with bounded jobs and cancellation of superseded pull-request runs.
 
 ## 1.8.2 - 2026-09-07

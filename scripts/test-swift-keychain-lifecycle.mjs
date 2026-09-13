@@ -14,11 +14,6 @@ if (realKeychains) {
   assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted', 'native keychain tests require a disposable hosted runner');
 }
 
-const workflow = loadWorkflow('release-swift-cli.yml');
-const signer = workflowStep(workflow, 'sign', 'id', 'signer');
-const cleanup = workflowStep(workflow, 'sign', 'name', 'Restore signing keychain');
-assert.equal(cleanup.if, 'always()');
-
 const nativeSecurity = (args) => execFileSync('/usr/bin/security', args, { encoding: 'utf8' });
 const parseKeychains = (text) => text.split('\n').map((line) => line.trim().replace(/^"|"$/g, '')).filter(Boolean);
 const hostKeychains = realKeychains ? parseKeychains(nativeSecurity(['list-keychains', '-d', 'user'])) : [];
@@ -65,72 +60,95 @@ if (command === 'find-identity') {
 fs.writeFileSync(statePath, JSON.stringify(state));
 `;
 
-function runScenario(name, { empty = false, importFailure = '', cleanupFailure = '', skipImport = false } = {}) {
-  const root = realpathSync(mkdtempSync(path.join(tmpdir(), 'swift-keychain-test-')));
-  const keychain = path.join(root, 'swift-release.keychain-db');
-  const original = empty ? [] : [path.join(root, 'login fixture.keychain-db'), path.join(root, 'other.keychain-db')];
-  const statePath = path.join(root, 'security-state.json');
-  const readSearchList = () => realKeychains
-    ? parseKeychains(nativeSecurity(['list-keychains', '-d', 'user']))
-    : JSON.parse(readFileSync(statePath)).keychains;
-  try {
-    if (realKeychains) {
-      for (const item of original) nativeSecurity(['create-keychain', '-p', 'test-keychain-password', item]);
-      nativeSecurity(['list-keychains', '-d', 'user', '-s', ...original]);
-    }
-    writeFileSync(statePath, JSON.stringify({ keychains: original }));
-    // macOS can expose the login keychain after an empty search-list request.
-    const expectedOriginal = readSearchList();
-    if (!empty) assert.deepEqual(expectedOriginal, original, 'fixture search list must be installed');
-    if (realKeychains && empty) console.log(`Native empty-list request exposes ${expectedOriginal.length} keychain(s) before signing`);
-    const bin = path.join(root, 'bin');
-    mkdirSync(bin);
-    for (const command of ['security', 'openssl']) writeFileSync(path.join(bin, command), fixtureCommand, { mode: 0o755 });
-    const output = path.join(root, 'output');
-    writeFileSync(output, '');
-    const env = {
-      PATH: `${bin}:${process.env.PATH}`,
-      RUNNER_TEMP: root,
-      GITHUB_OUTPUT: output,
-      P12_BASE64: Buffer.from('fixture material').toString('base64'),
-      P12_PASSWORD: 'fixture-password',
-      REPOSITORY_TYPE: 'openclaw',
-      REAL_KEYCHAINS: realKeychains ? '1' : '0',
-    };
-    if (!skipImport) {
-      const result = spawnSync('/bin/bash', ['-c', signer.run], {
-        env: { ...env, PHASE: 'import', FAIL_SECURITY: importFailure }, encoding: 'utf8',
-      });
-      assert.equal(result.status, importFailure ? 1 : 0, `${name}: signer\n${result.stderr}`);
-      if (!importFailure) assert.ok(readSearchList().includes(keychain), 'signing keychain must be searchable');
-    }
-    const exportedKeychain = readFileSync(output, 'utf8').match(/^keychain=(.*)$/m)?.[1] ?? '';
-    const result = spawnSync('/bin/bash', ['-c', cleanup.run], {
-      env: { ...env, KEYCHAIN: exportedKeychain, PHASE: 'cleanup', FAIL_SECURITY: cleanupFailure }, encoding: 'utf8',
-    });
-    assert.equal(result.status, cleanupFailure ? 1 : 0, `${name}: cleanup\n${result.stderr}`);
-    if (cleanupFailure !== 'restore') assert.deepEqual(readSearchList(), expectedOriginal, `${name}: original search list must be restored`);
-    if (cleanupFailure !== 'delete-keychain') assert.equal(existsSync(keychain), false, `${name}: ephemeral keychain must be deleted`);
-    for (const file of ['swift-release.p12', 'swift-release-certificate.pem', 'swift-release-private-key.pem']) {
-      assert.equal(existsSync(path.join(root, file)), false, `${name}: temporary material must be removed`);
-    }
-    console.log(`PASS ${name}${realKeychains ? ' (native macOS keychains)' : ''}`);
-  } finally {
-    if (realKeychains) {
-      nativeSecurity(['list-keychains', '-d', 'user', '-s', ...hostKeychains]);
-      for (const item of [keychain, ...original]) {
-        if (existsSync(item)) nativeSecurity(['delete-keychain', item]);
-      }
-    }
-    rmSync(root, { recursive: true, force: true });
-  }
-}
+for (const config of [
+  { archetype: 'swift-cli', job: 'sign', keychain: 'swift-release.keychain-db', snapshot: 'swift-original-keychains.txt', cleanup: 'Restore signing keychain', material: ['swift-release.p12', 'swift-release-certificate.pem', 'swift-release-private-key.pem'] },
+  { archetype: 'go-cli', job: 'sign', keychain: 'release-signing.keychain-db', snapshot: 'release-original-user-keychains.txt', cleanup: 'Restore user keychain search list', material: ['release-signing.p12'] },
+  { archetype: 'electron', job: 'build-macos', keychain: 'electron-release.keychain-db', snapshot: 'electron-original-keychains.txt', cleanup: 'Delete ephemeral keychain', material: ['electron-release.p12'] },
+]) {
+  const workflow = loadWorkflow(`release-${config.archetype}.yml`);
+  const signer = workflowStep(workflow, config.job, 'id', 'signer');
+  const setupSteps = [signer];
+  if (config.archetype === 'go-cli') setupSteps.push(workflowStep(workflow, config.job, 'id', 'signing_identity'));
+  const cleanup = workflowStep(workflow, config.job, 'name', config.cleanup);
+  assert.equal(cleanup.if, 'always()');
 
-runScenario('successful signing restores ordered paths with spaces');
-runScenario('empty original list works under Bash nounset', { empty: true });
-runScenario('failed snapshot leaves original search list untouched', { importFailure: 'list-keychains' });
-runScenario('failure just after creation still deletes keychain', { importFailure: 'set-keychain-settings' });
-runScenario('failed certificate import cleans up without step outputs', { importFailure: 'import' });
-runScenario('restoration failure does not skip keychain deletion', { cleanupFailure: 'restore' });
-runScenario('deletion failure is reported after restoring search list', { cleanupFailure: 'delete-keychain' });
-runScenario('skipped signer leaves host state untouched', { skipImport: true });
+  function runScenario(name, { empty = false, importFailure = '', cleanupFailure = '', skipImport = false } = {}) {
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), 'swift-keychain-test-')));
+    const keychain = path.join(root, config.keychain);
+    const original = empty ? [] : [path.join(root, 'login fixture.keychain-db'), path.join(root, 'other.keychain-db')];
+    const statePath = path.join(root, 'security-state.json');
+    const readSearchList = () => realKeychains
+      ? parseKeychains(nativeSecurity(['list-keychains', '-d', 'user']))
+      : JSON.parse(readFileSync(statePath)).keychains;
+    try {
+      if (realKeychains) {
+        for (const item of original) nativeSecurity(['create-keychain', '-p', 'test-keychain-password', item]);
+        nativeSecurity(['list-keychains', '-d', 'user', '-s', ...original]);
+      }
+      writeFileSync(statePath, JSON.stringify({ keychains: original }));
+      // macOS can expose the login keychain after an empty search-list request.
+      const expectedOriginal = readSearchList();
+      if (!empty) assert.deepEqual(expectedOriginal, original, 'fixture search list must be installed');
+      if (realKeychains && empty) console.log(`Native empty-list request exposes ${expectedOriginal.length} keychain(s) before signing`);
+      const bin = path.join(root, 'bin');
+      mkdirSync(bin);
+      for (const command of ['security', 'openssl']) writeFileSync(path.join(bin, command), fixtureCommand, { mode: 0o755 });
+      const output = path.join(root, 'output');
+      writeFileSync(output, '');
+      const env = {
+        PATH: `${bin}:${process.env.PATH}`,
+        RUNNER_TEMP: root,
+        GITHUB_OUTPUT: output,
+        P12_BASE64: Buffer.from('fixture material').toString('base64'),
+        P12_PASSWORD: 'fixture-password',
+        REPOSITORY_TYPE: 'openclaw',
+        REAL_KEYCHAINS: realKeychains ? '1' : '0',
+      };
+      if (!skipImport) {
+        let result;
+        for (const step of setupSteps) {
+          const outputs = Object.fromEntries(readFileSync(output, 'utf8').trim().split('\n').filter(Boolean).map((line) => line.split(/=(.*)/s, 2)));
+          result = spawnSync('/bin/bash', ['-c', step.run], {
+            env: { ...env, KEYCHAIN: outputs.keychain ?? '', AUTHORITY: outputs.authority ?? '', PHASE: 'import', FAIL_SECURITY: importFailure }, encoding: 'utf8',
+          });
+          if (result.status !== 0) break;
+        }
+        assert.equal(result.status, importFailure ? 1 : 0, `${name}: signer\n${result.stderr}`);
+        if (!importFailure) {
+          assert.ok(readSearchList().includes(keychain), 'signing keychain must be searchable');
+          assert.deepEqual(parseKeychains(readFileSync(path.join(root, config.snapshot), 'utf8')), expectedOriginal, 'snapshot must precede keychain creation');
+        }
+      }
+      const exportedKeychain = readFileSync(output, 'utf8').match(/^keychain=(.*)$/m)?.[1] ?? '';
+      const result = spawnSync('/bin/bash', ['-c', cleanup.run], {
+        env: { ...env, KEYCHAIN: exportedKeychain, PHASE: 'cleanup', FAIL_SECURITY: cleanupFailure }, encoding: 'utf8',
+      });
+      assert.equal(result.status, cleanupFailure ? 1 : 0, `${name}: cleanup\n${result.stderr}`);
+      if (cleanupFailure !== 'restore') assert.deepEqual(readSearchList(), expectedOriginal, `${name}: original search list must be restored`);
+      if (cleanupFailure !== 'delete-keychain') assert.equal(existsSync(keychain), false, `${name}: ephemeral keychain must be deleted`);
+      for (const file of config.material) {
+        assert.equal(existsSync(path.join(root, file)), false, `${name}: temporary material must be removed`);
+      }
+      console.log(`PASS ${config.archetype}: ${name}${realKeychains ? ' (native macOS keychains)' : ''}`);
+    } finally {
+      if (realKeychains) {
+        nativeSecurity(['list-keychains', '-d', 'user', '-s', ...hostKeychains]);
+        for (const item of [keychain, ...original]) {
+          if (existsSync(item)) nativeSecurity(['delete-keychain', item]);
+        }
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  runScenario('successful signing restores ordered paths with spaces');
+  runScenario('empty original list works under Bash nounset', { empty: true });
+  runScenario('failed snapshot leaves original search list untouched', { importFailure: 'list-keychains' });
+  runScenario('failure just after creation still deletes keychain', { importFailure: 'set-keychain-settings' });
+  runScenario('failed certificate import cleans up without step outputs', { importFailure: 'import' });
+  runScenario('restoration failure does not skip keychain deletion', { cleanupFailure: 'restore' });
+  runScenario('deletion failure is reported after restoring search list', { cleanupFailure: 'delete-keychain' });
+  runScenario('skipped signer leaves host state untouched', { skipImport: true });
+
+  runScenario('failed selection still restores and deletes keychain', { importFailure: 'select' });
+}
