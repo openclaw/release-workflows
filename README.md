@@ -213,3 +213,7 @@ scripts/smoke-release-build.sh
 ```
 
 The smoke check removes its temporary build directory and Go cache on exit. It does not sign, tag, or publish a release.
+
+Validation and native keychain CI explicitly select Node 26.8.2; snapshot integration pins Go 1.27.1 and exercises the caller-configurable Electron tool defaults. Superseded pull-request runs are cancelled, while main runs complete. Swift's default Linux image pins the Swift 6.3.3 Noble manifest digest; callers can still override `swift-linux-image`.
+
+With Docker available, `bash scripts/smoke-swift-toolchain.sh` compiles and runs a Linux executable with static Swift libraries inside that exact default image. CI runs the same proof alongside the Go snapshot integration.

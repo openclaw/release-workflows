@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Pin the Swift 6.3.3 Linux image by digest and make validation CI select its Node/Go toolchains explicitly, with bounded jobs and cancellation of superseded pull-request runs.
+
 ## 1.8.2 - 2026-09-07
 
 **Highlights:** Homebrew handoffs now accept formulas that preserve signed binaries with literal `skip_clean` paths.
