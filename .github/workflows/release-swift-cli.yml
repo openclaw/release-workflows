@@ -219,14 +219,19 @@ jobs:
             const defaultBranch = repository.data.default_branch;
             const expectedRef = `refs/heads/${defaultBranch}`;
             const expectedWorkflowSuffix = `@refs/heads/${defaultBranch}`;
-            if (context.ref !== expectedRef || !process.env.GITHUB_WORKFLOW_REF.endsWith(expectedWorkflowSuffix)) {
+            if (
+              context.ref !== expectedRef ||
+              !process.env.GITHUB_WORKFLOW_REF.endsWith(expectedWorkflowSuffix)
+            ) {
               core.setFailed(`caller must run from protected ${defaultBranch}`);
               return;
             }
             const branch = await github.rest.repos.getBranch({ ...context.repo, branch: defaultBranch });
             const branchHead = branch.data.commit.sha;
             if (context.sha !== branchHead) {
-              core.setFailed(`caller workflow SHA ${context.sha} is not current ${defaultBranch} head ${branchHead}`);
+              core.setFailed(
+                `caller workflow SHA ${context.sha} is not current ${defaultBranch} head ${branchHead}`,
+              );
               return;
             }
             let targetSha = branchHead;
@@ -236,7 +241,8 @@ jobs:
               if (ref.data.object.type !== 'tag') throw new Error('existing release tag must be annotated');
               tagObjectSha = ref.data.object.sha;
               const tagObject = await github.rest.git.getTag({ ...context.repo, tag_sha: tagObjectSha });
-              if (tagObject.data.object.type !== 'commit') throw new Error('release tag must peel directly to a commit');
+              if (tagObject.data.object.type !== 'commit')
+                throw new Error('release tag must peel directly to a commit');
               targetSha = tagObject.data.object.sha;
             } catch (error) {
               if (error.status !== 404) throw error;
@@ -320,11 +326,16 @@ jobs:
             const currentMarker = `/actions/runs/${context.runId}`;
             const allowedEvents = new Set(JSON.parse(process.env.CI_CHECK_EVENTS));
             const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
-              ...context.repo, head_sha: process.env.TARGET_SHA, per_page: 100,
+              ...context.repo,
+              head_sha: process.env.TARGET_SHA,
+              per_page: 100,
             });
             const runEvents = new Map(runs.map((run) => [run.id, run.event]));
             const allChecks = await github.paginate(github.rest.checks.listForRef, {
-              ...context.repo, ref: process.env.TARGET_SHA, per_page: 100, filter: 'latest',
+              ...context.repo,
+              ref: process.env.TARGET_SHA,
+              per_page: 100,
+              filter: 'latest',
             });
             const checks = allChecks.filter((check) => {
               if (check.details_url?.includes(currentMarker)) return false;
@@ -334,17 +345,25 @@ jobs:
               return !event || allowedEvents.has(event);
             });
             const statuses = await github.paginate(github.rest.repos.listCommitStatusesForRef, {
-              ...context.repo, ref: process.env.TARGET_SHA, per_page: 100,
+              ...context.repo,
+              ref: process.env.TARGET_SHA,
+              per_page: 100,
             });
             const latestStatuses = new Map();
-            for (const status of statuses) if (!latestStatuses.has(status.context.toLowerCase())) latestStatuses.set(status.context.toLowerCase(), status);
+            for (const status of statuses)
+              if (!latestStatuses.has(status.context.toLowerCase()))
+                latestStatuses.set(status.context.toLowerCase(), status);
             if (checks.length === 0 && latestStatuses.size === 0) {
               core.setFailed('frozen target has no independent CI evidence');
               return;
             }
             const failures = [
-              ...checks.filter((check) => check.status !== 'completed' || !accepted.has(check.conclusion)).map((check) => `${check.name}=${check.status}/${check.conclusion}`),
-              ...[...latestStatuses.values()].filter((status) => status.state !== 'success').map((status) => `${status.context}=status/${status.state}`),
+              ...checks
+                .filter((check) => check.status !== 'completed' || !accepted.has(check.conclusion))
+                .map((check) => `${check.name}=${check.status}/${check.conclusion}`),
+              ...[...latestStatuses.values()]
+                .filter((status) => status.state !== 'success')
+                .map((status) => `${status.context}=status/${status.state}`),
             ];
             if (failures.length) core.setFailed(`non-green checks: ${failures.join(', ')}`);
 
@@ -372,11 +391,18 @@ jobs:
 
             if (process.env.EXPECTED_TAG_OBJECT !== '') {
               if (existing === null) throw new Error('release tag disappeared after validation');
-              if (existing.data.object.type !== 'tag' || existing.data.object.sha !== process.env.EXPECTED_TAG_OBJECT) {
+              if (
+                existing.data.object.type !== 'tag' ||
+                existing.data.object.sha !== process.env.EXPECTED_TAG_OBJECT
+              ) {
                 throw new Error('release tag object changed after validation');
               }
-              const object = await github.rest.git.getTag({ ...context.repo, tag_sha: process.env.EXPECTED_TAG_OBJECT });
-              if (object.data.object.type !== 'commit' || object.data.object.sha !== process.env.TARGET_SHA) throw new Error('existing release tag target changed');
+              const object = await github.rest.git.getTag({
+                ...context.repo,
+                tag_sha: process.env.EXPECTED_TAG_OBJECT,
+              });
+              if (object.data.object.type !== 'commit' || object.data.object.sha !== process.env.TARGET_SHA)
+                throw new Error('existing release tag target changed');
               return;
             }
             if (existing !== null) throw new Error('release tag appeared after validation');
@@ -386,9 +412,17 @@ jobs:
               message: `Release ${process.env.TAG}\n\nFleet Swift CLI release tag.`,
               object: process.env.TARGET_SHA,
               type: 'commit',
-              tagger: { name: 'github-actions[bot]', email: '41898282+github-actions[bot]@users.noreply.github.com', date: new Date().toISOString() },
+              tagger: {
+                name: 'github-actions[bot]',
+                email: '41898282+github-actions[bot]@users.noreply.github.com',
+                date: new Date().toISOString(),
+              },
             });
-            await github.rest.git.createRef({ ...context.repo, ref: `refs/tags/${process.env.TAG}`, sha: object.data.sha });
+            await github.rest.git.createRef({
+              ...context.repo,
+              ref: `refs/tags/${process.env.TAG}`,
+              sha: object.data.sha,
+            });
 
   build-macos:
     name: 3a · Build universal Swift payload
@@ -818,40 +852,71 @@ jobs:
             const crypto = require('crypto');
             const fs = require('fs');
             const releaseId = Number(process.env.RELEASE_ID);
-            const paths = { arm64: 'attestations/arm64/verified-swift-attestation.json', x86_64: 'attestations/x86_64/verified-swift-attestation.json' };
-            const attestations = Object.fromEntries(Object.entries(paths).map(([architecture, file]) => [architecture, JSON.parse(fs.readFileSync(file, 'utf8'))]));
+            const paths = {
+              arm64: 'attestations/arm64/verified-swift-attestation.json',
+              x86_64: 'attestations/x86_64/verified-swift-attestation.json',
+            };
+            const attestations = Object.fromEntries(
+              Object.entries(paths).map(([architecture, file]) => [
+                architecture,
+                JSON.parse(fs.readFileSync(file, 'utf8')),
+              ]),
+            );
             for (const [architecture, attestation] of Object.entries(attestations)) {
-              const expected = { schemaVersion: 1, repository: `${context.repo.owner}/${context.repo.repo}`, runId: String(context.runId), payloadArtifact: process.env.VERIFICATION_ARTIFACT, tag: process.env.TAG, commit: process.env.TARGET_SHA, architecture, verdict: 'verified' };
-              for (const [field, value] of Object.entries(expected)) if (attestation[field] !== value) throw new Error(`${architecture} attestation ${field} mismatch`);
+              const expected = {
+                schemaVersion: 1,
+                repository: `${context.repo.owner}/${context.repo.repo}`,
+                runId: String(context.runId),
+                payloadArtifact: process.env.VERIFICATION_ARTIFACT,
+                tag: process.env.TAG,
+                commit: process.env.TARGET_SHA,
+                architecture,
+                verdict: 'verified',
+              };
+              for (const [field, value] of Object.entries(expected))
+                if (attestation[field] !== value)
+                  throw new Error(`${architecture} attestation ${field} mismatch`);
             }
             for (const field of ['assetInventory', 'sha256sums', 'releaseNotes']) {
-              if (attestations.arm64[field] !== attestations.x86_64[field]) throw new Error(`architecture ${field} disagreement`);
+              if (attestations.arm64[field] !== attestations.x86_64[field])
+                throw new Error(`architecture ${field} disagreement`);
             }
             const checksumLines = attestations.arm64.sha256sums.trimEnd().split('\n');
             const expectedDigests = new Map();
             for (const line of checksumLines) {
               const match = /^([0-9a-f]{64})  ([^\r\n]+)$/.exec(line);
-              if (!match || expectedDigests.has(match[2])) throw new Error('invalid or duplicate checksum line');
+              if (!match || expectedDigests.has(match[2]))
+                throw new Error('invalid or duplicate checksum line');
               expectedDigests.set(match[2], match[1]);
             }
             const before = await github.rest.repos.getRelease({ ...context.repo, release_id: releaseId });
-            if (!before.data.draft || before.data.tag_name !== process.env.TAG) throw new Error('draft identity changed');
-            const assets = await github.paginate(github.rest.repos.listReleaseAssets, { ...context.repo, release_id: releaseId, per_page: 100 });
+            if (!before.data.draft || before.data.tag_name !== process.env.TAG)
+              throw new Error('draft identity changed');
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets, {
+              ...context.repo,
+              release_id: releaseId,
+              per_page: 100,
+            });
             const downloadReleaseAsset = async (asset) => {
               const maxAttempts = 4;
               for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
                 try {
-                  const response = await github.request('GET /repos/{owner}/{repo}/releases/assets/{asset_id}', {
-                    ...context.repo,
-                    asset_id: asset.id,
-                    headers: { accept: 'application/octet-stream' },
-                  });
+                  const response = await github.request(
+                    'GET /repos/{owner}/{repo}/releases/assets/{asset_id}',
+                    {
+                      ...context.repo,
+                      asset_id: asset.id,
+                      headers: { accept: 'application/octet-stream' },
+                    },
+                  );
                   return Buffer.from(response.data);
                 } catch (error) {
                   const status = Number(error?.status);
                   if (!(status >= 500 && status <= 599) || attempt === maxAttempts) throw error;
-                  const delayMs = 1000 * (2 ** (attempt - 1));
-                  core.warning(`GitHub returned ${status} while downloading draft asset ${JSON.stringify(asset.name)}; retrying in ${delayMs}ms (${attempt}/${maxAttempts - 1})`);
+                  const delayMs = 1000 * 2 ** (attempt - 1);
+                  core.warning(
+                    `GitHub returned ${status} while downloading draft asset ${JSON.stringify(asset.name)}; retrying in ${delayMs}ms (${attempt}/${maxAttempts - 1})`,
+                  );
                   await new Promise((resolve) => setTimeout(resolve, delayMs));
                 }
               }
@@ -862,16 +927,28 @@ jobs:
               downloaded.set(asset.name, await downloadReleaseAsset(asset));
             }
             const expectedNames = [...expectedDigests.keys(), process.env.CHECKSUM_FILENAME].sort();
-            if (JSON.stringify([...downloaded.keys()].sort()) !== JSON.stringify(expectedNames)) throw new Error('draft asset inventory mismatch');
-            if (downloaded.get(process.env.CHECKSUM_FILENAME).toString('utf8') !== attestations.arm64.sha256sums) throw new Error('draft checksum manifest differs from attestation');
+            if (JSON.stringify([...downloaded.keys()].sort()) !== JSON.stringify(expectedNames))
+              throw new Error('draft asset inventory mismatch');
+            if (
+              downloaded.get(process.env.CHECKSUM_FILENAME).toString('utf8') !== attestations.arm64.sha256sums
+            )
+              throw new Error('draft checksum manifest differs from attestation');
             for (const [name, digest] of expectedDigests) {
               const observed = crypto.createHash('sha256').update(downloaded.get(name)).digest('hex');
               if (observed !== digest) throw new Error(`draft digest mismatch for ${name}`);
             }
-            if (!downloaded.get('ASSET-INVENTORY.json').equals(Buffer.from(attestations.arm64.assetInventory))) throw new Error('draft inventory differs from attestation');
-            if (!downloaded.get('RELEASE-NOTES.md').equals(Buffer.from(attestations.arm64.releaseNotes))) throw new Error('draft release notes differ from attestation');
-            const published = await github.rest.repos.updateRelease({ ...context.repo, release_id: releaseId, draft: false, body: attestations.arm64.releaseNotes });
-            if (published.data.draft || !published.data.published_at) throw new Error('release did not become public');
+            if (!downloaded.get('ASSET-INVENTORY.json').equals(Buffer.from(attestations.arm64.assetInventory)))
+              throw new Error('draft inventory differs from attestation');
+            if (!downloaded.get('RELEASE-NOTES.md').equals(Buffer.from(attestations.arm64.releaseNotes)))
+              throw new Error('draft release notes differ from attestation');
+            const published = await github.rest.repos.updateRelease({
+              ...context.repo,
+              release_id: releaseId,
+              draft: false,
+              body: attestations.arm64.releaseNotes,
+            });
+            if (published.data.draft || !published.data.published_at)
+              throw new Error('release did not become public');
             core.setOutput('release-url', published.data.html_url);
       - name: Verify authenticated public release state
         env:
@@ -917,29 +994,60 @@ jobs:
         with:
           github-token: ${{ secrets.TAP_TOKEN }}
           script: |
-            if (process.env.TAP_TOKEN_PRESENT !== 'true') throw new Error('TAP_TOKEN is required for Homebrew handoff');
+            if (process.env.TAP_TOKEN_PRESENT !== 'true')
+              throw new Error('TAP_TOKEN is required for Homebrew handoff');
             const fs = require('fs');
-            const attestations = ['arm64', 'x86_64'].map((arch) => JSON.parse(fs.readFileSync(`attestations/${arch}/verified-swift-attestation.json`, 'utf8')));
-            if (attestations[0].assetInventory !== attestations[1].assetInventory || attestations[0].sha256sums !== attestations[1].sha256sums) throw new Error('architecture attestation disagreement');
+            const attestations = ['arm64', 'x86_64'].map((arch) =>
+              JSON.parse(fs.readFileSync(`attestations/${arch}/verified-swift-attestation.json`, 'utf8')),
+            );
+            if (
+              attestations[0].assetInventory !== attestations[1].assetInventory ||
+              attestations[0].sha256sums !== attestations[1].sha256sums
+            )
+              throw new Error('architecture attestation disagreement');
             const inventory = JSON.parse(attestations[0].assetInventory);
             const asset = inventory.payloads.find((payload) => payload.target === 'darwin_universal');
-            if (!asset || asset.name !== process.env.MACOS_ARCHIVE_NAME || !/^[0-9a-f]{64}$/.test(asset.sha256)) throw new Error('verified macOS Homebrew asset missing');
+            if (!asset || asset.name !== process.env.MACOS_ARCHIVE_NAME || !/^[0-9a-f]{64}$/.test(asset.sha256))
+              throw new Error('verified macOS Homebrew asset missing');
             const [owner, repo] = process.env.HOMEBREW_TAP.split('/');
             const tap = await github.rest.repos.get({ owner, repo });
             const workflowId = 'update-formula.yml';
             const requestId = `swift-${context.repo.repo}-${context.runId}-${context.runAttempt}`;
             const expectedTitle = `Update ${process.env.FORMULA} for ${process.env.TAG} (${requestId})`;
-            const before = await github.rest.actions.listWorkflowRuns({ owner, repo, workflow_id: workflowId, event: 'workflow_dispatch', per_page: 100 });
+            const before = await github.rest.actions.listWorkflowRuns({
+              owner,
+              repo,
+              workflow_id: workflowId,
+              event: 'workflow_dispatch',
+              per_page: 100,
+            });
             const prior = new Set(before.data.workflow_runs.map((run) => run.id));
             await github.rest.actions.createWorkflowDispatch({
-              owner, repo, workflow_id: workflowId, ref: tap.data.default_branch,
-              inputs: { formula: process.env.FORMULA, tag: process.env.TAG, repository: `${context.repo.owner}/${context.repo.repo}`, macos_artifact: asset.name, request_id: requestId },
+              owner,
+              repo,
+              workflow_id: workflowId,
+              ref: tap.data.default_branch,
+              inputs: {
+                formula: process.env.FORMULA,
+                tag: process.env.TAG,
+                repository: `${context.repo.owner}/${context.repo.repo}`,
+                macos_artifact: asset.name,
+                request_id: requestId,
+              },
             });
             const deadline = Date.now() + 900000;
             let run;
             while (Date.now() < deadline) {
-              const response = await github.rest.actions.listWorkflowRuns({ owner, repo, workflow_id: workflowId, event: 'workflow_dispatch', per_page: 100 });
-              const candidates = response.data.workflow_runs.filter((candidate) => !prior.has(candidate.id) && candidate.display_title === expectedTitle);
+              const response = await github.rest.actions.listWorkflowRuns({
+                owner,
+                repo,
+                workflow_id: workflowId,
+                event: 'workflow_dispatch',
+                per_page: 100,
+              });
+              const candidates = response.data.workflow_runs.filter(
+                (candidate) => !prior.has(candidate.id) && candidate.display_title === expectedTitle,
+              );
               if (candidates.length > 1) throw new Error('ambiguous Homebrew dispatch correlation');
               [run] = candidates;
               if (run) break;
@@ -950,13 +1058,20 @@ jobs:
               await new Promise((resolve) => setTimeout(resolve, 15000));
               run = (await github.rest.actions.getWorkflowRun({ owner, repo, run_id: run.id })).data;
             }
-            if (run.conclusion !== 'success') throw new Error(`Homebrew workflow concluded ${run.conclusion || run.status}`);
-            const formula = await github.rest.repos.getContent({ owner, repo, path: `Formula/${process.env.FORMULA}.rb`, ref: tap.data.default_branch });
+            if (run.conclusion !== 'success')
+              throw new Error(`Homebrew workflow concluded ${run.conclusion || run.status}`);
+            const formula = await github.rest.repos.getContent({
+              owner,
+              repo,
+              path: `Formula/${process.env.FORMULA}.rb`,
+              ref: tap.data.default_branch,
+            });
             const source = Buffer.from(formula.data.content, 'base64').toString('utf8');
             const expectedUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/releases/download/${process.env.TAG}/${asset.name}`;
             const url = source.match(/^\s*url\s+"([^"]+)"\s*$/m)?.[1];
             const sha = source.match(/^\s*sha256\s+"([0-9a-f]{64})"\s*$/m)?.[1];
-            if (url !== expectedUrl || sha !== asset.sha256) throw new Error('Homebrew formula does not match verified release asset');
+            if (url !== expectedUrl || sha !== asset.sha256)
+              throw new Error('Homebrew formula does not match verified release asset');
             core.info(`Homebrew handoff verified: ${run.html_url}`);
 
   closeout:

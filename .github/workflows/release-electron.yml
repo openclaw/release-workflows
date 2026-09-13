@@ -130,11 +130,18 @@ jobs:
           script: |
             const repository = await github.rest.repos.get(context.repo);
             const defaultBranch = repository.data.default_branch;
-            if (context.ref !== `refs/heads/${defaultBranch}` || !process.env.GITHUB_WORKFLOW_REF.endsWith(`@refs/heads/${defaultBranch}`)) {
-              core.setFailed(`caller must run from protected ${defaultBranch}`); return;
+            if (
+              context.ref !== `refs/heads/${defaultBranch}` ||
+              !process.env.GITHUB_WORKFLOW_REF.endsWith(`@refs/heads/${defaultBranch}`)
+            ) {
+              core.setFailed(`caller must run from protected ${defaultBranch}`);
+              return;
             }
             const branch = await github.rest.repos.getBranch({ ...context.repo, branch: defaultBranch });
-            if (context.sha !== branch.data.commit.sha) { core.setFailed('caller must run at current protected head'); return; }
+            if (context.sha !== branch.data.commit.sha) {
+              core.setFailed('caller must run at current protected head');
+              return;
+            }
             let targetSha = branch.data.commit.sha;
             let tagObjectSha = '';
             try {
@@ -144,9 +151,17 @@ jobs:
               const tag = await github.rest.git.getTag({ ...context.repo, tag_sha: tagObjectSha });
               if (tag.data.object.type !== 'commit') throw new Error('release tag must peel to a commit');
               targetSha = tag.data.object.sha;
-            } catch (error) { if (error.status !== 404) throw error; }
-            const comparison = await github.rest.repos.compareCommitsWithBasehead({ ...context.repo, basehead: `${targetSha}...${branch.data.commit.sha}` });
-            if (!['ahead', 'identical'].includes(comparison.data.status)) { core.setFailed('release target is outside protected history'); return; }
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            const comparison = await github.rest.repos.compareCommitsWithBasehead({
+              ...context.repo,
+              basehead: `${targetSha}...${branch.data.commit.sha}`,
+            });
+            if (!['ahead', 'identical'].includes(comparison.data.status)) {
+              core.setFailed('release target is outside protected history');
+              return;
+            }
             core.setOutput('default-branch', defaultBranch);
             core.setOutput('tag-object-sha', tagObjectSha);
             core.setOutput('target-sha', targetSha);
@@ -199,16 +214,40 @@ jobs:
             const accepted = new Set(['success', 'neutral', 'skipped']);
             const currentMarker = `/actions/runs/${context.runId}`;
             const allowed = new Set(JSON.parse(process.env.CI_CHECK_EVENTS));
-            const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, { ...context.repo, head_sha: process.env.TARGET_SHA, per_page: 100 });
+            const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
+              ...context.repo,
+              head_sha: process.env.TARGET_SHA,
+              per_page: 100,
+            });
             const events = new Map(runs.map((run) => [run.id, run.event]));
-            const checks = (await github.paginate(github.rest.checks.listForRef, { ...context.repo, ref: process.env.TARGET_SHA, per_page: 100, filter: 'latest' })).filter((check) => {
+            const checks = (
+              await github.paginate(github.rest.checks.listForRef, {
+                ...context.repo,
+                ref: process.env.TARGET_SHA,
+                per_page: 100,
+                filter: 'latest',
+              })
+            ).filter((check) => {
               if (check.details_url?.includes(currentMarker)) return false;
               const match = check.details_url?.match(/\/actions\/runs\/(\d+)(?:\/|$)/);
-              return !match || allowed.size === 0 || !events.get(Number(match[1])) || allowed.has(events.get(Number(match[1])));
+              return (
+                !match ||
+                allowed.size === 0 ||
+                !events.get(Number(match[1])) ||
+                allowed.has(events.get(Number(match[1])))
+              );
             });
-            if (!checks.length) { core.setFailed('frozen target has no independent CI check'); return; }
-            const failures = checks.filter((check) => check.status !== 'completed' || !accepted.has(check.conclusion));
-            if (failures.length) core.setFailed(`non-green checks: ${failures.map((check) => `${check.name}=${check.status}/${check.conclusion}`).join(', ')}`);
+            if (!checks.length) {
+              core.setFailed('frozen target has no independent CI check');
+              return;
+            }
+            const failures = checks.filter(
+              (check) => check.status !== 'completed' || !accepted.has(check.conclusion),
+            );
+            if (failures.length)
+              core.setFailed(
+                `non-green checks: ${failures.map((check) => `${check.name}=${check.status}/${check.conclusion}`).join(', ')}`,
+              );
 
   tag:
     name: 2 · Freeze annotated tag
@@ -226,16 +265,44 @@ jobs:
         with:
           script: |
             let existing = null;
-            try { existing = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` }); } catch (error) { if (error.status !== 404) throw error; }
+            try {
+              existing = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
             if (process.env.EXPECTED_TAG_OBJECT) {
-              if (!existing || existing.data.object.type !== 'tag' || existing.data.object.sha !== process.env.EXPECTED_TAG_OBJECT) throw new Error('release tag changed after validation');
-              const tag = await github.rest.git.getTag({ ...context.repo, tag_sha: process.env.EXPECTED_TAG_OBJECT });
-              if (tag.data.object.type !== 'commit' || tag.data.object.sha !== process.env.TARGET_SHA) throw new Error('release tag target changed');
+              if (
+                !existing ||
+                existing.data.object.type !== 'tag' ||
+                existing.data.object.sha !== process.env.EXPECTED_TAG_OBJECT
+              )
+                throw new Error('release tag changed after validation');
+              const tag = await github.rest.git.getTag({
+                ...context.repo,
+                tag_sha: process.env.EXPECTED_TAG_OBJECT,
+              });
+              if (tag.data.object.type !== 'commit' || tag.data.object.sha !== process.env.TARGET_SHA)
+                throw new Error('release tag target changed');
               return;
             }
             if (existing) throw new Error('release tag appeared after validation');
-            const tag = await github.rest.git.createTag({ ...context.repo, tag: process.env.TAG, message: `Release ${process.env.TAG}\n\nFleet Electron release tag.`, object: process.env.TARGET_SHA, type: 'commit', tagger: { name: 'github-actions[bot]', email: '41898282+github-actions[bot]@users.noreply.github.com', date: new Date().toISOString() } });
-            await github.rest.git.createRef({ ...context.repo, ref: `refs/tags/${process.env.TAG}`, sha: tag.data.sha });
+            const tag = await github.rest.git.createTag({
+              ...context.repo,
+              tag: process.env.TAG,
+              message: `Release ${process.env.TAG}\n\nFleet Electron release tag.`,
+              object: process.env.TARGET_SHA,
+              type: 'commit',
+              tagger: {
+                name: 'github-actions[bot]',
+                email: '41898282+github-actions[bot]@users.noreply.github.com',
+                date: new Date().toISOString(),
+              },
+            });
+            await github.rest.git.createRef({
+              ...context.repo,
+              ref: `refs/tags/${process.env.TAG}`,
+              sha: tag.data.sha,
+            });
 
   build-server:
     name: 3a · Build Go server assets
@@ -591,35 +658,91 @@ jobs:
           VERIFICATION_ARTIFACT: ${{ needs.draft.outputs.verification-artifact-name }}
         with:
           script: |
-            const crypto = require('crypto'), fs = require('fs');
-            const paths = { arm64: 'attestations/arm64/verified-electron-attestation.json', x86_64: 'attestations/x86_64/verified-electron-attestation.json' };
-            const attestations = Object.fromEntries(Object.entries(paths).map(([arch, file]) => [arch, JSON.parse(fs.readFileSync(file, 'utf8'))]));
-            for (const [arch, a] of Object.entries(attestations)) for (const [field, value] of Object.entries({ repository: `${context.repo.owner}/${context.repo.repo}`, runId: String(context.runId), payloadArtifact: process.env.VERIFICATION_ARTIFACT, tag: process.env.TAG, commit: process.env.TARGET_SHA, architecture: arch, verdict: 'verified' })) if (a[field] !== value) throw new Error(`${arch} attestation ${field} mismatch`);
-            for (const field of ['assetInventory', 'sha256sums', 'releaseNotes']) if (attestations.arm64[field] !== attestations.x86_64[field]) throw new Error(`architecture ${field} disagreement`);
-            const digests = new Map(attestations.arm64.sha256sums.trimEnd().split('\n').map((line) => { const m = /^([0-9a-f]{64})  ([^\r\n]+)$/.exec(line); if (!m) throw new Error('invalid checksum line'); return [m[2], m[1]]; }));
-            const releaseId = Number(process.env.RELEASE_ID); const release = await github.rest.repos.getRelease({ ...context.repo, release_id: releaseId }); if (!release.data.draft) throw new Error('release is not draft');
-            const assets = await github.paginate(github.rest.repos.listReleaseAssets, { ...context.repo, release_id: releaseId, per_page: 100 }); const downloaded = new Map();
+            const crypto = require('crypto'),
+              fs = require('fs');
+            const paths = {
+              arm64: 'attestations/arm64/verified-electron-attestation.json',
+              x86_64: 'attestations/x86_64/verified-electron-attestation.json',
+            };
+            const attestations = Object.fromEntries(
+              Object.entries(paths).map(([arch, file]) => [arch, JSON.parse(fs.readFileSync(file, 'utf8'))]),
+            );
+            for (const [arch, a] of Object.entries(attestations))
+              for (const [field, value] of Object.entries({
+                repository: `${context.repo.owner}/${context.repo.repo}`,
+                runId: String(context.runId),
+                payloadArtifact: process.env.VERIFICATION_ARTIFACT,
+                tag: process.env.TAG,
+                commit: process.env.TARGET_SHA,
+                architecture: arch,
+                verdict: 'verified',
+              }))
+                if (a[field] !== value) throw new Error(`${arch} attestation ${field} mismatch`);
+            for (const field of ['assetInventory', 'sha256sums', 'releaseNotes'])
+              if (attestations.arm64[field] !== attestations.x86_64[field])
+                throw new Error(`architecture ${field} disagreement`);
+            const digests = new Map(
+              attestations.arm64.sha256sums
+                .trimEnd()
+                .split('\n')
+                .map((line) => {
+                  const m = /^([0-9a-f]{64})  ([^\r\n]+)$/.exec(line);
+                  if (!m) throw new Error('invalid checksum line');
+                  return [m[2], m[1]];
+                }),
+            );
+            const releaseId = Number(process.env.RELEASE_ID);
+            const release = await github.rest.repos.getRelease({ ...context.repo, release_id: releaseId });
+            if (!release.data.draft) throw new Error('release is not draft');
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets, {
+              ...context.repo,
+              release_id: releaseId,
+              per_page: 100,
+            });
+            const downloaded = new Map();
             const downloadReleaseAsset = async (asset) => {
               const maxAttempts = 4;
               for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
                 try {
-                  const response = await github.request('GET /repos/{owner}/{repo}/releases/assets/{asset_id}', { ...context.repo, asset_id: asset.id, headers: { accept: 'application/octet-stream' } });
+                  const response = await github.request(
+                    'GET /repos/{owner}/{repo}/releases/assets/{asset_id}',
+                    { ...context.repo, asset_id: asset.id, headers: { accept: 'application/octet-stream' } },
+                  );
                   return Buffer.from(response.data);
                 } catch (error) {
                   const status = Number(error?.status);
                   if (!(status >= 500 && status <= 599) || attempt === maxAttempts) throw error;
-                  const delayMs = 1000 * (2 ** (attempt - 1));
-                  core.warning(`GitHub returned ${status} while downloading draft asset ${JSON.stringify(asset.name)}; retrying in ${delayMs}ms (${attempt}/${maxAttempts - 1})`);
+                  const delayMs = 1000 * 2 ** (attempt - 1);
+                  core.warning(
+                    `GitHub returned ${status} while downloading draft asset ${JSON.stringify(asset.name)}; retrying in ${delayMs}ms (${attempt}/${maxAttempts - 1})`,
+                  );
                   await new Promise((resolve) => setTimeout(resolve, delayMs));
                 }
               }
               throw new Error(`unreachable release asset retry state for ${JSON.stringify(asset.name)}`);
             };
             for (const asset of assets) downloaded.set(asset.name, await downloadReleaseAsset(asset));
-            if (JSON.stringify([...downloaded.keys()].sort()) !== JSON.stringify([...digests.keys(), process.env.CHECKSUM_FILENAME].sort())) throw new Error('draft asset inventory mismatch');
-            if (downloaded.get(process.env.CHECKSUM_FILENAME).toString('utf8') !== attestations.arm64.sha256sums) throw new Error('draft checksum mismatch');
-            for (const [name, digest] of digests) if (crypto.createHash('sha256').update(downloaded.get(name)).digest('hex') !== digest) throw new Error(`draft digest mismatch: ${name}`);
-            const published = await github.rest.repos.updateRelease({ ...context.repo, release_id: releaseId, draft: false, body: attestations.arm64.releaseNotes }); if (published.data.draft || !published.data.published_at) throw new Error('release did not publish'); core.setOutput('release-url', published.data.html_url);
+            if (
+              JSON.stringify([...downloaded.keys()].sort()) !==
+              JSON.stringify([...digests.keys(), process.env.CHECKSUM_FILENAME].sort())
+            )
+              throw new Error('draft asset inventory mismatch');
+            if (
+              downloaded.get(process.env.CHECKSUM_FILENAME).toString('utf8') !== attestations.arm64.sha256sums
+            )
+              throw new Error('draft checksum mismatch');
+            for (const [name, digest] of digests)
+              if (crypto.createHash('sha256').update(downloaded.get(name)).digest('hex') !== digest)
+                throw new Error(`draft digest mismatch: ${name}`);
+            const published = await github.rest.repos.updateRelease({
+              ...context.repo,
+              release_id: releaseId,
+              draft: false,
+              body: attestations.arm64.releaseNotes,
+            });
+            if (published.data.draft || !published.data.published_at)
+              throw new Error('release did not publish');
+            core.setOutput('release-url', published.data.html_url);
 
   closeout:
     name: 8 · Open next Unreleased PR
