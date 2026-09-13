@@ -40,5 +40,9 @@ assert.match(
   codeowners,
   /^\/scripts\/validate-workflows\.sh @vincentkoc @steipete$/m,
 );
+assert.match(
+  codeowners,
+  /^\/scripts\/validate-workflow-contracts\.py @vincentkoc @steipete$/m,
+);
 
 console.log("required workflow contracts passed");
