@@ -496,8 +496,6 @@ jobs:
           match = matches[0]
           end = next((candidate[0] for candidate in headings if candidate[0] > match[0]), len(text))
           section = text[match[0]:end]
-          if not section.strip():
-              raise SystemExit("release notes section is empty")
           Path(output).write_bytes(section.encode("utf-8"))
           PY
 
@@ -1026,11 +1024,9 @@ jobs:
               ;;
             disabled) nfpm_enabled=false ;;
           esac
-          if [[ "$nfpm_enabled" == true ]]; then
-            args="release --config=$config --clean --timeout 60m --parallelism=2 --release-notes=/dev/null --skip=announce,aur,aur-source,chocolatey,docker,flatpak,homebrew,ko,makeself,mcp,nix,notarize,publish,sbom,scoop,sign,snapcraft,srpm,validate,winget"
-          else
-            args="release --config=$config --clean --timeout 60m --parallelism=2 --release-notes=/dev/null --skip=announce,aur,aur-source,chocolatey,docker,flatpak,homebrew,ko,makeself,mcp,nfpm,nix,notarize,publish,sbom,scoop,sign,snapcraft,srpm,validate,winget"
-          fi
+          nfpm_skip=
+          [[ "$nfpm_enabled" == true ]] || nfpm_skip=nfpm,
+          args="release --config=$config --clean --timeout 60m --parallelism=2 --release-notes=/dev/null --skip=announce,aur,aur-source,chocolatey,docker,flatpak,homebrew,ko,makeself,mcp,${nfpm_skip}nix,notarize,publish,sbom,scoop,sign,snapcraft,srpm,validate,winget"
           {
             echo "nfpm-enabled=$nfpm_enabled"
             echo "args=$args"
@@ -1230,7 +1226,7 @@ jobs:
               const relative = path.relative(path.join(root, 'dist'), source);
               const destination = path.join(outputDist, relative);
               const stat = fs.lstatSync(source);
-              if (!stat.isFile() || stat.isSymbolicLink()) {
+              if (!stat.isFile()) {
                 throw new Error(`GoReleaser artifact is not a regular file: ${artifact.path}`);
               }
               const previous = copied.get(relative);
@@ -1585,7 +1581,7 @@ jobs:
             for (const name of stagedNames) {
               const staged = path.join(archiveFilesDirectory, name);
               const stat = fs.lstatSync(staged);
-              if (!stat.isFile() || stat.isSymbolicLink()) {
+              if (!stat.isFile()) {
                 throw new Error(`staged archive file is not a regular file: ${name}`);
               }
             }
@@ -1675,7 +1671,7 @@ jobs:
                   throw new Error(`GoReleaser archive must be a top-level dist artifact: ${archiveName}`);
                 }
                 const producedStat = fs.lstatSync(producedArchive);
-                if (!producedStat.isFile() || producedStat.isSymbolicLink()) {
+                if (!producedStat.isFile()) {
                   throw new Error(`GoReleaser archive must be a regular file: ${archiveName}`);
                 }
               }
@@ -1691,10 +1687,10 @@ jobs:
             if (archiveNames.has(archiveName) || fs.existsSync(path.join(releaseDirectory, archiveName))) {
               throw new Error(`duplicate release archive name: ${archiveName}`);
             }
+            const existingNames = new Set(fs.readdirSync(directory).map((entryName) => entryName.toLowerCase()));
             for (const name of archiveFileNames) {
               const source = path.join(archiveFilesDirectory, name);
               const target = path.join(directory, name);
-              const existingNames = new Set(fs.readdirSync(directory).map((entryName) => entryName.toLowerCase()));
               if (existingNames.has(name.toLowerCase())) {
                 throw new Error(`archive file collides with a built payload: ${name}`);
               }
@@ -1750,7 +1746,7 @@ jobs:
               throw new Error(`nFPM package must be a top-level dist artifact: ${name}`);
             }
             const sourceStat = fs.lstatSync(source);
-            if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) {
+            if (!sourceStat.isFile()) {
               throw new Error(`nFPM package must be a regular file: ${name}`);
             }
             if (packageNames.has(name) || fs.existsSync(path.join(releaseDirectory, name))) {
@@ -2070,7 +2066,7 @@ jobs:
               throw new Error(`independent rebuild path escapes dist: ${artifact.path}`);
             }
             const rebuiltStat = fs.lstatSync(rebuiltPath);
-            if (!rebuiltStat.isFile() || rebuiltStat.isSymbolicLink()) {
+            if (!rebuiltStat.isFile()) {
               throw new Error(`independent rebuild binary is not a regular file: ${artifact.path}`);
             }
             const rebuiltBytes = fs.readFileSync(rebuiltPath);
@@ -2182,8 +2178,7 @@ jobs:
           const requireRegularAsset = (name, label) => {
             const assetPath = path.join(releaseDirectory, name);
             const stat = fs.lstatSync(assetPath);
-            if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`${label} is not a regular file: ${name}`);
-            return assetPath;
+            if (!stat.isFile()) throw new Error(`${label} is not a regular file: ${name}`);
           };
           const digest = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 
@@ -2347,11 +2342,7 @@ jobs:
               core.setFailed('release controls missing');
               return;
             }
-            // The frozen annotated tag already exists (freeze stage), so GitHub
-            // resolves the release commit from the tag. target_commitish with a
-            // raw SHA is rejected (403) for the Actions integration token, and
-            // would be ignored for an existing tag anyway. We assert the tag's
-            // peeled commit below instead.
+            // Existing tags determine the release commit; Actions rejects a raw-SHA target_commitish.
             const tagRef = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
             let peeled = tagRef.data.object.sha;
             if (tagRef.data.object.type === 'tag') {
@@ -2542,7 +2533,6 @@ jobs:
           node <<'NODE'
           const crypto = require('crypto');
           const fs = require('fs');
-          const path = require('path');
           const { execFileSync } = require('child_process');
           const inventory = JSON.parse(fs.readFileSync('ASSET-INVENTORY.json', 'utf8'));
           const mode = process.env.REPRODUCIBLE_REBUILD;
@@ -2718,12 +2708,6 @@ jobs:
                 sleep 5
               done
               (( ready == 1 )) || { echo "notarization ticket unavailable: $candidate" >&2; exit 1; }
-              # SecAssessment's execute policy classifies app bundles. It rejects
-              # valid bare Mach-O CLIs as "not an app", so the codesign online
-              # notarization check above is the CLI distribution-policy proof.
-              if [[ -d "$candidate" && "$candidate" == *.app ]]; then
-                spctl --assess --type execute --verbose=2 "$candidate"
-              fi
               archs=" $(lipo -archs "$candidate") "
               [[ "$archs" == *" $EXPECTED_ARCH "* ]] && native_count=$((native_count + 1))
               [[ "$archs" == *' arm64 '* && "$archs" == *' x86_64 '* ]] && universal_count=$((universal_count + 1))

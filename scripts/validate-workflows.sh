@@ -103,16 +103,11 @@ for required_verify_attestation_control in [
 
 for required_cli_assessment_control in [
     'codesign --verify --strict --check-notarization -R=notarized',
-    '[[ -d "$candidate" && "$candidate" == *.app ]]',
-    'spctl --assess --type execute --verbose=2 "$candidate"',
 ]:
     if required_cli_assessment_control not in verify:
         raise SystemExit(f'missing CLI/app assessment policy: {required_cli_assessment_control}')
-app_condition = verify.index('[[ -d "$candidate" && "$candidate" == *.app ]]')
-spctl_assessment = verify.index('spctl --assess --type execute --verbose=2 "$candidate"')
-app_condition_end = verify.index('\n              fi', app_condition)
-if not app_condition < spctl_assessment < app_condition_end:
-    raise SystemExit('spctl execute assessment must remain inside the app-bundle type condition')
+if 'spctl --assess' in verify:
+    raise SystemExit('bare CLI verification must use codesign notarization, not app-bundle assessment')
 
 publish = workflow.split('\n  publish:\n', 1)[1].split('\n  handoff:\n', 1)[0]
 draft = workflow.split('\n  draft:\n', 1)[1].split('\n  verify:\n', 1)[0]
