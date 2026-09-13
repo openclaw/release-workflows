@@ -674,14 +674,17 @@ jobs:
           name: ${{ needs.assemble.outputs.artifact-name }}
       - id: release
         env:
+          GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.validate.outputs.tag }}
         run: |
           set -euo pipefail
           tar -xzf electron-release-assets.tar.gz
-          mapfile -t assets < <(find release-assets -maxdepth 1 -type f -printf '%p\n' | LC_ALL=C sort)
+          mapfile -t assets < <(find release-assets -maxdepth 1 -type f -print | LC_ALL=C sort)
           gh release create "$TAG" --draft --verify-tag --title "$TAG" --notes-file release-assets/RELEASE-NOTES.md "${assets[@]}"
-          echo "release-id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq .id)" >>"$GITHUB_OUTPUT"
+          release_id=$(gh release view "$TAG" --json databaseId --jq .databaseId)
+          [[ "$release_id" =~ ^[0-9]+$ ]]
+          echo "release-id=$release_id" >>"$GITHUB_OUTPUT"
 
   verify:
     name: 6 · Independent Electron verify (${{ matrix.arch }})

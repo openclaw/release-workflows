@@ -52,6 +52,8 @@ Independent arm64 and Intel macOS jobs verify the full checksum set, exact sourc
 
 See [`examples/release-electron-caller.yml`](examples/release-electron-caller.yml). The caller must provision the same five Apple secrets as the Swift archetype. The credential preflight runs before tag creation, so an unprovisioned consumer can validate its unsigned desktop contract in ordinary CI without leaving a partial release tag.
 
+Electron draft creation uses an explicit GitHub repository context in its fresh, checkout-free workspace. It uploads the immutable assembled payload and validates the numeric draft ID before exporting it to later jobs.
+
 ## Go CLI archetype
 
 `release-go-cli.yml` is the first fleet archetype. It requires:

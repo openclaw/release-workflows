@@ -23,6 +23,7 @@ node scripts/test-swift-cli-workflow.mjs
 node scripts/test-swift-keychain-lifecycle.mjs
 node scripts/test-swift-draft-isolation.mjs
 node scripts/test-electron-workflow.mjs
+node scripts/test-electron-draft-context.mjs
 node scripts/test-reproducible-rebuild.mjs
 node scripts/test-go-cli-policy-inputs.mjs
 node scripts/test-release-notes-extraction.mjs
