@@ -335,7 +335,7 @@ jobs:
         with:
           script: |
             const accepted = new Set(['success', 'neutral', 'skipped']);
-            const currentMarker = `/actions/runs/${context.runId}`;
+            const currentRunId = String(context.runId);
             const allowed = new Set(JSON.parse(process.env.CI_CHECK_EVENTS));
             const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
               ...context.repo,
@@ -351,8 +351,8 @@ jobs:
                 filter: 'latest',
               })
             ).filter((check) => {
-              if (check.details_url?.includes(currentMarker)) return false;
               const match = check.details_url?.match(/\/actions\/runs\/(\d+)(?:\/|$)/);
+              if (match?.[1] === currentRunId) return false;
               return (
                 !match ||
                 allowed.size === 0 ||

@@ -18,6 +18,7 @@ node scripts/test-required-workflows.mjs
 node scripts/test-signing-credential-preflight.mjs
 node scripts/test-tag-freeze.mjs
 node scripts/test-ci-check-event-filter.mjs
+node scripts/test-ci-run-identity.mjs
 node scripts/test-build-artifact-matrix.mjs
 node scripts/test-split-host-build.mjs
 node scripts/test-swift-cli-workflow.mjs

@@ -627,16 +627,16 @@ jobs:
         with:
           script: |
             const acceptableConclusions = new Set(['success', 'neutral', 'skipped']);
-            const currentRunMarker = `/actions/runs/${context.runId}`;
+            const currentRunId = context.runId;
             const allowedCheckEvents = new Set(JSON.parse(process.env.CI_CHECK_EVENTS));
             const normalizeContext = (name) => name.toLowerCase();
             // ci-check-event-filter-begin
-            const filterCheckRunsByEvent = ({ checkRuns, allowedEvents, currentRunMarker, workflowRunEvents, info }) => {
+            const filterCheckRunsByEvent = ({ checkRuns, allowedEvents, currentRunId, workflowRunEvents, info }) => {
               const accepted = [];
               for (const check of checkRuns) {
-                if (check.details_url?.includes(currentRunMarker)) continue;
+                const match = check.details_url?.match(/\/actions\/runs\/(\d+)(?:\/|$)/);
+                if (match?.[1] === String(currentRunId)) continue;
                 if (allowedEvents.size > 0) {
-                  const match = check.details_url?.match(/\/actions\/runs\/(\d+)(?:\/|$)/);
                   if (match && workflowRunEvents.has(Number(match[1]))) {
                     const runId = Number(match[1]);
                     const event = workflowRunEvents.get(runId);
@@ -876,7 +876,7 @@ jobs:
               const checkRuns = filterCheckRunsByEvent({
                 checkRuns: allCheckRuns,
                 allowedEvents: allowedCheckEvents,
-                currentRunMarker,
+                currentRunId,
                 workflowRunEvents,
                 info: (message) => core.info(message),
               });

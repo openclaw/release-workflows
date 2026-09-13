@@ -31,7 +31,7 @@ function runFilter(allowedEvents, workflowRunEvents = new Map([[1, 'push'], [2, 
       { name: 'current release', details_url: 'https://github.com/openclaw/fixture/actions/runs/42/job/7' },
     ],
     allowedEvents: new Set(allowedEvents),
-    currentRunMarker: '/actions/runs/42',
+    currentRunId: 42,
     workflowRunEvents,
     info: (message) => info.push(message),
   });
