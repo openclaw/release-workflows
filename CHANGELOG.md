@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 1.9.0 - 2026-09-13
 
 **Highlights:** Swift/Electron releases now require protected branches and real annotated tags, release notes are preserved exactly (CRLF, fenced headings), and keychain cleanup is reliable.
