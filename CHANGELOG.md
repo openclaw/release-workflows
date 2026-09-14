@@ -1,9 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.10.0 - 2026-09-14
+
+**Highlights:** Electron releases now sign frozen build artifacts without running caller scripts beside Apple credentials; Go CLI archives preserve every command.
 
 - Sign and notarize Electron macOS apps from frozen unsigned artifacts without running caller build or packaging scripts in the credentialed job; thanks @SebTardif.
-
 - Assemble Go CLI platform archives from all command build directories, preserving signed bytes and rejecting colliding member names.
 
 ## 1.9.0 - 2026-09-13
