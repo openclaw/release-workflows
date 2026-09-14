@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 1.10.0 - 2026-09-14
 
 **Highlights:** Electron releases now sign frozen build artifacts without running caller scripts beside Apple credentials; Go CLI archives preserve every command.
