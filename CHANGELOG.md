@@ -1,14 +1,16 @@
 # Changelog
 
-## Unreleased
+## 1.9.0 - 2026-09-13
 
-- Update the Electron release default and example caller to pnpm 11.27.0, retaining pnpm 11 compatibility.
+**Highlights:** Swift/Electron releases now require protected branches and real annotated tags, release notes are preserved exactly (CRLF, fenced headings), and keychain cleanup is reliable.
+
+- Require protected branches for Swift/Electron releases and fail on missing annotated-tag objects instead of falling back to the current branch head.
 - Preserve exact Swift/Electron release notes, including CRLF, and ignore headings inside fenced code or HTML comments when selecting the dated release section.
 - Keep later release headings visible after literal HTML-comment markers in inline code or escaped Markdown across all three archetypes.
 - Restore Go/Electron keychain search lists captured before creation, clean up failed imports without step outputs, and attempt keychain deletion even when restoration fails.
 - Resolve the Electron draft repository explicitly without checking out caller source, and validate the draft ID before handing it to publication.
-- Require protected branches for Swift/Electron releases and fail on missing annotated-tag objects instead of falling back to the current branch head.
 - Keep independent CI failures in the release gate when their Actions run ID merely starts with the current release run ID.
+- Update the Electron release default and example caller to pnpm 11.27.0, retaining pnpm 11 compatibility.
 - Pin the Swift 6.3.3 Linux image by digest and make validation CI select its Node/Go toolchains explicitly, with bounded jobs and cancellation of superseded pull-request runs.
 
 ## 1.8.2 - 2026-09-07
