@@ -77,6 +77,17 @@ const binaryArtifacts = () => [
   { type: 'Binary', name: 'fixture.exe', path: 'dist/fixture_windows_amd64_v1/fixture.exe', goos: 'windows', goarch: 'amd64' },
   { type: 'Binary', name: 'fixture.exe', path: 'dist/fixture_windows_arm64_v8.0/fixture.exe', goos: 'windows', goarch: 'arm64' },
 ];
+const addCommandBuilds = ({ artifacts, root }, name) => {
+  for (const original of binaryArtifacts()) {
+    const member = `${name}${original.goos === 'windows' ? '.exe' : ''}`;
+    const directory = `${name}_${original.goos}_${original.goarch}`;
+    const artifact = { ...original, name: member, path: `dist/${directory}/${member}` };
+    artifacts.push(artifact);
+    mkdirSync(join(root, artifact.path, '..'), { recursive: true });
+    writeFileSync(join(root, artifact.path), `${name}:${artifact.goos}/${artifact.goarch}\n`);
+    chmodSync(join(root, artifact.path), 0o755);
+  }
+};
 const archiveArtifacts = () => [
   { type: 'Archive', name: 'fixture_1.2.3_darwin_amd64.tar.gz', path: 'dist/fixture_1.2.3_darwin_amd64.tar.gz', goos: 'darwin', goarch: 'amd64', extra: { Format: 'tar.gz' } },
   { type: 'Archive', name: 'fixture_1.2.3_darwin_arm64.tar.gz', path: 'dist/fixture_1.2.3_darwin_arm64.tar.gz', goos: 'darwin', goarch: 'arm64', extra: { Format: 'tar.gz' } },
@@ -279,6 +290,50 @@ const tests = [
       finishAssembler(fixture);
     }
   }],
+  ['three command build directories share each native archive without losing bytes', () => {
+    const fixture = runAssembler({
+      archiveFiles: ['README.md'], universal: false,
+      mutate: (state) => {
+        addCommandBuilds(state, 'helper-one');
+        addCommandBuilds(state, 'helper-two');
+      },
+    });
+    try {
+      assert.equal(fixture.targetMap.length, 6);
+      assert.equal(fixture.binaryMap.length, 18);
+      for (const row of fixture.targetMap) {
+        const archive = join(fixture.releaseAssets, row.name);
+        const windows = row.target.startsWith('windows_');
+        const suffix = windows ? '.exe' : '';
+        const members = (windows
+          ? execFileSync('unzip', ['-Z1', archive], { encoding: 'utf8' })
+          : execFileSync('tar', ['-tzf', archive], { encoding: 'utf8' }))
+          .trim().split('\n').map((name) => name.replace(/^\.\//, '')).filter(Boolean);
+        assert.deepEqual(members.sort(), ['README.md', `fixture${suffix}`, `helper-one${suffix}`, `helper-two${suffix}`].sort());
+        assert.deepEqual(fixture.binaryMap.filter((binary) => binary.target === row.target)
+          .map((binary) => binary.member).sort(), [`fixture${suffix}`, `helper-one${suffix}`, `helper-two${suffix}`].sort());
+        for (const helper of ['helper-one', 'helper-two']) {
+          const member = `${helper}${suffix}`;
+          const bytes = windows
+            ? execFileSync('unzip', ['-p', archive, member], { encoding: 'utf8' })
+            : execFileSync('tar', ['-xOzf', archive, `./${member}`], { encoding: 'utf8' });
+          assert.equal(bytes, `${helper}:${row.target.replace('_', '/')}\n`);
+        }
+      }
+    } finally {
+      finishAssembler(fixture);
+    }
+  }],
+  ['grouped command archives reject duplicate or case-folded payload members', () => {
+    for (const member of ['fixture', 'FIXTURE']) {
+      assert.throws(() => runAssembler({ universal: false, mutate: ({ artifacts, root }) => {
+        const artifact = { type: 'Binary', name: member, path: `dist/other_darwin_amd64/${member}`, goos: 'darwin', goarch: 'amd64' };
+        artifacts.push(artifact);
+        mkdirSync(join(root, artifact.path, '..'));
+        writeFileSync(join(root, artifact.path), 'must not overwrite signed bytes\n');
+      } }), /archive member collides/);
+    }
+  }],
   ['duplicate GoReleaser aliases map to one staged binary member', () => {
     const fixture = runAssembler({ mutate: ({ artifacts }) => {
       artifacts.push({ ...artifacts.find((artifact) => artifact.type === 'Binary' && artifact.goos === 'linux' && artifact.goarch === 'amd64') });
@@ -373,6 +428,16 @@ const tests = [
       artifacts.push(duplicate);
       writeFileSync(join(dist, duplicate.name), 'unsigned\n');
     } }), /expected exactly one GoReleaser Archive artifact/);
+  }],
+  ['case-folded archive names across platforms fail closed', () => {
+    assert.throws(() => runAssembler({ mutate: ({ artifacts, dist }) => {
+      for (const [arch, suffix] of [['amd64', 'CUSTOM'], ['arm64', 'custom']]) {
+        const archive = artifacts.find((artifact) => artifact.type === 'Archive' && artifact.goos === 'darwin' && artifact.goarch === arch);
+        archive.name = `fixture_1.2.3_${suffix}.tar.gz`;
+        archive.path = `dist/${archive.name}`;
+        writeFileSync(join(dist, archive.name), 'unsigned\n');
+      }
+    } }), /duplicate release archive name/);
   }],
   ['colliding archive slugs fail closed', () => {
     assert.throws(() => runAssembler({ mutate: ({ dist }) => {

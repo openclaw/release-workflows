@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Assemble Go CLI platform archives from all command build directories, preserving signed bytes and rejecting colliding member names.
+
 ## 1.9.0 - 2026-09-13
 
 **Highlights:** Swift/Electron releases now require protected branches and real annotated tags, release notes are preserved exactly (CRLF, fenced headings), and keychain cleanup is reliable.

@@ -1656,7 +1656,7 @@ jobs:
           const archiveArtifacts = artifacts.filter((artifact) => artifact.type === 'Archive');
           const targetRows = [];
           const binaryRows = [];
-          const archiveNames = new Set();
+          const archiveGroups = new Map();
           const directories = fs.readdirSync(distDirectory, { withFileTypes: true })
             .filter((entry) => entry.isDirectory())
             .sort((left, right) => left.name.localeCompare(right.name));
@@ -1729,28 +1729,19 @@ jobs:
             if (!/^[A-Za-z0-9][A-Za-z0-9+@._-]*\.(?:tar\.gz|zip)$/.test(archiveName)) {
               throw new Error(`unsafe release archive name: ${archiveName}`);
             }
-            if (archiveNames.has(archiveName) || fs.existsSync(path.join(releaseDirectory, archiveName))) {
+            const archiveKey = archiveName.toLowerCase();
+            let group = archiveGroups.get(archiveKey);
+            if (fs.existsSync(path.join(releaseDirectory, archiveName)) ||
+                (group && (archiveName !== group.name || !canonicalTarget || canonicalTarget !== group.target || archiveFormat !== group.format))) {
               throw new Error(`duplicate release archive name: ${archiveName}`);
             }
-            const existingNames = new Set(fs.readdirSync(directory).map((entryName) => entryName.toLowerCase()));
-            for (const name of archiveFileNames) {
-              const source = path.join(archiveFilesDirectory, name);
-              const target = path.join(directory, name);
-              if (existingNames.has(name.toLowerCase())) {
-                throw new Error(`archive file collides with a built payload: ${name}`);
-              }
-              fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
-              fs.chmodSync(target, fs.statSync(source).mode & 0o777);
+            if (!group) {
+              group = { name: archiveName, target: canonicalTarget, format: archiveFormat, directories: [] };
+              archiveGroups.set(archiveKey, group);
+              if (canonicalTarget) targetRows.push({ name: archiveName, target: canonicalTarget });
             }
-            archiveNames.add(archiveName);
-            const destination = path.join(releaseDirectory, archiveName);
-            if (archiveFormat === 'tar.gz') {
-              execFileSync('tar', ['-czf', destination, '-C', directory, '.'], { stdio: 'inherit' });
-            } else {
-              execFileSync('zip', ['-qry', destination, '.'], { cwd: directory, stdio: 'inherit' });
-            }
+            group.directories.push(directory);
             if (canonicalTarget) {
-              targetRows.push({ name: archiveName, target: canonicalTarget });
               for (const artifact of directoryBinaryArtifacts) {
                 const member = artifact.path.slice(directoryPrefix.length);
                 const components = member.split('/');
@@ -1763,6 +1754,43 @@ jobs:
             }
           }
           if (directories.length === 0) throw new Error('GoReleaser produced no release archive directories');
+
+          for (const group of archiveGroups.values()) {
+            const archiveName = group.name;
+            // A platform archive can combine several separately signed command builds.
+            const staging = fs.mkdtempSync(path.join(require('os').tmpdir(), 'release-archive-'));
+            try {
+              const memberNames = new Set();
+              for (const directory of group.directories) {
+                for (const name of fs.readdirSync(directory)) {
+                  const key = name.toLowerCase();
+                  if (memberNames.has(key)) throw new Error(`archive member collides with a built payload: ${name}`);
+                  memberNames.add(key);
+                  fs.cpSync(path.join(directory, name), path.join(staging, name), {
+                    recursive: true, force: false, errorOnExist: true,
+                    preserveTimestamps: true, verbatimSymlinks: true,
+                  });
+                }
+              }
+              for (const name of archiveFileNames) {
+                if (memberNames.has(name.toLowerCase())) {
+                  throw new Error(`archive file collides with a built payload: ${name}`);
+                }
+                const source = path.join(archiveFilesDirectory, name);
+                const target = path.join(staging, name);
+                fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
+                fs.chmodSync(target, fs.statSync(source).mode & 0o777);
+              }
+              const destination = path.join(releaseDirectory, archiveName);
+              if (group.format === 'tar.gz') {
+                execFileSync('tar', ['-czf', destination, '-C', staging, '.'], { stdio: 'inherit' });
+              } else {
+                execFileSync('zip', ['-qry', destination, '.'], { cwd: staging, stdio: 'inherit' });
+              }
+            } finally {
+              fs.rmSync(staging, { recursive: true, force: true });
+            }
+          }
 
           const packageArtifacts = artifacts.filter((artifact) => artifact.type === 'Linux Package');
           if (!nfpmEnabled && packageArtifacts.length > 0) {
