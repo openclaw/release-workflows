@@ -118,6 +118,8 @@ jobs:
           package-manager-cache: false
       - name: Exercise Swift keychain cleanup on native macOS
         run: node scripts/test-swift-keychain-lifecycle.mjs --real-keychains
+      - name: Exercise Electron artifact signing and native packaging
+        run: node scripts/test-electron-signing.mjs --native-packaging
 
   homebrew-preflight-integration:
     runs-on: ubuntu-latest

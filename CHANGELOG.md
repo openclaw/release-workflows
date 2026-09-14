@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Sign and notarize Electron macOS apps from frozen unsigned artifacts without running caller build or packaging scripts in the credentialed job; thanks @SebTardif.
+
 - Assemble Go CLI platform archives from all command build directories, preserving signed bytes and rejecting colliding member names.
 
 ## 1.9.0 - 2026-09-13

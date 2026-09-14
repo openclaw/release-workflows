@@ -48,7 +48,9 @@ See [`examples/release-swift-cli-caller.yml`](examples/release-swift-cli-caller.
 
 ## Electron desktop archetype
 
-`release-electron.yml` freezes a protected source commit and builds GoReleaser server archives/packages alongside Electron desktop artifacts. Credential-free jobs produce Windows NSIS/ZIP and Linux AppImage/DEB outputs. The macOS job imports an ephemeral Developer ID keychain, builds native x64 and arm64 `.app` bundles, submits and staples each app, then packages architecture-specific DMG and ZIP assets. All server and desktop bytes are merged into one immutable Actions payload with `ASSET-INVENTORY.json`, `RELEASE-NOTES.md`, and the configured checksum manifest.
+`release-electron.yml` freezes a protected source commit and builds GoReleaser server archives/packages alongside Electron desktop artifacts. Credential-free jobs produce Windows NSIS/ZIP, Linux AppImage/DEB, and unsigned native x64 and arm64 `.app` bundles. The signing job never checks out or executes caller source. It re-signs the frozen unsigned apps with the selected Developer ID policy, submits and staples each app, then packages architecture-specific DMG and ZIP assets with workflow-owned `hdiutil` and `ditto`. All server and desktop bytes are merged into one immutable Actions payload with `ASSET-INVENTORY.json`, `RELEASE-NOTES.md`, and the configured checksum manifest.
+
+The signer validates archive paths and bundle symlinks before importing credentials, signs nested code inside out with workflow-owned Electron entitlements, and separately signs and notarizes each DMG before stapling it. macOS packaging uses a standard app plus Applications-link layout; caller DMG customization and signing hooks are not run. Existing workflow inputs and published macOS asset names remain unchanged.
 
 Independent arm64 and Intel macOS jobs verify the full checksum set, exact source identity, sealed bundle identifier and Team ID, Gatekeeper acceptance, stapled tickets in both ZIP and DMG payloads, native architecture, plus Windows PE and Linux AppImage formats. Publication re-downloads every draft asset and requires exact name and digest equality with both attestations before undrafting.
 
@@ -229,3 +231,5 @@ With Docker available, `bash scripts/smoke-swift-toolchain.sh` compiles and runs
 All three archetypes extract the exact dated Markdown release section, ignoring headings inside backtick/tilde fences and HTML comments while preserving original UTF-8 bytes and line endings. `node scripts/test-release-notes-headings.mjs` executes each workflow's Python extractor against the same positive and ambiguous-heading fixtures.
 
 Literal comment markers in inline code spans or escaped Markdown do not start HTML comments and cannot hide later release headings.
+
+`node scripts/test-electron-signing.mjs` executes the production Electron unpacking and signing steps against synthetic apps, including unsafe archives, nested seals, independent DMG notarization, and failure cleanup. On macOS, `--native-packaging` also exercises real `ditto`/`hdiutil` packaging and versioned framework symlinks; Apple signing and notarization are simulated.

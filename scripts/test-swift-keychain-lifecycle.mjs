@@ -63,7 +63,7 @@ fs.writeFileSync(statePath, JSON.stringify(state));
 for (const config of [
   { archetype: 'swift-cli', job: 'sign', keychain: 'swift-release.keychain-db', snapshot: 'swift-original-keychains.txt', cleanup: 'Restore signing keychain', material: ['swift-release.p12', 'swift-release-certificate.pem', 'swift-release-private-key.pem'] },
   { archetype: 'go-cli', job: 'sign', keychain: 'release-signing.keychain-db', snapshot: 'release-original-user-keychains.txt', cleanup: 'Restore user keychain search list', material: ['release-signing.p12'] },
-  { archetype: 'electron', job: 'build-macos', keychain: 'electron-release.keychain-db', snapshot: 'electron-original-keychains.txt', cleanup: 'Delete ephemeral keychain', material: ['electron-release.p12'] },
+  { archetype: 'electron', job: 'sign', keychain: 'electron-release.keychain-db', snapshot: 'electron-original-keychains.txt', cleanup: 'Delete ephemeral keychain', material: ['electron-release.p12', 'electron-notary-key.p8'] },
 ]) {
   const workflow = loadWorkflow(`release-${config.archetype}.yml`);
   const signer = workflowStep(workflow, config.job, 'id', 'signer');
