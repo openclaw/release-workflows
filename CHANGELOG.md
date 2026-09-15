@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Recheck frozen tag targets before Swift and Electron publication, and reject Electron drafts retagged to another version.
+- Include external commit statuses in the Electron release CI gate so passing Actions checks cannot hide failed or pending CI, and successful status-only CI can release.
 
 ## 1.10.0 - 2026-09-14
 

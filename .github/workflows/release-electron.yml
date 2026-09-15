@@ -360,17 +360,28 @@ jobs:
                 allowed.has(events.get(Number(match[1])))
               );
             });
-            if (!checks.length) {
-              core.setFailed('frozen target has no independent CI check');
+            const statuses = await github.paginate(github.rest.repos.listCommitStatusesForRef, {
+              ...context.repo,
+              ref: process.env.TARGET_SHA,
+              per_page: 100,
+            });
+            const latestStatuses = new Map();
+            for (const status of statuses)
+              if (!latestStatuses.has(status.context.toLowerCase()))
+                latestStatuses.set(status.context.toLowerCase(), status);
+            if (checks.length === 0 && latestStatuses.size === 0) {
+              core.setFailed('frozen target has no independent CI evidence');
               return;
             }
-            const failures = checks.filter(
-              (check) => check.status !== 'completed' || !accepted.has(check.conclusion),
-            );
-            if (failures.length)
-              core.setFailed(
-                `non-green checks: ${failures.map((check) => `${check.name}=${check.status}/${check.conclusion}`).join(', ')}`,
-              );
+            const failures = [
+              ...checks
+                .filter((check) => check.status !== 'completed' || !accepted.has(check.conclusion))
+                .map((check) => `${check.name}=${check.status}/${check.conclusion}`),
+              ...[...latestStatuses.values()]
+                .filter((status) => status.state !== 'success')
+                .map((status) => `${status.context}=status/${status.state}`),
+            ];
+            if (failures.length) core.setFailed(`non-green checks: ${failures.join(', ')}`);
 
   tag:
     name: 2 · Freeze annotated tag
