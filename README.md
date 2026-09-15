@@ -60,6 +60,8 @@ See [`examples/release-electron-caller.yml`](examples/release-electron-caller.ym
 
 Electron draft creation uses an explicit GitHub repository context in its fresh, checkout-free workspace. It uploads the immutable assembled payload and validates the numeric draft ID before exporting it to later jobs.
 
+The Electron CI gate checks both independent check runs and the latest commit status for each context on the frozen source commit. Failed, errored, or pending statuses block release even when an Actions check passes. Successful commit statuses can supply CI evidence by themselves; `ci-check-events` filters only Actions checks and never hides commit statuses.
+
 ## Go CLI archetype
 
 `release-go-cli.yml` is the first fleet archetype. It requires:
