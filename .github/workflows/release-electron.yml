@@ -1018,7 +1018,8 @@ jobs:
             );
             const releaseId = Number(process.env.RELEASE_ID);
             const release = await github.rest.repos.getRelease({ ...context.repo, release_id: releaseId });
-            if (!release.data.draft) throw new Error('release is not draft');
+            if (!release.data.draft || release.data.tag_name !== process.env.TAG)
+              throw new Error('draft identity changed');
             const assets = await github.paginate(github.rest.repos.listReleaseAssets, {
               ...context.repo,
               release_id: releaseId,
@@ -1059,6 +1060,12 @@ jobs:
             for (const [name, digest] of digests)
               if (crypto.createHash('sha256').update(downloaded.get(name)).digest('hex') !== digest)
                 throw new Error(`draft digest mismatch: ${name}`);
+            const ref = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
+            if (ref.data.object.type !== 'tag')
+              throw new Error('release tag is no longer annotated');
+            const tagObject = await github.rest.git.getTag({ ...context.repo, tag_sha: ref.data.object.sha });
+            if (tagObject.data.object.type !== 'commit' || tagObject.data.object.sha !== process.env.TARGET_SHA)
+              throw new Error('frozen tag target changed before publication');
             const published = await github.rest.repos.updateRelease({
               ...context.repo,
               release_id: releaseId,

@@ -9,6 +9,8 @@ Fleet-standard reusable release pipelines. Every archetype follows one trust bou
 
 All archetypes reject an unprotected default branch. Only a missing tag ref starts a release from the protected head; a missing or unreadable annotated-tag object fails validation without exporting a build target.
 
+After binding the draft assets to both verifier attestations, every publisher rechecks that the release tag is still annotated and points directly to the frozen commit. A missing, unreadable, moved, or lightweight replacement tag blocks publication. The draft must also still name the expected version tag.
+
 Callers pin the stable `@v1` compatibility tag, never a branch or pre-release tag:
 
 ```yaml
