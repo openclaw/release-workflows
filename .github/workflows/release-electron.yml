@@ -99,6 +99,11 @@ jobs:
           [[ "$REPOSITORY_TYPE" == openclaw || "$REPOSITORY_TYPE" == personal ]]
           [[ "$BUNDLE_IDENTIFIER" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]
           [[ "$CHECKSUM_FILENAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$ ]]
+          checksum_name=$(printf '%s' "$CHECKSUM_FILENAME" | tr '[:upper:]' '[:lower:]')
+          if [[ "$checksum_name" == asset-inventory.json || "$checksum_name" == release-notes.md ]]; then
+            echo "checksum-filename collides with a reserved release control" >&2
+            exit 1
+          fi
           [[ "$DESKTOP_DIRECTORY" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]]
           [[ "$DESKTOP_PACKAGE" =~ ^@?[A-Za-z0-9._/-]+$ ]]
           [[ "$PRODUCT_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]
@@ -866,7 +871,10 @@ jobs:
           node <<'NODE'
           const fs = require('fs'), path = require('path'), crypto = require('crypto');
           const dir = 'release-assets';
-          const names = fs.readdirSync(dir).filter((name) => name !== process.env.CHECKSUM_FILENAME && !name.endsWith('SHA256SUMS.txt')).sort();
+          const assets = fs.readdirSync(dir);
+          if (assets.some((name) => name.toLowerCase() === process.env.CHECKSUM_FILENAME.toLowerCase()))
+            throw new Error('checksum-filename collides with a release asset');
+          const names = assets.filter((name) => !name.endsWith('SHA256SUMS.txt')).sort();
           const payloads = names.map((name) => { const bytes = fs.readFileSync(path.join(dir, name)); return { name, size: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') }; });
           fs.writeFileSync(path.join(dir, 'ASSET-INVENTORY.json'), JSON.stringify({ schemaVersion: 1, repository: process.env.GITHUB_REPOSITORY, tag: process.env.TAG, commit: process.env.TARGET_SHA, payloads }, null, 2) + '\n');
           NODE

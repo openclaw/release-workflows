@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Reject Swift and Electron checksum filenames that collide with release controls or archives, preserving payload bytes instead of overwriting them during manifest generation.
 - Recheck frozen tag targets before Swift and Electron publication, and reject Electron drafts retagged to another version.
 - Include external commit statuses in the Electron release CI gate so passing Actions checks cannot hide failed or pending CI, and successful status-only CI can release.
 

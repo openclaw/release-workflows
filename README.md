@@ -11,6 +11,8 @@ All archetypes reject an unprotected default branch. Only a missing tag ref star
 
 After binding the draft assets to both verifier attestations, every publisher rechecks that the release tag is still annotated and points directly to the frozen commit. A missing, unreadable, moved, or lightweight replacement tag blocks publication. The draft must also still name the expected version tag.
 
+The configurable checksum filename must be distinct from release controls and payload filenames, including case aliases. Swift rejects collisions with its configured archives during input validation; Electron also checks caller-produced asset names during assembly, before writing the manifest.
+
 Callers pin the stable `@v1` compatibility tag, never a branch or pre-release tag:
 
 ```yaml
