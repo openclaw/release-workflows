@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 1.10.1 - 2026-09-23
 
 **Highlights:** Swift and Electron releases reject checksum filenames that would overwrite release assets, with stronger publication checks and refreshed toolchains.
