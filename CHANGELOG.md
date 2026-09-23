@@ -1,11 +1,13 @@
 # Changelog
 
-## Unreleased
+## 1.10.1 - 2026-09-23
 
-- Refresh Electron build defaults to pnpm 11.27.1 and GoReleaser 2.18.2, and pin the Swift 6.4.0 Linux image on the existing Noble base.
+**Highlights:** Swift and Electron releases reject checksum filenames that would overwrite release assets, with stronger publication checks and refreshed toolchains.
+
 - Reject Swift and Electron checksum filenames that collide with release controls or archives, preserving payload bytes instead of overwriting them during manifest generation.
 - Recheck frozen tag targets before Swift and Electron publication, and reject Electron drafts retagged to another version.
 - Include external commit statuses in the Electron release CI gate so passing Actions checks cannot hide failed or pending CI, and successful status-only CI can release.
+- Refresh Electron build defaults to pnpm 11.27.1 and GoReleaser 2.18.2, and pin the Swift 6.4.0 Linux image on the existing Noble base.
 
 ## 1.10.0 - 2026-09-14
 
