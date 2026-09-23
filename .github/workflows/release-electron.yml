@@ -15,11 +15,11 @@ on:
         type: string
       pnpm-version:
         required: false
-        default: '11.27.0'
+        default: '11.27.1'
         type: string
       goreleaser-version:
         required: false
-        default: v2.18.1
+        default: v2.18.2
         type: string
       desktop-package:
         required: false
