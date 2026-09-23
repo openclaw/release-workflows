@@ -172,6 +172,13 @@ jobs:
           for value in "$BINARY_NAME" "$HELPER_NAME" "$MACOS_ARCHIVE_NAME" "$LINUX_ARCHIVE_NAME" "$CHECKSUM_FILENAME"; do
             [[ "$value" =~ $safe_name && "$value" != *. ]] || { echo "unsafe filename input: $value" >&2; exit 1; }
           done
+          checksum_name=$(printf '%s' "$CHECKSUM_FILENAME" | tr '[:upper:]' '[:lower:]')
+          for asset in ASSET-INVENTORY.json RELEASE-NOTES.md SIGNING-MANIFEST.json "$MACOS_ARCHIVE_NAME" "$LINUX_ARCHIVE_NAME"; do
+            if [[ "$checksum_name" == "$(printf '%s' "$asset" | tr '[:upper:]' '[:lower:]')" ]]; then
+              echo "checksum-filename collides with a release asset: $asset" >&2
+              exit 1
+            fi
+          done
           [[ "$MACOS_ARCHIVE_NAME" == *.zip && "$LINUX_ARCHIVE_NAME" == *.tar.gz ]] || {
             echo "macOS archive must be .zip and Linux archive must be .tar.gz" >&2
             exit 1

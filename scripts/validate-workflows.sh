@@ -20,6 +20,7 @@ node scripts/test-tag-freeze.mjs
 node scripts/test-ci-check-event-filter.mjs
 node scripts/test-ci-run-identity.mjs
 node scripts/test-ci-commit-statuses.mjs
+node scripts/test-checksum-collisions.mjs
 node scripts/test-build-artifact-matrix.mjs
 node scripts/test-split-host-build.mjs
 node scripts/test-swift-cli-workflow.mjs
