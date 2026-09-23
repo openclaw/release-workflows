@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  CI_NODE_VERSION: '26.8.2'
+  CI_NODE_VERSION: '26.10.0'
 
 jobs:
   validate:

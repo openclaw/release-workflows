@@ -84,7 +84,7 @@ on:
       swift-linux-image:
         description: Swift Linux container image
         required: false
-        default: swift:6.3.3-noble@sha256:dd115b20969a2acf74c8dcf6da7c4aeda086053c27453dad59052a65bafc8d0c
+        default: swift:6.4.0-noble@sha256:64bab762bc73a3fda6d9ebc559258bd6d7660c10a705bb25ecacad2f99d066f9
         type: string
       checksum-filename:
         description: Published checksum manifest filename
