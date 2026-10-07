@@ -23,7 +23,7 @@ jobs:
       version: ${{ inputs.version }}
       repository-type: openclaw
       node-version: '26'
-      pnpm-version: '11.27.1'
+      pnpm-version: '11.28.5'
       desktop-package: '@clickclack/desktop'
       desktop-directory: apps/desktop
       product-name: ClickClack
