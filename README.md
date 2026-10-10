@@ -13,6 +13,8 @@ After binding the draft assets to both verifier attestations, every publisher re
 
 The configurable checksum filename must be distinct from release controls and payload filenames, including case aliases. Swift rejects collisions with its configured archives during input validation; Electron also checks caller-produced asset names during assembly, before writing the manifest.
 
+All archetypes reject checksum filenames ending in a dot during input validation because GitHub renames those assets on upload.
+
 Callers pin the stable `@v1` compatibility tag, never a branch or pre-release tag:
 
 ```yaml
@@ -45,6 +47,8 @@ The signing job never checks out or executes caller source. It re-signs the froz
 The signer snapshots the user keychain search list before creating its ephemeral keychain. Always-run cleanup restores that list and deletes the temporary keychain even if import fails before signer outputs are available; restoration and deletion failures are reported independently.
 
 Draft creation resolves the GitHub repository explicitly and downloads only the immutable signed payload into a fresh job workspace. It does not check out caller source, so tracked files named `release-assets/*` cannot contaminate the draft uploads.
+
+Swift and Electron retain the release ID returned by draft creation and upload assets through that response's validated `uploads.github.com` URL. An older draft with the same tag cannot replace the ID passed to publication. Failed uploads do not export a draft ID.
 
 When `homebrew-formula` is nonempty, the handoff dispatches the configured tap's `update-formula.yml` with the exact verified macOS archive, waits for the uniquely correlated run, then requires the resulting formula URL and SHA-256 to equal the attested release asset. A pre-existing versioned Unreleased changelog section satisfies closeout; otherwise the workflow opens a closeout PR.
 

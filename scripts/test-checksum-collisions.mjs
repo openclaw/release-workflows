@@ -16,7 +16,8 @@ for (const archetype of ['swift-cli', 'electron']) {
   }));
   const collisions = ['ASSET-INVENTORY.json', 'release-notes.md'];
   if (archetype === 'swift-cli') collisions.push('SIGNING-MANIFEST.json', defaults.MACOS_ARCHIVE_NAME, defaults.LINUX_ARCHIVE_NAME.toUpperCase());
-  for (const filename of ['SHA256SUMS', 'checksums.txt', ...collisions]) {
+  const trailingDots = archetype === 'electron' ? ['SHA256SUMS.'] : [];
+  for (const filename of ['SHA256SUMS', 'checksums.txt', ...collisions, ...trailingDots]) {
     test(`${archetype} checksum input ${filename}`, () => {
       const root = mkdtempSync(path.join(tmpdir(), 'checksum-input-'));
       try {
@@ -31,6 +32,10 @@ for (const archetype of ['swift-cli', 'electron']) {
         if (collisions.includes(filename)) {
           assert.notEqual(result.status, 0, 'checksum output must not overwrite a release asset');
           assert.match(result.stderr, /checksum-filename collides/);
+          assert.ok(!existsSync(path.join(root, 'output')), 'invalid inputs must not emit release outputs');
+        } else if (filename.endsWith('.')) {
+          assert.notEqual(result.status, 0, 'checksum filename must not end with a dot');
+          assert.match(result.stderr, /checksum-filename cannot end with a dot because GitHub renames that asset/);
           assert.ok(!existsSync(path.join(root, 'output')), 'invalid inputs must not emit release outputs');
         } else assert.equal(result.status, 0, result.stderr);
       } finally { rmSync(root, { recursive: true, force: true }); }
