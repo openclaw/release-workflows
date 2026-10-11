@@ -1,0 +1,391 @@
+#!/usr/bin/env node
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+import { createRequire } from 'node:module';
+import { generateKeyPairSync, sign } from 'node:crypto';
+import { loadWorkflow, workflowStep, extractMarkedSource } from './workflow-source.cjs';
+
+const workflow = loadWorkflow('release-sparkle-app.yml');
+const root = mkdtempSync(join(tmpdir(), 'sparkle-tools-'));
+const modules = new Map();
+for (const job of Object.values(workflow.jobs)) {
+  for (const step of job.steps ?? []) {
+    for (const match of (step.run ?? '').matchAll(/(?:#|\/\/) BEGIN ([\w.-]+\.(?:py|cjs))\n/g)) {
+      const name = match[1];
+      const marker = name.endsWith('.py') ? '#' : '//';
+      const source = extractMarkedSource(step.run, `${marker} BEGIN ${name}\n`, `${marker} END ${name}`);
+      if (modules.has(name)) assert.equal(source, modules.get(name), `${name} differs between production jobs`);
+      modules.set(name, source);
+      writeFileSync(join(root, name), source);
+    }
+  }
+}
+process.on('exit', () => rmSync(root, { recursive: true, force: true }));
+function python(source, env = {}) {
+  const result = spawnSync('python3', ['-c', source], { cwd: root, env: { ...process.env, ...env }, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr + result.stdout);
+}
+
+test('all extracted production Python tools compile', () => {
+  python(`import py_compile\nfrom pathlib import Path\nfor p in Path('.').glob('*.py'): py_compile.compile(str(p), doraise=True)`);
+});
+
+test('production input validator rejects path, layout, version, secret and checksum ambiguity', () => {
+  const inputs = workflow.on?.workflow_call?.inputs ?? workflow.true.workflow_call.inputs;
+  const base = Object.fromEntries(Object.entries(inputs).map(([k, v]) => [k.toUpperCase().replaceAll('-', '_'), String(v.default ?? '')]));
+  Object.assign(base, { VERSION: '1.2.3', REPOSITORY_TYPE: 'openclaw', APP_NAME: 'Fixture', BUNDLE_IDENTIFIER: 'org.example.fixture', MINIMUM_SYSTEM_VERSION: '15.0', APP_BUILD_SCRIPT: 'scripts/build.sh', APP_ENTITLEMENTS: 'app.plist', SPARKLE_PUBLIC_KEY: Buffer.alloc(32, 1).toString('base64'), APPCAST_FEED_URL: 'https://example.test/feed.xml', DMG_BACKGROUND: 'assets/background.png', DMG_LAYOUT: JSON.stringify({ 'window-size': [720, 460], 'icon-size': 128, 'app-position': [180, 230], 'applications-position': [540, 230], 'volume-name': 'Fixture' }), GITHUB_OUTPUT: join(root, 'outputs') });
+  const run = (patch) => spawnSync('python3', ['contract.py'], { cwd: root, env: { ...base, ...patch, PATH: process.env.PATH }, encoding: 'utf8' });
+  assert.equal(run({}).status, 0);
+  for (const patch of [
+    { APP_ENTITLEMENTS: '../unsafe' }, { APPCAST_PATH: '.' }, { APP_BUILD_SCRIPT: 'foo/../bad' },
+    { CHECKSUM_FILENAME: 'Appcast.XML' }, { CHECKSUM_FILENAME: 'Fixture-1.2.3.app.zip' }, { CHECKSUM_FILENAME: 'hashes.' },
+    { VERSION: '1.2.3-nightly.1' }, { VERSION: '01.2.3' }, { MINIMUM_SYSTEM_VERSION: '16.0' },
+    { SPARKLE_VERSION: 'latest' }, { SPARKLE_PUBLIC_KEY: 'bad' }, { APPCAST_FEED_URL: 'http://example.test/feed.xml' },
+    { CLI_BUILD_SCRIPT: 'scripts/cli.sh' }, { NPM_PACK_SCRIPT: 'scripts/pack.sh' },
+    { CI_CHECK_EVENTS: '["push","push"]' }, { CLI_SMOKE_ARGS: '--help' },
+    { DMG_LAYOUT: '{}' }, { DMG_LAYOUT: base.DMG_LAYOUT.replace('128', 'true') },
+    { DMG_LAYOUT: base.DMG_LAYOUT.replace('180', '999') }, { BUILD_RUNNER: 'self-hosted' },
+    { SIGNING_ENVIRONMENT: '../release' }, { XCODE_PATH: '/tmp/toolchain' },
+  ]) assert.notEqual(run(patch).status, 0, JSON.stringify(patch));
+});
+
+test('notarization retries only pre-submission transient failures with injected scheduler', () => {
+  python(`
+from notary import submit,ticket
+import json
+accepted=(0,json.dumps({'status':'Accepted','id':'submission-id'}),'')
+calls=[]; delays=[]
+def invoke(path):
+    calls.append(path)
+    return (1,'','abortedUpload') if len(calls)<3 else accepted
+assert submit('artifact',invoke,delays.append)['id']=='submission-id'
+assert len(calls)==3 and delays==[15,30]
+for response in [(1,'','invalid credentials'),(1,json.dumps({'id':'in-flight'}),'network lost'),(1,json.dumps({'id':'bad','status':'Invalid'}),'abortedUpload'),(1,json.dumps({'id':'ok','status':'Accepted'}),'timed out'),(1,json.dumps({'status':'In Progress'}),'timed out')]:
+    calls=[]; delays=[]
+    def invoke(path): calls.append(path); return response
+    try: submit('artifact',invoke,delays.append); raise AssertionError('accepted failure')
+    except RuntimeError: pass
+    assert len(calls)==1 and delays==[]
+calls=[]; delays=[]
+def invoke(path): calls.append(path); return (1,'','connection reset')
+try: submit('artifact',invoke,delays.append); raise AssertionError('unbounded retries')
+except RuntimeError: pass
+assert len(calls)==3 and delays==[15,30]
+calls=[]; delays=[]
+def online(path): calls.append(path); return int(len(calls)<3)
+ticket('app',online,delays.append)
+assert delays==[10,20]
+`);
+});
+
+test('appcast uses escaped element-form minimum, rejects duplicates and non-monotonic builds', () => {
+  python(`
+from appcast import update,validate
+import xml.etree.ElementTree as ET
+xml='<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel><title>Fixture</title></channel></rss>'
+entry=dict(title='A & B <App>',version='1.2.3',buildNumber='12',minimumSystemVersion='15.0',releaseUrl='https://example.test/?a=1&b=2',assetUrl='https://example.test/a.zip?a=1&b=2',zipLength=55,edSignature='a+b/==',pubDate='Thu, 01 Oct 2026 00:00:00 +0000')
+result=update(xml,entry)
+assert '<sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>' in result
+assert 'A &amp; B &lt;App&gt;' in result
+validate(result,entry)
+for candidate in [entry,dict(entry,version='1.2.4',buildNumber='12'),dict(entry,version='1.2.4',buildNumber='11'),dict(entry,buildNumber='0')]:
+    try: update(result,candidate); raise AssertionError('accepted invalid appcast')
+    except ValueError: pass
+new=update(result,dict(entry,version='1.2.4',buildNumber='13'))
+validate(new,dict(entry,version='1.2.4',buildNumber='13'))
+try: validate(new.replace('<sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>',''),dict(entry,version='1.2.4',buildNumber='13')); raise AssertionError('missing element accepted')
+except ValueError: pass
+for invalid in ['<!DOCTYPE rss [<!ENTITY bad "bad">]>'+xml,xml.replace('</channel>','</channel><channel/>')]:
+    try: update(invalid,entry); raise AssertionError('bad XML accepted')
+    except ValueError: pass
+`);
+});
+
+test('Sparkle private seed derives the configured public key and verifies exact ZIP bytes', () => {
+  const require = createRequire(import.meta.url);
+  const tool = require(join(root, 'sparkle.cjs'));
+  const pair = generateKeyPairSync('ed25519');
+  const pub = pair.publicKey.export({ type: 'spki', format: 'der' }).subarray(-32).toString('base64');
+  const seed = pair.privateKey.export({ type: 'pkcs8', format: 'der' }).subarray(-32).toString('base64');
+  const file = join(root, 'app.zip');
+  const bytes = Buffer.from('synthetic signed ZIP'); writeFileSync(file, bytes);
+  tool.checkPrivate(seed, pub);
+  assert.throws(() => tool.checkPrivate(seed, Buffer.alloc(32).toString('base64')), /mismatch/);
+  assert.throws(() => tool.checkPrivate('bad', pub), /32-byte seed/);
+  const signature = sign(null, bytes, pair.privateKey).toString('base64');
+  tool.verify(file, signature, pub);
+  writeFileSync(file, 'changed ZIP');
+  assert.throws(() => tool.verify(file, signature, pub), /mismatch/);
+});
+
+test('inventory binds names, checksums, source identity and sizes', () => {
+  python(`
+from pathlib import Path
+from inventory import freeze,verify
+import json
+root=Path('assets'); root.mkdir()
+(root/'app.zip').write_bytes(b'zip')
+(root/'appcast.xml').write_bytes(b'xml')
+freeze(root,'checksums.txt','openclaw/fixture','v1.2.3','abc')
+verify(root,'checksums.txt','openclaw/fixture','v1.2.3','abc')
+for scenario in ['extra','changed','identity','missing','duplicate']:
+    snapshot={p.name:p.read_bytes() for p in root.iterdir()}
+    if scenario=='extra': (root/'extra.zip').write_bytes(b'extra')
+    if scenario=='changed': (root/'app.zip').write_bytes(b'other')
+    if scenario=='identity':
+        data=json.loads((root/'ASSET-INVENTORY.json').read_text()); data['commit']='other'; (root/'ASSET-INVENTORY.json').write_text(json.dumps(data))
+    if scenario=='missing': (root/'app.zip').unlink()
+    if scenario=='duplicate':
+        p=root/'checksums.txt'; p.write_text(p.read_text()+p.read_text().splitlines()[0]+'\\n')
+    try: verify(root,'checksums.txt','openclaw/fixture','v1.2.3','abc'); raise AssertionError(scenario)
+    except (ValueError,FileNotFoundError): pass
+    for p in root.iterdir(): p.unlink()
+    for name,data in snapshot.items(): (root/name).write_bytes(data)
+`);
+});
+
+test('DMG/ZIP tree equality includes bytes, modes, and symlink destinations', () => {
+  python(`
+from inventory import equal_trees
+from pathlib import Path
+import os,shutil
+left=Path('tree-left');left.mkdir();(left/'binary').write_bytes(b'bin');(left/'link').symlink_to('binary')
+right=Path('tree-right');shutil.copytree(left,right,symlinks=True)
+equal_trees(left,right)
+for scenario in ['bytes','mode','link','extra']:
+    shutil.rmtree(right); shutil.copytree(left,right,symlinks=True)
+    if scenario=='bytes': (right/'binary').write_bytes(b'changed')
+    if scenario=='mode': (right/'binary').chmod(0o700)
+    if scenario=='link': (right/'link').unlink();(right/'link').symlink_to('/outside')
+    if scenario=='extra': (right/'extra').write_bytes(b'x')
+    try: equal_trees(left,right);raise AssertionError(scenario)
+    except (ValueError,FileNotFoundError): pass
+`);
+});
+
+test('unsafe archive paths, ambiguous members, hardlinks and escaping symlinks fail before extraction', () => {
+  python(`
+from unpack import unpack
+from pathlib import Path
+import tarfile,io,zipfile,stat
+for index,case in enumerate(['traversal','absolute','hardlink','escape','duplicate','under-link','cycle']):
+    path=Path('unsafe-'+str(index)+'.tgz')
+    with tarfile.open(path,'w:gz') as archive:
+        names=['app/file']
+        if case=='traversal': names=['app/../file']
+        if case=='absolute': names=['/app/file']
+        if case=='duplicate': names=['app/file','app/FILE']
+        if case=='under-link': names=['app/link','app/link/file']
+        if case=='cycle': names=['app/link']
+        for name in names:
+            member=tarfile.TarInfo(name)
+            if case in ('hardlink','escape','under-link','cycle') and name==names[0]:
+                member.type=tarfile.LNKTYPE if case=='hardlink' else tarfile.SYMTYPE
+                member.linkname='link' if case=='cycle' else '../../outside' if case=='escape' else 'file'
+                archive.addfile(member)
+            else: member.size=1;archive.addfile(member,io.BytesIO(b'x'))
+    try: unpack(str(path),'unsafe-output-'+str(index),'app','tar');raise AssertionError(case)
+    except ValueError: pass
+    assert not Path('unsafe-output-'+str(index)).exists()
+`);
+});
+
+test('npm archive embeds byte-identical executable and companions', () => {
+  python(`
+from npm import verify_package
+from pathlib import Path
+import tarfile,io
+cli=Path('cli.tgz')
+def add(archive,name,data,mode=0o755):
+    p=tarfile.TarInfo(name);p.size=len(data);p.mode=mode;archive.addfile(p,io.BytesIO(data))
+with tarfile.open(cli,'w:gz') as archive:
+    add(archive,'fixture-universal/tool',b'binary');add(archive,'fixture-universal/runtime.dylib',b'library')
+for case in ('valid','changed','library','mode','duplicate'):
+    npm=Path('npm-'+case+'.tgz')
+    with tarfile.open(npm,'w:gz') as archive:
+        add(archive,'package/bin/tool',b'other' if case=='changed' else b'binary',0o644 if case=='mode' else 0o755)
+        add(archive,'package/bin/runtime.dylib',b'other' if case=='library' else b'library')
+        if case=='duplicate': add(archive,'package/bin/tool',b'binary')
+    if case=='valid': verify_package(cli,npm,'fixture','tool')
+    else:
+        try:verify_package(cli,npm,'fixture','tool');raise AssertionError(case)
+        except ValueError:pass
+`);
+});
+
+test('Swift runtime audit follows architecture-specific reexports and refuses missing imports', () => {
+  python(`
+from runtime import *
+from pathlib import Path
+import runtime
+libraries={}
+tbd=b'''--- !tapi-tbd\ntbd-version: 4\ntargets: [ arm64-macos, x86_64-macos ]\ninstall-name: /usr/lib/swift/libswiftCore.dylib\nreexported-libraries:\n  - targets: [ arm64-macos ]\n    libraries: [ /usr/lib/swift/libswiftMore.dylib ]\n...\n'''
+parse_tbd(Path('Core.tbd'),tbd,libraries)
+assert reachable(libraries,'arm64','libswiftCore')=={'libswiftCore','libswiftMore'}
+assert reachable(libraries,'x86_64','libswiftCore')=={'libswiftCore'}
+runtime.run=lambda args:'(undefined) external _swift_initBorrow (from libswiftCore)'
+try:strong_imports('binary','arm64');raise AssertionError('strong import accepted')
+except AuditError:pass
+runtime.run=lambda args:'(undefined) weak external _swift_initBorrow (from libswiftCore)'
+assert strong_imports('binary','arm64')==set()
+assert choose_sdk([SDK(Path('new'),'27.0','macosx','1'),SDK(Path('old'),'26.0','macosx','1')],'15.0').version=='26.0'
+try:choose_sdk([SDK(Path('new'),'27.0','macosx','1')],'15.0');raise AssertionError('missing older SDK accepted')
+except AuditError:pass
+`);
+});
+
+test('Sparkle sealing walks physical helpers before their framework and the main app', () => {
+  python(`
+import signing,plistlib
+from pathlib import Path
+root=Path('Signing.app').resolve();version=root/'Contents/Frameworks/Sparkle.framework/Versions/B'
+version.mkdir(parents=True)
+framework=version.parent.parent
+(framework/'Versions/Current').symlink_to('B')
+for bundle in [version/'XPCServices/Downloader.xpc',version/'XPCServices/Installer.xpc',version/'Updater.app']:
+    (bundle/'Contents/MacOS').mkdir(parents=True)
+    (bundle/'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleExecutable':'helper'}))
+    (bundle/'Contents/MacOS/helper').write_bytes(b'macho')
+for name in ('Autoupdate','Sparkle'):(version/name).write_bytes(b'macho')
+for name,target in [('Autoupdate','Versions/Current/Autoupdate'),('Updater.app','Versions/Current/Updater.app'),('XPCServices','Versions/Current/XPCServices'),('Sparkle','Versions/Current/Sparkle')]:
+    (framework/name).symlink_to(target)
+signing.os.environ['MINIMUM_SYSTEM_VERSION']='15.0'
+signing.check_deployment=lambda *args:None
+signing.subprocess.check_output=lambda args,**kwargs: 'Mach-O' if Path(args[-1]).read_bytes()==b'macho' else 'data'
+paths=signing.signing_paths(root)
+for item in [version/'XPCServices/Downloader.xpc',version/'XPCServices/Installer.xpc',version/'Autoupdate',version/'Updater.app']:
+    assert paths.index(item)<paths.index(framework)
+assert all(not p.is_symlink() for p in paths)
+(version/'Autoupdate').unlink()
+try:signing.signing_paths(root);raise AssertionError('missing helper accepted')
+except (ValueError,FileNotFoundError):pass
+`);
+});
+
+test('post-sign caller packaging cannot replace the original signed artifact', () => {
+  python(`
+from pathlib import Path
+from inventory import bind_signed
+left=Path('signer-original');right=Path('package-final');left.mkdir();right.mkdir()
+for name in ('app.zip','SIGNING-MANIFEST.json'):
+    (left/name).write_bytes(b'signer');(right/name).write_bytes(b'signer')
+bind_signed(left,right)
+(right/'SIGNING-MANIFEST.json').write_bytes(b'caller manifest')
+try:bind_signed(left,right);raise AssertionError('caller replaced signer proof')
+except ValueError:pass
+`);
+});
+
+test('release transport rejects overwrite, import-shadowing, links and nested payloads before writing', () => {
+  python(`
+from payload import unpack_payload
+from pathlib import Path
+import tarfile,io
+for index,(name,kind) in enumerate([('json.py','file'),('../source-original/appcast.xml','file'),('signer-original/signed-sparkle.tar.gz','file'),('release-assets/subdir/evil','file'),('release-assets/link','link'),('release-assets/app.zip','valid')]):
+    archive=Path('transport-'+str(index)+'.tgz'); destination=Path('isolated-'+str(index))
+    with tarfile.open(archive,'w:gz') as output:
+        item=tarfile.TarInfo(name)
+        if kind=='link':item.type=tarfile.SYMTYPE;item.linkname='../outside';output.addfile(item)
+        else:item.size=1;output.addfile(item,io.BytesIO(b'x'))
+    if kind=='valid':
+        unpack_payload(archive,destination)
+        assert (destination/'release-assets/app.zip').read_bytes()==b'x'
+    else:
+        try:unpack_payload(archive,destination);raise AssertionError(name)
+        except ValueError:pass
+        assert not destination.exists()
+`);
+});
+
+test('companion dylibs inherit executable run paths and install IDs are not dependencies', () => {
+  python(`
+import runtime_libraries as runtime
+from pathlib import Path
+root=Path('rpath-fixture');root.mkdir()
+for name in ('tool','libfoo.dylib'):(root/name).write_bytes(b'macho')
+def read(*args):
+    if args[0]=='lipo':return 'arm64 x86_64'
+    if args[-1].endswith('tool'):
+        return 'cmd LC_RPATH\\n path @executable_path (offset 12)\\ncmd LC_LOAD_DYLIB\\n name @rpath/libfoo.dylib (offset 24)\\n'
+    return 'cmd LC_ID_DYLIB\\n name @rpath/libfoo.dylib (offset 24)\\n'
+runtime.read=read
+runtime.check_companions(root,'tool')
+(root/'libfoo.dylib').unlink()
+try:runtime.check_companions(root,'tool');raise AssertionError('missing dylib accepted')
+except ValueError:pass
+`);
+});
+
+test('Mach-O deployment targets cannot contradict the declared minimum OS', () => {
+  python(`
+from contract import check_deployment
+from unittest.mock import patch
+for value in ('14.0','15.0','26.0'):
+    def output(args,**kw):
+        return 'arm64 x86_64' if args[0]=='lipo' else 'cmd LC_BUILD_VERSION\\n platform 1\\n minos '+value+'\\n'
+    with patch('subprocess.check_output',output):
+        if value!='26.0':check_deployment('binary','15.0')
+        else:
+            try:check_deployment('binary','15.0');raise AssertionError('newer minimum accepted')
+            except ValueError:pass
+`);
+});
+
+test('production attestation preserves CRLF release-note bytes', () => {
+  const run = workflowStep(workflow, 'verify', 'name', 'Verify inventory, Sparkle signature, sealed app, DMG, and CLI').run;
+  const program = run.split("python3 - <<'PYCODE'\n").at(-1).split('\nPYCODE')[0];
+  python(`from pathlib import Path\nPath('release-assets').mkdir(exist_ok=True)\nfor name,data in [('RELEASE-NOTES.md',b'line one\\r\\nline two\\r\\n'),('ASSET-INVENTORY.json',b'{}'),('checksums.txt',b'hashes\\n')]: (Path('release-assets')/name).write_bytes(data)`);
+  const result = spawnSync('python3', ['-c', program], { cwd: root, env: { ...process.env, CHECKSUM_FILENAME: 'checksums.txt', GITHUB_REPOSITORY: 'openclaw/fixture', GITHUB_RUN_ID: '1', PAYLOAD_ARTIFACT: 'payload', TAG: 'v1.2.3', TARGET_SHA: 'commit', EXPECTED_ARCH: 'arm64', VERIFY_RUNNER: 'macos-15' }, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(readFileSync(join(root, 'verified-sparkle-attestation.json'), 'utf8')).releaseNotes, 'line one\r\nline two\r\n');
+});
+
+test('unrecognized final archives cannot piggyback on a valid signed payload', () => {
+  python(`
+from pathlib import Path
+from inventory import bind_signed
+left=Path('allowlist-original');right=Path('allowlist-final');left.mkdir();right.mkdir()
+(left/'app.zip').write_bytes(b'signed');(right/'app.zip').write_bytes(b'signed')
+for name in ('RELEASE-NOTES.md','appcast.xml','appcast-entry.json','ASSET-INVENTORY.json','checksums.txt'):(right/name).write_bytes(b'control')
+bind_signed(left,right,'checksums.txt',False)
+(right/'unsigned.tar.gz').write_bytes(b'unsigned')
+try:bind_signed(left,right,'checksums.txt',False);raise AssertionError('extra archive accepted')
+except ValueError:pass
+(right/'unsigned.tar.gz').unlink();(right/'package.tgz').write_bytes(b'package')
+try:bind_signed(left,right,'checksums.txt',False);raise AssertionError('unrequested npm accepted')
+except ValueError:pass
+bind_signed(left,right,'checksums.txt',True)
+`);
+});
+
+test('release staging resets the private-key umask for distributable modes', () => {
+  const run = workflowStep(workflow, 'sign', 'name', 'Sign app inside out and notarize release payload').run;
+  const permissions = extractMarkedSource(run, '# BEGIN release-staging-permissions', '# END release-staging-permissions');
+  writeFileSync(join(root, 'source-cli'), 'executable', { mode: 0o755 });
+  const second = spawnSync('bash', ['-c', `set -euo pipefail\numask 077\nprintf fixture > private-seed\n${permissions}\nmkdir public-cli-complete\ncp source-cli public-cli-complete/tool`], { cwd: root, encoding: 'utf8' });
+  assert.equal(second.status, 0, second.stderr);
+  python(`import stat\nfrom pathlib import Path\nassert stat.S_IMODE(Path('public-cli-complete').stat().st_mode)==0o755\nassert stat.S_IMODE(Path('public-cli-complete/tool').stat().st_mode)==0o755\nassert stat.S_IMODE(Path('private-seed').stat().st_mode)==0o600`);
+});
+
+test('prerelease appcast items stay off the default Sparkle update channel', () => {
+  python(`
+from appcast import update,validate
+xml='<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel/></rss>'
+base=dict(title='Fixture',buildNumber='12',minimumSystemVersion='15.0',releaseUrl='https://example.test/release',assetUrl='https://example.test/app.zip',zipLength=55,edSignature='signature',pubDate='date')
+for channel in ('alpha','beta','rc'):
+    entry=dict(base,version='1.2.3-'+channel+'.1')
+    result=update(xml,entry)
+    marker='<sparkle:channel>'+channel+'</sparkle:channel>'
+    assert marker in result
+    validate(result,entry)
+    for changed in (result.replace(marker,''),result.replace(marker,'<sparkle:channel>wrong</sparkle:channel>')):
+        try:validate(changed,entry);raise AssertionError('wrong channel accepted')
+        except ValueError:pass
+stable=update(xml,dict(base,version='1.2.3'))
+assert '<sparkle:channel>' not in stable
+`);
+});

@@ -1,0 +1,66 @@
+name: Release Sparkle App
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version (X.Y.Z or X.Y.Z-beta.N)
+        required: true
+        type: string
+      dry-run:
+        description: Sign and verify without publishing
+        default: false
+        type: boolean
+
+permissions: {}
+
+jobs:
+  release:
+    # Provision this caller repository's release environment before dispatch.
+    # Required reviewer: steipete; disable administrator bypass. Allow only the
+    # default branch plus a separate v* tag rule. Dispatch from the default head.
+    # A sole reviewer who dispatches must be allowed to approve their own run.
+    permissions:
+      actions: write
+      checks: read
+      contents: write
+      statuses: read
+      pull-requests: write
+    uses: openclaw/release-workflows/.github/workflows/release-sparkle-app.yml@v1
+    with:
+      version: ${{ inputs.version }}
+      dry-run: ${{ inputs.dry-run }}
+      repository-type: openclaw
+      signing-environment: release
+      build-runner: xcode-27
+      app-name: Example
+      bundle-identifier: org.example.app
+      minimum-system-version: '15.0'
+      app-build-script: scripts/build-release-app.sh
+      app-entitlements: Resources/App.entitlements
+      # Replace this synthetic public key and URL with the app's Info.plist values.
+      sparkle-public-key: AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=
+      sparkle-version: '2.10.0'
+      appcast-path: appcast.xml
+      appcast-feed-url: https://example.org/appcast.xml
+      dmg-background: assets/dmg-background.png
+      dmg-layout: '{"window-size":[720,460],"icon-size":128,"app-position":[180,230],"applications-position":[540,230],"volume-name":"Example"}'
+      cli-build-script: scripts/build-release-cli.sh
+      cli-binary-name: example
+      cli-identifier: org.example.cli
+      cli-archive-prefix: example-macos
+      cli-smoke-args: '["--help"]'
+      npm-pack-script: scripts/pack-release-npm.sh
+      npm-publish-workflow: npm-publish.yml
+      homebrew-workflow: update-homebrew.yml
+    # Pass names explicitly even when values exist only in the environment.
+    # The called signing job selects that environment; its values take precedence.
+    # required:true checks the mapping; the signing job checks nonempty values.
+    # secrets: inherit is unnecessary and would pass unrelated secrets.
+    secrets:
+      MACOS_SIGNING_P12: ${{ secrets.MACOS_SIGNING_P12 }}
+      MACOS_SIGNING_P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_PRIVATE_KEY_P8: ${{ secrets.ASC_PRIVATE_KEY_P8 }}
+      SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}

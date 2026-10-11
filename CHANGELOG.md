@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add the approval-gated `sparkle-app` release archetype with signed and notarized app/DMG/CLI assets, Sparkle appcasts, three-runner verification, optional npm/Homebrew handoffs, dry runs, and appcast closeout PRs.
+
 - Upload Swift and Electron draft assets to the release upload URL so an older draft with the same tag does not receive them; thanks @SebTardif.
 
 ## 1.10.1 - 2026-09-23

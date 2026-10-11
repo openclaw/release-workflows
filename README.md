@@ -54,6 +54,90 @@ When `homebrew-formula` is nonempty, the handoff dispatches the configured tap's
 
 See [`examples/release-swift-cli-caller.yml`](examples/release-swift-cli-caller.yml) for the thin caller. The consumer must provision `MACOS_SIGNING_P12`, `MACOS_SIGNING_P12_PASSWORD`, `ASC_KEY_ID`, `ASC_ISSUER_ID`, and `ASC_PRIVATE_KEY_P8`; Homebrew handoff additionally needs `TAP_TOKEN`.
 
+## Sparkle macOS app archetype
+
+`release-sparkle-app.yml` releases a universal macOS app with Sparkle updates, a Finder-layout DMG, and optional standalone CLI and npm archives. Caller code runs only in credential-free build and npm packaging jobs. The signer uses workflow-owned code, hash-pinned tools, frozen data files, and unsigned build artifacts; it never checks out or runs caller source. See [`examples/release-sparkle-app-caller.yml`](examples/release-sparkle-app-caller.yml).
+
+The job graph is `validate → build → sign → package → tag → draft → verify → publish → handoff → closeout`. Validation freezes a protected default-branch commit, or reuses an existing annotated version tag reachable from that branch, and extracts exactly one `## X.Y.Z - YYYY-MM-DD` changelog section. Signing approval and successful signing **precede every tag, draft, and publication write**. Three independent jobs verify the same immutable Actions payload with only `actions: read`; the publisher independently downloads every draft asset, compares its names and bytes against all three attestations, rechecks the annotated tag, and only then publishes the creation-bound release ID. Alpha, beta, and rc versions are explicitly marked as GitHub prereleases.
+
+### Environment and caller setup
+
+Create the caller repository's environment **before dispatch**, normally named `release`. Configure `steipete` as the required reviewer, disable administrator bypass, and select deployment branches and tags with two separate policies: the exact default branch (normally `main`) and tags matching `v*`. Keep the default branch protected. The environment rule applies to the triggering run's ref; this archetype requires dispatch from the current protected default-branch head, even when reusing an older annotated tag. The tag policy does not enable dispatching this archetype from a tag.
+
+The `sign` job declares `environment: ${{ inputs.signing-environment }}`. Its job and secret access wait for environment approval. Provision all six secrets in that environment, and explicitly pass all six names from the caller:
+
+| Secret | Required value |
+| --- | --- |
+| `MACOS_SIGNING_P12` | Base64 password-protected Developer ID Application certificate/private-key export matching `repository-type`. |
+| `MACOS_SIGNING_P12_PASSWORD` | Password for that export. |
+| `ASC_KEY_ID` | Apple notarization API key ID. |
+| `ASC_ISSUER_ID` | Matching issuer ID. |
+| `ASC_PRIVATE_KEY_P8` | Full raw PEM contents of the API private key. |
+| `SPARKLE_PRIVATE_KEY` | Base64 32-byte Ed25519 seed exported by Sparkle `generate_keys -x`; never a filesystem path. |
+
+GitHub requires a caller secret mapping even for environment-only secrets. `secrets: inherit` is unnecessary; explicit mappings avoid passing unrelated secrets. Required declarations validate that the mapping exists; a value-presence check runs inside the approved signing job. Environment values override same-named repository/organization values. Keep release credentials environment-only so other workflows cannot bypass this policy. These semantics are documented in [GitHub's reusable workflow guide](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows).
+
+Only one required reviewer must approve. If Peter dispatches and is the sole reviewer, leave prevention of self-review disabled; otherwise another eligible reviewer must dispatch or approve. Required-reviewer availability depends on repository visibility and plan. Environment names can be created automatically without protection, so an absent or misspelled environment is not an approval policy. See [GitHub deployment protection rules](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments). The caller needs `actions: write`, `checks: read`, `contents: write`, `statuses: read`, and `pull-requests: write`, narrowed by each called job. Enable Actions PR creation as described in the Go CLI Migration prerequisites section for closeout.
+
+### Inputs and build contract
+
+| Input | Contract/default |
+| --- | --- |
+| `version` | Required `X.Y.Z` or `X.Y.Z-(alpha|beta|rc).N`; optional leading `v`. |
+| `repository-type` | Required `openclaw` or `personal`; same identities and Team IDs as the other archetypes. |
+| `signing-environment` | `release`; must already have the reviewer and deployment policies above. |
+| `build-runner` | `xcode-27`; allowed alternatives: `macos-15`, `macos-15-intel`, `macos-26`. Use fresh GitHub-hosted runners. |
+| `xcode-path` | Empty uses runner default; otherwise `/Applications/Xcode…app/Contents/Developer`. Sets `DEVELOPER_DIR` for build/sign. |
+| `checksum-filename` | `checksums.txt`; safe filename distinct from every payload/control, ignoring case. |
+| `ci-check-events` | `["push","pull_request"]`; filters Actions checks, never commit statuses. All independent eligible signals must be green. |
+| `app-name` | Required safe bundle basename without `.app`; produces `<app-name>-<version>.app.zip` and `.dmg`. |
+| `bundle-identifier` | Required stable app signing identifier. |
+| `minimum-system-version` | Required numeric macOS version at most `15.0`, exactly matching `LSMinimumSystemVersion`. |
+| `app-build-script` | Required tracked executable, run from repository root with recursive submodules at the frozen SHA. Must produce only `dist/sparkle-app/<app-name>.app`, with an unsigned outer seal and universal arm64/x86_64 executable. |
+| `app-entitlements` | Required tracked plist path; only the main app receives these entitlements. |
+| `sparkle-public-key` | Required canonical base64 32-byte Ed25519 public key, exactly matching `SUPublicEDKey`. |
+| `appcast-feed-url` | Required HTTPS URL, exactly matching `SUFeedURL`. |
+| `appcast-path` | `appcast.xml`; tracked source feed and closeout destination. |
+| `sparkle-version` | `2.10.0`; only versions with a workflow-owned release-archive SHA-256 entry are accepted. |
+| `dmg-background` | Required tracked PNG path, with pixel dimensions equal to the layout window. |
+| `dmg-layout` | Required data-only JSON schema below. No caller Python/settings/hooks run. |
+| `cli-build-script` | Empty disables standalone CLI; otherwise emits only the binary and companion `.dylib` files in `dist/sparkle-cli/`. |
+| `cli-binary-name`, `cli-identifier`, `cli-archive-prefix` | All required together with the CLI script; safe names and stable signing identifier. |
+| `cli-smoke-args` | `[]`; JSON argv array, e.g. `["--help"]`, invoked after `--version` on every verifier. |
+| `npm-pack-script` | Empty disables npm packaging; otherwise requires the CLI and emits exactly one `dist/sparkle-npm/*.tgz`. |
+| `npm-publish-workflow` | Empty disables dispatch; otherwise caller workflow filename accepting `version`, requiring npm packaging. |
+| `homebrew-workflow` | Empty disables dispatch; otherwise caller workflow filename accepting `version`. |
+| `swift-runtime-audit` | `true`; on macOS 26, audit all app/CLI Mach-O slices against the oldest eligible installed SDK older than 27, following reexports. |
+| `dry-run` | `false`; `true` performs real signing, notarization, packaging, and three-verifier proof, skipping tag/draft/publish/handoffs/closeout. |
+
+`CFBundleShortVersionString` must equal the normalized version. `CFBundleVersion` must be a positive integer greater than every existing appcast build. The feed must have a single RSS channel, unique versions, and strictly descending build numbers; a duplicate release version fails rather than rewriting release history. The generated item includes the child `<sparkle:minimumSystemVersion>` element, escaped metadata, signature, length, release link, and release-notes link. Alpha, beta, and rc versions also receive the matching `<sparkle:channel>`; stable versions have no channel. Stable clients therefore do not receive prereleases. Clients opting into previews must explicitly allow the corresponding Sparkle channel. DTDs are rejected.
+
+Build/sign default to the public-preview `xcode-27` label. Independent verification runs on `macos-15` arm64, `macos-15-intel` x86_64, and `macos-26` arm64, using those runners' own toolchains. GitHub lists these labels in its [hosted runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners); preview images carry no stability guarantee. Build and sign record Xcode, Swift, and SDK versions in `SIGNING-MANIFEST.json`. The runtime audit fails closed when no eligible older SDK exists or a tbd format cannot be parsed. It rejects strong `_swift_initBorrow` imports, checks strong Swift runtime imports per architecture, and validates packaged `@rpath` companions using the executable’s inherited run paths before native CLI execution. Actual Mach-O deployment targets must not exceed the declared minimum.
+
+### DMG, CLI, and npm packaging
+
+The complete DMG layout schema is:
+
+```json
+{"window-size":[720,460],"icon-size":128,"app-position":[180,230],"applications-position":[540,230],"volume-name":"Example"}
+```
+
+Unknown keys are rejected. The window dimensions are integers from 200 through 4096, icon size is 16 through 512, and both icon positions must lie inside the window. Volume names have 1–80 characters and cannot contain path separators, colons, or control characters. Workflow-owned dmgbuild 1.6.7, ds-store 1.3.3, and mac-alias 2.2.3 wheels are installed with SHA-256 requirements. Finder contains the app, background, and `/Applications` link; the app's declared `.icns` icon is used when present. Both the app and DMG are independently signed, notarized, stapled, and assessed. Verifiers compare the DMG's app tree against the ZIP including file bytes, modes, and symlink targets.
+
+The standalone CLI and dylibs must initially be ad-hoc signed universal Mach-O files; `--version` must report the requested version. The signer replaces their signatures, notarizes the universal payload, then uses `lipo -thin` without re-signing. It emits `<prefix>-universal.tar.gz`, `<prefix>-arm64.tar.gz`, and `<prefix>-x86_64.tar.gz`. Each contains one `<prefix>-<arch>/` directory with the executable, companions, tracked `LICENSE`, generated `README.md`, and `VERSION`. Verification checks the thin archives against slices of the signed universal files and runs the native CLI on every runner.
+
+The npm script runs from the frozen checkout with the signed universal CLI, companions, and archive documentation staged at `dist/sparkle-cli/`. It must install its own required packaging dependencies and emit exactly one `.tgz` under `dist/sparkle-npm/`. Both packaging and independent verification require exactly one executable with `cli-binary-name` inside the npm package, byte-identical to the signed universal binary, with byte-identical adjacent companion libraries. Symlinks, hardlinks, duplicate archive members, and unsafe paths are rejected. Signed assets are restored from the immutable signer artifact after caller packaging. Each verifier independently downloads the original signer artifact and frozen source inputs again, compares every signed asset and the release notes byte-for-byte, and regenerates the appcast from the frozen feed. Caller packaging cannot replace those trust anchors. Draft, verifier, and closeout jobs validate the transport as flat regular files and unpack it into a separate directory before reading it.
+
+The Sparkle private seed exists only in a mode-0600 temporary file. Its derived public key must match `sparkle-public-key` before `sign_update` signs anything, and the ZIP signature is verified independently with that public key. Legacy expanded Sparkle key exports are not accepted; export a supported 32-byte seed before migration. Never rotate an existing app's update identity merely to satisfy a format check.
+
+### Handoffs, closeout, and limitations
+
+After publishing, the workflow dispatches `npm-publish-workflow` and then `homebrew-workflow`, waiting up to 15 minutes for each. Keep consumers' established trusted publishers (for example `npm-publish.yml`) and accept the normalized `version` input. These workflows obtain their own credentials/OIDC permissions; the reusable signer never passes Apple or Sparkle secrets to them. Explicit dispatch is necessary because publishing with `GITHUB_TOKEN` does not trigger ordinary `release: published` workflows. Correlation uses a pre-dispatch run snapshot, exact default-branch SHA, dispatch event, and token actor; concurrent identical dispatches are rejected when ambiguous. With only a `version` input, this is not a cryptographic downstream run binding. Failure leaves the release published and provides an explicit resume hint.
+
+Closeout creates one PR that updates the source appcast and opens the next `Unreleased` section. It refuses to overwrite a feed changed since the frozen source. **Merge this PR to serve the new Sparkle update from the default branch.** It never writes directly to the protected branch. The published assets include `appcast.xml`, `appcast-entry.json`, signing manifest, frozen release notes, inventory, and checksums alongside app/CLI/npm artifacts.
+
+Notarization retries at most three uploads, only for recognized pre-submission network failures. An assigned submission ID or terminal status stops resubmission, including uncertain completion; investigate the logged ID before retrying. Online ticket propagation uses bounded backoff. A dry run still requires real credentials and human approval, consumes signing/notarization time, and leaves immutable Actions artifacts for inspection. It does not prove GitHub publication, downstream dispatch, or closeout behavior; those paths have executable synthetic regression coverage. The archetype currently requires universal apps, integer build numbers, modern Sparkle key seeds, and the standard Sparkle helper topology. It does not build Linux/Windows assets, execute caller signing/DMG hooks, or automatically reconcile an already-published version.
+
 ## Electron desktop archetype
 
 `release-electron.yml` freezes a protected source commit and builds GoReleaser server archives/packages alongside Electron desktop artifacts. Credential-free jobs produce Windows NSIS/ZIP, Linux AppImage/DEB, and unsigned native x64 and arm64 `.app` bundles. The signing job never checks out or executes caller source. It re-signs the frozen unsigned apps with the selected Developer ID policy, submits and staples each app, then packages architecture-specific DMG and ZIP assets with workflow-owned `hdiutil` and `ditto`. All server and desktop bytes are merged into one immutable Actions payload with `ASSET-INVENTORY.json`, `RELEASE-NOTES.md`, and the configured checksum manifest.

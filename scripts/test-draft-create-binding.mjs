@@ -31,7 +31,7 @@ if (args[0] === 'release') {
 }
 assert.equal(args[0], 'api');
 const endpoint = args.find((arg) => arg.startsWith('repos/') || arg.startsWith('https://'));
-if (endpoint === 'repos/openclaw/fixture/git/ref/tags/v1.2.3') {
+if (endpoint === 'repos/openclaw/fixture/git/ref/tags/' + process.env.TAG) {
   tagExists();
 } else if (endpoint === 'repos/openclaw/fixture/releases') {
   const payload = JSON.parse(fs.readFileSync(0, 'utf8'));
@@ -60,17 +60,18 @@ function runDraft(archetype, scenario) {
   try {
     for (const dir of ['workspace', 'staging/release-assets', 'bin']) mkdirSync(join(root, dir), { recursive: true });
     for (const name of names) writeFileSync(join(root, 'staging/release-assets', name), `frozen ${name}\r\n`);
-    const archive = archetype === 'swift-cli' ? 'swift-release-assets.tar.gz' : 'electron-release-assets.tar.gz';
-    execFileSync('tar', ['-czf', join(root, 'workspace', archive), '-C', join(root, 'staging'), 'release-assets']);
+    const archive = archetype === 'swift-cli' ? 'swift-release-assets.tar.gz' : archetype === 'sparkle-app' ? 'sparkle-release-assets.tar.gz' : 'electron-release-assets.tar.gz';
+    execFileSync('tar', ['-czf', join(root, 'workspace', archive), '-C', join(root, 'staging'), 'release-assets'], { env: { ...process.env, COPYFILE_DISABLE: '1' } });
     writeFileSync(join(root, 'bin/gh'), gh, { mode: 0o755 });
     writeFileSync(join(root, 'state'), JSON.stringify([older]));
     const step = workflowStep(loadWorkflow(`release-${archetype}.yml`), 'draft', 'id', 'release');
-    const result = spawnSync('bash', ['-c', step.run], {
+    const setup = archetype === 'sparkle-app' ? workflowStep(loadWorkflow('release-sparkle-app.yml'), 'draft', 'name', 'Prepare safe release transport reader').run : '';
+    const result = spawnSync('bash', ['-c', setup + '\n' + step.run], {
       cwd: join(root, 'workspace'), encoding: 'utf8',
       env: {
-        PATH: `${join(root, 'bin')}:${process.env.PATH}`, TAG: 'v1.2.3',
+        PATH: `${join(root, 'bin')}:${process.env.PATH}`, TAG: scenario === 'prerelease' ? 'v1.2.3-beta.1' : 'v1.2.3',
         GH_REPO: 'openclaw/fixture', STATE: join(root, 'state'), SCENARIO: scenario,
-        GITHUB_OUTPUT: join(root, 'output'),
+        GITHUB_OUTPUT: join(root, 'output'), RUNNER_TEMP: root, GITHUB_WORKSPACE: join(root, 'workspace'),
       },
     });
     return {
@@ -81,7 +82,7 @@ function runDraft(archetype, scenario) {
   } finally { rmSync(root, { recursive: true, force: true }); }
 }
 
-for (const archetype of ['electron', 'swift-cli']) {
+for (const archetype of ['electron', 'swift-cli', 'sparkle-app']) {
   test(`${archetype}: exports the created draft despite an older same-tag draft`, () => {
     const result = runDraft(archetype, 'success');
     assert.equal(result.status, 0, result.stderr);
@@ -104,3 +105,11 @@ for (const archetype of ['electron', 'swift-cli']) {
     });
   }
 }
+
+
+test('sparkle-app: beta drafts are explicitly prereleases', () => {
+  const result = runDraft('sparkle-app', 'prerelease');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.state[1].tag_name, 'v1.2.3-beta.1');
+  assert.equal(result.state[1].prerelease, true);
+});

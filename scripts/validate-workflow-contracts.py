@@ -327,3 +327,50 @@ all_workflows = '\n'.join(path.read_text() for path in workflow_paths)
 unpinned = re.findall(r'^\s*uses:\s+(?:actions|goreleaser)/[^@\n]+@(v\d+|main|master)\s*(?:#.*)?$', all_workflows, re.MULTILINE)
 if unpinned:
     raise SystemExit(f'unpinned action references: {unpinned}')
+
+
+# Sparkle adds an environment approval gate before the existing publication boundary.
+import json
+import subprocess
+sparkle = json.loads(subprocess.check_output([
+    'ruby', '-rpsych', '-rjson', '-e',
+    'puts JSON.generate(Psych.safe_load(File.read(ARGV[0]), aliases: false))',
+    '.github/workflows/release-sparkle-app.yml',
+], text=True))
+sparkle_jobs = sparkle['jobs']
+if set(sparkle_jobs) != {'validate', 'build', 'sign', 'package', 'tag', 'draft', 'verify', 'publish', 'handoff', 'closeout'}:
+    raise SystemExit('invalid Sparkle job graph')
+if sparkle_jobs['sign']['environment'] != '${{ inputs.signing-environment }}':
+    raise SystemExit('Sparkle signing must select the approval-gated caller environment')
+for job in ['sign', 'verify']:
+    if sparkle_jobs[job]['permissions'] != {'actions': 'read'}:
+        raise SystemExit(f'Sparkle {job} must have actions: read only')
+for name, job in sparkle_jobs.items():
+    source = json.dumps(job)
+    if name != 'sign' and 'secrets.' in source:
+        raise SystemExit(f'Sparkle secrets leaked outside signing: {name}')
+    if name in ('sign', 'verify') and 'actions/checkout' in source:
+        raise SystemExit(f'Sparkle {name} must not check out caller code')
+    if name in ('tag', 'draft', 'publish', 'handoff', 'closeout') and '!inputs.dry-run' not in job.get('if', ''):
+        raise SystemExit(f'Sparkle dry run must skip {name}')
+    for step in job['steps']:
+        if 'uses' in step and not re.fullmatch(r'[^@]+@[0-9a-f]{40}', step['uses']):
+            raise SystemExit('Sparkle actions must have immutable SHA pins')
+if sparkle_jobs['tag']['needs'] != ['validate', 'sign', 'package']:
+    raise SystemExit('Sparkle tag must wait for successful approval, signing and packaging')
+if [row['runner'] for row in sparkle_jobs['verify']['strategy']['matrix']['include']] != ['macos-15', 'macos-15-intel', 'macos-26']:
+    raise SystemExit('Sparkle requires all three independent verifier runners')
+if 'inputs.dry-run' not in sparkle_jobs['verify']['if'] or 'always()' not in sparkle_jobs['verify']['if']:
+    raise SystemExit('Sparkle dry-run verification must survive the skipped draft job')
+call = sparkle['on']['workflow_call'] if 'on' in sparkle else sparkle['true']['workflow_call']
+required_sparkle_secrets = {'MACOS_SIGNING_P12', 'MACOS_SIGNING_P12_PASSWORD', 'ASC_KEY_ID', 'ASC_ISSUER_ID', 'ASC_PRIVATE_KEY_P8', 'SPARKLE_PRIVATE_KEY'}
+if set(call['secrets']) != required_sparkle_secrets or not all(s['required'] for s in call['secrets'].values()):
+    raise SystemExit('Sparkle must declare six explicitly required secret names')
+example = json.loads(subprocess.check_output([
+    'ruby', '-rpsych', '-rjson', '-e',
+    'puts JSON.generate(Psych.safe_load(File.read(ARGV[0]), aliases: false))',
+    'examples/release-sparkle-app-caller.yml',
+], text=True))
+if example['jobs']['release']['secrets'] != {name: '${{ secrets.' + name + ' }}' for name in required_sparkle_secrets}:
+    raise SystemExit('Sparkle example must pass the six secret names explicitly')
+print('workflow trust contracts passed, including approval-gated Sparkle')
