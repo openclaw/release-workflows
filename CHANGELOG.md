@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.11.2 - 2026-10-12
+
+- Preserve npm pack lifecycle scripts and their output without treating script logs as JSON; validate tarballs against the frozen package plan.
+
 ## 1.11.1 - 2026-10-12
 
 - Make npm and source dry-run dispatches prove the current protected branch commit when the requested version already has a release tag, without reading or changing that tag.

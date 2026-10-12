@@ -838,9 +838,9 @@ jobs:
         import json, os, pathlib, subprocess
         out=pathlib.Path(os.environ['RUNNER_TEMP'])/'raw'
         for p in json.loads((out.parent/'validated/PACKAGE-PLAN.json').read_text()):
-            result=subprocess.run(['npm','pack','--json','--pack-destination',str(out)],cwd=p['dir'],check=True,capture_output=True,text=True)
-            packed=json.loads(result.stdout)
-            if len(packed)!=1 or packed[0]['filename']!=p['file']: raise SystemExit('unexpected packed filename')
+            subprocess.run(['npm','pack','--pack-destination',str(out)],cwd=p['dir'],check=True)
+            archive=out/p['file']
+            if archive.is_symlink() or not archive.is_file(): raise SystemExit('expected packed tarball missing or unsafe')
         PY
     - id: artifact
       run: echo "name=npm-package-raw-${{ needs.validate.outputs.tag }}-${{ github.run_id
