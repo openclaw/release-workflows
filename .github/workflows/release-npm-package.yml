@@ -1,0 +1,1525 @@
+---
+name: Release npm package
+'on':
+  workflow_call:
+    inputs:
+      version:
+        description: SemVer release version, with optional v
+        required: true
+        type: string
+      dry_run:
+        description: Validate, build and verify without creating tags or publishing
+        required: false
+        default: true
+        type: boolean
+      require-signed-tag:
+        description: Require SSH signature using frozen .github/release-allowed-signers
+        required: false
+        default: false
+        type: boolean
+      strict-checks:
+        description: Require all independent CI signals
+        required: false
+        default: false
+        type: boolean
+      ci-check-events:
+        description: Eligible Actions events; push CI only by default
+        required: false
+        default: '["push"]'
+        type: string
+      test-command:
+        description: Optional credential-free caller test command
+        required: false
+        default: ''
+        type: string
+      homebrew-tap:
+        description: Optional tap owner/repo
+        required: false
+        default: openclaw/homebrew-tap
+        type: string
+      homebrew-formula:
+        description: Optional source/npm formula handoff; empty disables
+        required: false
+        default: ''
+        type: string
+      node-version:
+        description: Node runtime
+        required: false
+        default: '24'
+        type: string
+      package-manager:
+        description: pnpm, npm or bun
+        required: false
+        default: npm
+        type: string
+      package-manager-version:
+        description: Explicit pnpm/bun version (required for those managers)
+        required: false
+        default: ''
+        type: string
+      package-dirs:
+        description: JSON array of package directories in dependency-first order
+        required: false
+        default: '["."]'
+        type: string
+      install-command:
+        description: Optional install override; otherwise frozen manager install
+        required: false
+        default: ''
+        type: string
+      build-command:
+        description: Credential-free build command
+        required: false
+        default: npm run build --if-present
+        type: string
+      smoke-command:
+        description: Command run from a clean installation of all frozen tarballs
+        required: true
+        type: string
+    secrets:
+      TAP_TOKEN:
+        description: Optional configured tap dispatch token
+        required: false
+    outputs:
+      release-url:
+        description: Verified GitHub release URL
+        value: "${{ jobs.publish.outputs.release-url }}"
+permissions: {}
+concurrency:
+  group: release-npm-package-${{ github.repository }}-${{ inputs.version }}
+  cancel-in-progress: false
+jobs:
+  validate:
+    name: 1 · Validate frozen source
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      statuses: read
+    outputs:
+      default-branch: "${{ steps.repository.outputs.default-branch }}"
+      release-notes-artifact-name: "${{ steps.metadata.outputs.release-notes-artifact-name
+        }}"
+      release-version: "${{ steps.inputs.outputs.release-version }}"
+      tag: "${{ steps.inputs.outputs.tag }}"
+      tag-object-sha: "${{ steps.repository.outputs.tag-object-sha }}"
+      target-sha: "${{ steps.repository.outputs.target-sha }}"
+      metadata-id: "${{ steps.notes-upload.outputs.artifact-id }}"
+      metadata-digest: "${{ steps.notes-upload.outputs.artifact-digest }}"
+    steps:
+    - name: Validate inputs
+      id: inputs
+      env:
+        SOURCE_ARCHIVES: 'true'
+        VERSION: "${{ inputs.version }}"
+        HOMEBREW_TAP: "${{ inputs.homebrew-tap }}"
+        HOMEBREW_FORMULA: "${{ inputs.homebrew-formula }}"
+      run: |
+        set -euo pipefail
+        [[ -z "$HOMEBREW_FORMULA" || "$SOURCE_ARCHIVES" == true ]] || { echo 'enable source-archives for Homebrew handoff'; exit 1; }
+        v=$(printf '%s'  "$VERSION" | sed 's/^v//')
+        [[ "$v" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]] || { echo 'invalid release SemVer'; exit 1; }
+        [[ "$HOMEBREW_TAP" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || exit 1
+        [[ -z "$HOMEBREW_FORMULA" || "$HOMEBREW_FORMULA" =~ ^[A-Za-z0-9][A-Za-z0-9+_.@-]*$ ]] || exit 1
+        python3 - "$v" <<'SEMVER'
+        import sys
+        pre=sys.argv[1].partition('-')[2]
+        if any(x.isdigit() and len(x)>1 and x.startswith('0') for x in pre.split('.')): raise SystemExit('numeric prerelease identifiers cannot have leading zeros')
+        SEMVER
+        printf 'release-version=%s\ntag=v%s\n' "$v" "$v" >> "$GITHUB_OUTPUT"
+    - name: Resolve protected release target
+      id: repository
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+      env:
+        TAG: "${{ steps.inputs.outputs.tag }}"
+      with:
+        script: |
+          const repo = await github.rest.repos.get(context.repo);
+          const branchName = repo.data.default_branch;
+          const branch = await github.rest.repos.getBranch({
+            ...context.repo,
+            branch: branchName,
+          });
+          if (!branch.data.protected) {
+            core.setFailed(`default branch ${branchName} is not protected`);
+            return;
+          }
+          const branchHead = branch.data.commit.sha;
+          if (context.ref !== `refs/tags/${process.env.TAG}` && (context.ref !== `refs/heads/${branchName}` || context.sha !== branchHead)) {
+            core.setFailed(`caller must run at protected ${branchName} head ${branchHead}; got ${context.ref}@${context.sha}`);
+            return;
+          }
+
+          let targetSha = branchHead;
+          let targetSource = 'protected-head';
+          let tagObjectSha = '';
+          let existingTag = null;
+          try {
+            existingTag = await github.rest.git.getRef({
+              ...context.repo,
+              ref: `tags/${process.env.TAG}`,
+            });
+          } catch (error) {
+            if (error.status !== 404) throw error;
+          }
+
+          if (existingTag !== null) {
+            if (existingTag.data.object.type !== 'tag') {
+              core.setFailed(`existing tag is lightweight, not annotated: ${process.env.TAG}`);
+              return;
+            }
+            tagObjectSha = existingTag.data.object.sha;
+            const tagObject = await github.rest.git.getTag({
+              ...context.repo,
+              tag_sha: tagObjectSha,
+            });
+            if (tagObject.data.object.type !== 'commit') {
+              core.setFailed(`annotated tag does not peel directly to a commit: ${process.env.TAG}`);
+              return;
+            }
+            targetSha = tagObject.data.object.sha;
+            targetSource = 'annotated-tag';
+
+            const comparison = await github.rest.repos.compareCommitsWithBasehead({
+              ...context.repo,
+              basehead: `${targetSha}...${branchHead}`,
+              per_page: 1,
+            });
+            if (!['ahead', 'identical'].includes(comparison.data.status)) {
+              core.setFailed(`tag commit ${targetSha} is not reachable from protected ${branchName} head ${branchHead}`);
+              return;
+            }
+            core.info(`retry target frozen by annotated tag ${process.env.TAG} at ${targetSha}`);
+          } else {
+            core.info(`first-attempt target is protected ${branchName} head ${branchHead}`);
+          }
+          core.setOutput('default-branch', branchName);
+          core.setOutput('tag-object-sha', tagObjectSha);
+          core.setOutput('target-sha', targetSha);
+          core.setOutput('target-source', targetSource);
+
+          if (context.ref.startsWith('refs/tags/') && (existingTag === null || context.sha !== targetSha)) throw new Error('tag event does not match frozen commit');
+    - name: Check out exact release target
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+        ref: "${{ inputs.require-signed-tag && steps.inputs.outputs.tag || steps.repository.outputs.target-sha
+          }}"
+    - name: Verify required SSH-signed tag
+      if: inputs.require-signed-tag
+      env:
+        TAG: "${{ steps.inputs.outputs.tag }}"
+        TARGET_SHA: "${{ steps.repository.outputs.target-sha }}"
+      run: |
+        set -euo pipefail
+        policy=.github/release-allowed-signers
+        [[ -f "$policy" && ! -L "$policy" && -s "$policy" ]] || {
+          echo "$policy must be a nonempty regular file when require-signed-tag is enabled" >&2
+          exit 1
+        }
+        [[ "$(git cat-file -t "refs/tags/$TAG")" == tag ]] || {
+          echo "$TAG must be an annotated SSH-signed tag" >&2
+          exit 1
+        }
+        [[ "$(git rev-parse "refs/tags/$TAG^{}")" == "$TARGET_SHA" ]] || {
+          echo "$TAG does not peel to the frozen target" >&2
+          exit 1
+        }
+        git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile="$policy" verify-tag "$TAG"
+    - name: Validate release metadata
+      id: metadata
+      env:
+        RELEASE_VERSION: "${{ steps.inputs.outputs.release-version }}"
+        PACKAGE_DIRS: "${{ inputs.package-dirs }}"
+      run: |
+        set -euo pipefail
+        python3 - "$RELEASE_VERSION" "$RUNNER_TEMP/RELEASE-NOTES.md" <<'PY'
+        from pathlib import Path
+        import re
+        import sys
+
+        version, output = sys.argv[1:]
+        raw = Path("CHANGELOG.md").read_bytes()
+        text = raw.decode("utf-8")
+        version_pattern = re.compile(rf"(?<![0-9A-Za-z.])v?{re.escape(version)}(?![0-9A-Za-z.+-])")
+        date_pattern = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+        heading_pattern = re.compile(r"^##[ \t]+")
+        fence_pattern = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})")
+        def fence_marker(content):
+            opening = fence_pattern.match(content)
+            if opening and (opening.group(1)[0] == "~" or "`" not in content[opening.end():]):
+                return opening.group(1)
+            return None
+
+        def paragraph_tail(start):
+            tail = text[start:]
+            boundary = re.search(r"\n(?:[ \t]*\r?\n|[ ]{0,3}#{1,6}(?:[ \t]|$)|[ ]{0,3}<!--)", tail, re.M)
+            if boundary:
+                tail = tail[:boundary.start()]
+            for candidate in re.finditer(r"\n([^\r\n]*)", tail):
+                if fence_marker(candidate.group(1)):
+                    return tail[:candidate.start()]
+            return tail
+
+        headings = []
+        offset = 0
+        fence = None
+        in_comment = False
+        inline_end = -1
+        for line in text.splitlines(keepends=True):
+            content = line.rstrip("\r\n")
+            if fence is not None:
+                closing = re.match(rf"^[ ]{{0,3}}{re.escape(fence[0])}{{{fence[1]},}}[ \t]*$", content)
+                if closing:
+                    fence = None
+                offset += len(line)
+                continue
+
+            if not in_comment:
+                opening = fence_marker(content)
+                if opening:
+                    fence = (opening[0], len(opening))
+                    offset += len(line)
+                    continue
+                if heading_pattern.match(content):
+                    headings.append((offset, offset + len(line), content))
+
+            cursor = 0
+            while cursor < len(content):
+                if in_comment:
+                    closing = content.find("-->", cursor)
+                    if closing < 0:
+                        break
+                    in_comment = False
+                    cursor = closing + 3
+                elif offset + cursor < inline_end:
+                    cursor = min(len(content), inline_end - offset)
+                elif content[cursor] == "\\":
+                    cursor += 2
+                elif content[cursor] == "`":
+                    marker = re.match(r"`+", content[cursor:]).group()
+                    tail_start = offset + cursor + len(marker)
+                    tail = paragraph_tail(tail_start)
+                    closing = re.search(r"(?<!`)" + marker + r"(?!`)", tail)
+                    if closing:
+                        inline_end = tail_start + closing.end()
+                    cursor += len(marker)
+                elif content.startswith("<!--", cursor):
+                    block_start = cursor <= 3 and content[:cursor] == " " * cursor
+                    if content.startswith("<!--->", cursor):
+                        cursor += 6
+                    elif content.startswith("<!-->", cursor):
+                        cursor += 5
+                    elif block_start:
+                        in_comment = True
+                        cursor += 4
+                    else:
+                        tail_start = offset + cursor + 4
+                        closing = paragraph_tail(tail_start).find("-->")
+                        if closing >= 0:
+                            inline_end = tail_start + closing + 3
+                        cursor += 4
+                else:
+                    cursor += 1
+            offset += len(line)
+
+        matches = [
+            candidate
+            for candidate in headings
+            if version_pattern.search(candidate[2]) and date_pattern.search(candidate[2])
+        ]
+        if len(matches) != 1:
+            raise SystemExit(
+                f"CHANGELOG.md needs exactly one dated level-two section for {version}; found {len(matches)}"
+            )
+        match = matches[0]
+        end = next((candidate[0] for candidate in headings if candidate[0] > match[0]), len(text))
+        section = text[match[0]:end]
+        Path(output).write_bytes(section.encode("utf-8"))
+        PY
+
+        python3 - <<'PYDATE'
+        import datetime, pathlib, re
+        heading=pathlib.Path(__import__('os').environ['RUNNER_TEMP'],'RELEASE-NOTES.md').read_text().splitlines()[0]
+        datetime.date.fromisoformat(re.search(r'[0-9]{4}-[0-9]{2}-[0-9]{2}',heading)[0])
+        PYDATE
+
+        python3 - <<'PYVERSION'
+        import json, os, pathlib
+        p=pathlib.Path('package.json')
+        if p.exists():
+            m=json.loads(p.read_text())
+            if 'version' in m and m['version']!=os.environ['RELEASE_VERSION']: raise SystemExit('package.json version mismatch')
+        PYVERSION
+        for file in .release-version VERSION version.txt; do
+          [[ ! -f "$file" ]] || [[ "$(tr -d '[:space:]' < "$file" | sed 's/^v//')" == "$RELEASE_VERSION" ]] || exit 1
+        done
+        python3 - <<'PY'
+        import json, os, pathlib, re
+        root=pathlib.Path.cwd().resolve()
+        dirs=json.loads(os.environ['PACKAGE_DIRS'])
+        if not isinstance(dirs,list) or not dirs or not all(isinstance(p,str) for p in dirs): raise SystemExit('package-dirs must be a nonempty JSON string array')
+        plan=[]
+        for d in dirs:
+            if d != '.' and not re.fullmatch(r'[A-Za-z0-9_-][A-Za-z0-9._/-]*',d): raise SystemExit('unsafe package directory')
+            p=root/d
+            if '..' in pathlib.PurePosixPath(d).parts or p.resolve()!=p or not p.is_dir(): raise SystemExit('package directory cannot escape or use symlinks')
+            f=p/'package.json'
+            if f.is_symlink(): raise SystemExit('package manifest cannot be a symlink')
+            m=json.loads(f.read_text())
+            if m.get('private') or m.get('version')!=os.environ['RELEASE_VERSION']: raise SystemExit('every public package must match release version')
+            name=m.get('name','')
+            if not re.fullmatch(r'(?:@[a-z0-9._-]+/)?[a-z0-9][a-z0-9._-]*',name): raise SystemExit('invalid npm name')
+            plan.append({'dir':d,'name':name,'version':m['version'],'file':name.replace('@','').replace('/','-')+'-'+m['version']+'.tgz'})
+        if len({x['name'] for x in plan})!=len(plan) or len({x['file'].lower() for x in plan})!=len(plan): raise SystemExit('duplicate package or archive name')
+        for i,p in enumerate(plan):
+            m=json.loads((root/p['dir']/'package.json').read_text())
+            for field in ['dependencies','optionalDependencies','peerDependencies']:
+                for name,value in m.get(field,{}).items():
+                    sibling=next((x for x in plan if x['name']==name),None)
+                    if sibling and (value!=sibling['version'] or (field!='peerDependencies' and plan.index(sibling)>=i)): raise SystemExit('sibling dependencies require exact pins and dependency-first order')
+        pathlib.Path(os.environ['RUNNER_TEMP'],'PACKAGE-PLAN.json').write_text(json.dumps(plan,indent=2)+'\n')
+        PY
+        echo "release-notes-artifact-name=npm-package-notes-$RELEASE_VERSION-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+    - name: Upload frozen release notes
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: "${{ steps.metadata.outputs.release-notes-artifact-name }}"
+        path: |-
+          ${{ runner.temp }}/RELEASE-NOTES.md
+          ${{ runner.temp }}/PACKAGE-PLAN.json
+        if-no-files-found: error
+        retention-days: 30
+      id: notes-upload
+    - name: Require independent CI green on frozen target
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+      env:
+        CI_CHECK_EVENTS: "${{ inputs.ci-check-events }}"
+        DEFAULT_BRANCH: "${{ steps.repository.outputs.default-branch }}"
+        STRICT_CHECKS: "${{ inputs.strict-checks }}"
+        TARGET_SHA: "${{ steps.repository.outputs.target-sha }}"
+      with:
+        script: |
+          const acceptableConclusions = new Set(['success', 'neutral', 'skipped']);
+          const currentRunId = context.runId;
+          const allowedCheckEvents = new Set(JSON.parse(process.env.CI_CHECK_EVENTS));
+          const normalizeContext = (name) => name.toLowerCase();
+          // ci-check-event-filter-begin
+          const filterCheckRunsByEvent = ({ checkRuns, allowedEvents, currentRunId, workflowRunEvents, info }) => {
+            const accepted = [];
+            for (const check of checkRuns) {
+              const match = check.details_url?.match(/\/actions\/runs\/(\d+)(?:\/|$)/);
+              if (match?.[1] === String(currentRunId)) continue;
+              if (allowedEvents.size > 0) {
+                if (match && workflowRunEvents.has(Number(match[1]))) {
+                  const runId = Number(match[1]);
+                  const event = workflowRunEvents.get(runId);
+                  if (!allowedEvents.has(event)) {
+                    info(`Ignoring ${check.name} from Actions event ${event}`);
+                    continue;
+                  }
+                }
+              }
+              accepted.push(check);
+            }
+            return accepted;
+          };
+          // ci-check-event-filter-end
+          // ci-check-gate-helpers-begin
+          const evaluateAllChecks = ({ checkRuns, latestStatuses, acceptableConclusions }) => {
+            const pending = [];
+            const failures = [];
+            if (checkRuns.length === 0 && latestStatuses.size === 0) {
+              pending.push('no independent CI check or commit status');
+            }
+            for (const check of checkRuns) {
+              const observed = `${check.name}=${check.status}/${check.conclusion}`;
+              if (check.status !== 'completed') {
+                pending.push(observed);
+              } else if (!acceptableConclusions.has(check.conclusion)) {
+                failures.push(observed);
+              }
+            }
+            for (const status of latestStatuses.values()) {
+              if (status.state === 'success') continue;
+              const observed = `${status.context}=status/${status.state}`;
+              if (status.state === 'pending') {
+                pending.push(observed);
+              } else {
+                failures.push(observed);
+              }
+            }
+            if (failures.length > 0) return { state: 'failure', mode: 'all', observed: failures };
+            if (pending.length > 0) return { state: 'pending', mode: 'all', observed: pending };
+            return { state: 'success', mode: 'all', observed: [] };
+          };
+          const evaluateRequiredChecks = async ({
+            required,
+            checkRuns,
+            allStatuses,
+            latestStatuses,
+            acceptableConclusions,
+            normalizeContext,
+            statusAppId,
+          }) => {
+            const pending = [];
+            const failures = [];
+            for (const requirement of required.values()) {
+              const matchingRuns = checkRuns.filter((check) =>
+                normalizeContext(check.name) === requirement.normalizedName &&
+                (requirement.appId === null || check.app?.id === requirement.appId)
+              );
+              let matchingStatus = latestStatuses.get(requirement.normalizedName);
+              if (matchingStatus && requirement.appId !== null &&
+                  await statusAppId(matchingStatus) !== requirement.appId) {
+                matchingStatus = undefined;
+                for (const status of allStatuses) {
+                  if (normalizeContext(status.context) === requirement.normalizedName &&
+                      await statusAppId(status) === requirement.appId) {
+                    matchingStatus = status;
+                    break;
+                  }
+                }
+              }
+              const requirementName = `${requirement.name}${requirement.appId === null ? '' : `@app:${requirement.appId}`}`;
+              if (matchingRuns.length === 0 && matchingStatus === undefined) {
+                pending.push(`${requirementName}=missing`);
+                continue;
+              }
+              for (const check of matchingRuns) {
+                const observed = `${requirementName}=${check.status}/${check.conclusion}`;
+                if (check.status !== 'completed') {
+                  pending.push(observed);
+                } else if (!acceptableConclusions.has(check.conclusion)) {
+                  failures.push(observed);
+                }
+              }
+              if (matchingStatus !== undefined && matchingStatus.state !== 'success') {
+                const observed = `${requirementName}=status/${matchingStatus.state}`;
+                if (matchingStatus.state === 'pending') {
+                  pending.push(observed);
+                } else {
+                  failures.push(observed);
+                }
+              }
+            }
+            if (failures.length > 0) return { state: 'failure', mode: 'required', observed: failures };
+            if (pending.length > 0) return { state: 'pending', mode: 'required', observed: pending };
+            return { state: 'success', mode: 'required', observed: [] };
+          };
+          const evaluateCiGate = async ({
+            required,
+            strictChecks,
+            checkRuns,
+            allStatuses,
+            latestStatuses,
+            acceptableConclusions,
+            normalizeContext,
+            statusAppId,
+          }) => {
+            let requiredResult = null;
+            if (required.size > 0) {
+              requiredResult = await evaluateRequiredChecks({
+                required,
+                checkRuns,
+                allStatuses,
+                latestStatuses,
+                acceptableConclusions,
+                normalizeContext,
+                statusAppId,
+              });
+              if (!strictChecks) return requiredResult;
+            }
+            const allResult = evaluateAllChecks({ checkRuns, latestStatuses, acceptableConclusions });
+            if (requiredResult?.state === 'failure') return requiredResult;
+            if (allResult.state === 'failure') return allResult;
+            if (requiredResult?.state === 'pending') return requiredResult;
+            return allResult;
+          };
+          const waitForCiGate = async ({
+            loadEvaluation,
+            timeoutMs,
+            intervalMs,
+            now,
+            sleep,
+            info,
+          }) => {
+            const deadline = now() + timeoutMs;
+            while (true) {
+              const evaluation = await loadEvaluation();
+              if (evaluation.state !== 'pending') return evaluation;
+              const remainingMs = deadline - now();
+              if (remainingMs <= 0) return { ...evaluation, state: 'failure', timedOut: true };
+              const delayMs = Math.min(intervalMs, remainingMs);
+              info(`CI checks pending: ${evaluation.observed.join(', ')}; retrying in ${Math.ceil(delayMs / 1000)}s`);
+              await sleep(delayMs);
+            }
+          };
+          // ci-check-gate-helpers-end
+
+          const required = new Map();
+          const addRequired = (name, appId = null) => {
+            if (!name) return;
+            const normalizedName = normalizeContext(name);
+            const normalizedAppId = Number.isInteger(appId) && appId >= 0 ? appId : null;
+            if (normalizedAppId !== null) {
+              required.delete(`${normalizedName}\u0000*`);
+            } else if ([...required.values()].some((entry) =>
+              entry.normalizedName === normalizedName && entry.appId !== null)) {
+              return;
+            }
+            required.set(`${normalizedName}\u0000${normalizedAppId ?? '*'}`, {
+              name,
+              normalizedName,
+              appId: normalizedAppId,
+            });
+          };
+          const addRequiredStatusChecks = (policy) => {
+            if (!policy) return;
+            const checks = policy.checks ?? [];
+            for (const check of checks) addRequired(check.context, check.app_id);
+            for (const name of policy.contexts ?? []) {
+              if (![...required.values()].some((entry) =>
+                entry.normalizedName === normalizeContext(name))) addRequired(name);
+            }
+          };
+
+          const branch = await github.rest.repos.getBranch({
+            ...context.repo,
+            branch: process.env.DEFAULT_BRANCH,
+          });
+          const projectedPolicy = branch.data.protection?.required_status_checks;
+          addRequiredStatusChecks(projectedPolicy);
+
+          const effectiveRules = await github.paginate('GET /repos/{owner}/{repo}/rules/branches/{branch}', {
+            ...context.repo,
+            branch: process.env.DEFAULT_BRANCH,
+            per_page: 100,
+          });
+          for (const rule of effectiveRules) {
+            if (rule.type !== 'required_status_checks') continue;
+            for (const check of rule.parameters?.required_status_checks ?? []) {
+              addRequired(check.context, check.integration_id);
+            }
+          }
+
+          const strictChecks = process.env.STRICT_CHECKS === 'true';
+          const appIdsByBotLogin = new Map();
+          const statusAppId = async (status) => {
+            const login = status.creator?.login;
+            if (status.creator?.type !== 'Bot' || !login?.endsWith('[bot]')) return null;
+            if (!appIdsByBotLogin.has(login)) {
+              const slug = login.slice(0, -'[bot]'.length);
+              appIdsByBotLogin.set(login, github.rest.apps.getBySlug({ app_slug: slug })
+                .then((response) => response.data.id)
+                .catch((error) => {
+                  if (error.status === 404) return null;
+                  throw error;
+                }));
+            }
+            return appIdsByBotLogin.get(login);
+          };
+          if (required.size > 0) {
+            core.info(`Required CI contexts: ${[...required.values()].map((entry) => entry.name).join(', ')}`);
+          }
+
+          if (required.size === 0 || strictChecks) {
+            core.info(`CI gate mode: ${strictChecks ? 'strict all-checks' : 'all-check fallback (no required contexts)'}`);
+          }
+
+          const loadSignals = async () => {
+            const allCheckRuns = await github.paginate(github.rest.checks.listForRef, {
+              ...context.repo,
+              ref: process.env.TARGET_SHA,
+              per_page: 100,
+              filter: 'latest',
+            });
+            const workflowRunEvents = new Map();
+            if (allowedCheckEvents.size > 0) {
+              try {
+                const workflowRuns = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
+                  ...context.repo,
+                  head_sha: process.env.TARGET_SHA,
+                  per_page: 100,
+                });
+                for (const run of workflowRuns) workflowRunEvents.set(run.id, run.event);
+              } catch (error) {
+                core.warning(`Could not resolve Actions events for CI filtering; retaining all checks: ${error.message}`);
+              }
+            }
+            const checkRuns = filterCheckRunsByEvent({
+              checkRuns: allCheckRuns,
+              allowedEvents: allowedCheckEvents,
+              currentRunId,
+              workflowRunEvents,
+              info: (message) => core.info(message),
+            });
+            const allStatuses = await github.paginate(github.rest.repos.listCommitStatusesForRef, {
+              ...context.repo,
+              ref: process.env.TARGET_SHA,
+              per_page: 100,
+            });
+            const latestStatuses = new Map();
+            for (const status of allStatuses) {
+              const normalizedContext = normalizeContext(status.context);
+              if (!latestStatuses.has(normalizedContext)) latestStatuses.set(normalizedContext, status);
+            }
+            return { checkRuns, allStatuses, latestStatuses };
+          };
+
+          const result = await waitForCiGate({
+            loadEvaluation: async () => {
+              const signals = await loadSignals();
+              return evaluateCiGate({
+                required,
+                strictChecks,
+                ...signals,
+                acceptableConclusions,
+                normalizeContext,
+                statusAppId,
+              });
+            },
+            timeoutMs: 15 * 60 * 1000,
+            intervalMs: 10 * 1000,
+            now: () => Date.now(),
+            sleep: (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
+            info: (message) => core.info(message),
+          });
+          if (result.state === 'failure') {
+            const prefix = result.timedOut
+              ? (result.mode === 'required' ? 'timed out waiting for required checks' : 'timed out waiting for CI checks')
+              : (result.mode === 'required' ? 'required checks not green' : 'non-green checks');
+            core.setFailed(`${prefix}: ${result.observed.join(', ')}`);
+          }
+  tag:
+    name: 2 · Freeze annotated tag
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - name: Create immutable annotated tag
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+      env:
+        EXPECTED_TAG_OBJECT: "${{ needs.validate.outputs.tag-object-sha }}"
+        REPOSITORY_TYPE: source
+        TAG: "${{ needs.validate.outputs.tag }}"
+        TARGET_SHA: "${{ needs.validate.outputs.target-sha }}"
+        DRY_RUN: "${{ inputs.dry_run }}"
+      with:
+        script: |
+          let existing = null;
+          try {
+            existing = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
+          } catch (error) {
+            if (error.status !== 404) throw error;
+          }
+
+          if (process.env.EXPECTED_TAG_OBJECT !== '') {
+            if (existing === null) {
+              core.setFailed(`tag disappeared after validation: ${process.env.TAG}`);
+              return;
+            }
+            if (existing.data.object.type !== 'tag') {
+              core.setFailed(`existing tag is lightweight, not signed or annotated: ${process.env.TAG}`);
+              return;
+            }
+            if (existing.data.object.sha !== process.env.EXPECTED_TAG_OBJECT) {
+              core.setFailed(`tag object changed after validation: ${process.env.TAG}`);
+              return;
+            }
+            const tagObject = await github.rest.git.getTag({
+              ...context.repo,
+              tag_sha: process.env.EXPECTED_TAG_OBJECT,
+            });
+            if (tagObject.data.object.type !== 'commit' || tagObject.data.object.sha !== process.env.TARGET_SHA) {
+              core.setFailed(`existing tag does not freeze ${process.env.TARGET_SHA}`);
+              return;
+            }
+            core.setOutput('tag-object-sha', existing.data.object.sha);
+            core.info(`reusing exact signed or annotated tag ${process.env.TAG}`);
+            return;
+          }
+
+          if (existing !== null) {
+            core.setFailed(`tag appeared after validation: ${process.env.TAG}`);
+            return;
+          }
+          if (process.env.DRY_RUN === 'true') { core.info('dry run: no tag created'); return; }
+          const tagObject = await github.rest.git.createTag({
+            ...context.repo,
+            tag: process.env.TAG,
+            message: `Release ${process.env.TAG}\n\nFleet policy: ${process.env.REPOSITORY_TYPE}; annotated by openclaw/release-workflows.`,
+            object: process.env.TARGET_SHA,
+            type: 'commit',
+            tagger: {
+              name: 'github-actions[bot]',
+              email: '41898282+github-actions[bot]@users.noreply.github.com',
+              date: new Date().toISOString(),
+            },
+          });
+          await github.rest.git.createRef({
+            ...context.repo,
+            ref: `refs/tags/${process.env.TAG}`,
+            sha: tagObject.data.sha,
+          });
+
+          core.setOutput('tag-object-sha', tagObject.data.sha);
+      id: freeze
+    outputs:
+      tag-object-sha: "${{ steps.freeze.outputs.tag-object-sha }}"
+  build:
+    needs:
+    - validate
+    - tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact-name: "${{ steps.artifact.outputs.name }}"
+      artifact-id: "${{ steps.raw-upload.outputs.artifact-id }}"
+      artifact-digest: "${{ steps.raw-upload.outputs.artifact-digest }}"
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: "${{ needs.validate.outputs.target-sha }}"
+        persist-credentials: false
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      with:
+        node-version: "${{ inputs.node-version }}"
+        package-manager-cache: false
+    - name: Set up package manager
+      env:
+        MANAGER: "${{ inputs.package-manager }}"
+        MANAGER_VERSION: "${{ inputs.package-manager-version }}"
+      run: |-
+        set -euo pipefail
+        case "$MANAGER" in
+          npm) ;;
+          pnpm|bun)
+            [[ "$MANAGER_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'pin package-manager-version'; exit 1; }
+            npm install --global "$MANAGER@$MANAGER_VERSION" --registry=https://registry.npmjs.org ;;
+          *) echo 'package-manager must be npm, pnpm or bun'; exit 1 ;;
+        esac
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        path: "${{ runner.temp }}/validated"
+        artifact-ids: "${{ needs.validate.outputs.metadata-id }}"
+        merge-multiple: true
+    - name: Install, build and pack in dependency order
+      env:
+        MANAGER: "${{ inputs.package-manager }}"
+        INSTALL_COMMAND: "${{ inputs.install-command }}"
+        BUILD_COMMAND: "${{ inputs.build-command }}"
+        TEST_COMMAND: "${{ inputs.test-command }}"
+      run: |-
+        set -euo pipefail
+        unset NODE_AUTH_TOKEN NPM_TOKEN GH_TOKEN GITHUB_TOKEN
+        if [[ -n "$INSTALL_COMMAND" ]]; then bash -e -o pipefail -c "$INSTALL_COMMAND"; else
+          case "$MANAGER" in npm) npm ci ;; pnpm) pnpm install --frozen-lockfile ;; bun) bun install --frozen-lockfile ;; esac
+        fi
+        bash -e -o pipefail -c "$TEST_COMMAND"
+        bash -e -o pipefail -c "$BUILD_COMMAND"
+        mkdir "$RUNNER_TEMP/raw"
+        # Pack the frozen plan, not a caller-generated list. Metadata is independently checked later.
+        python3 - <<'PY'
+        import json, os, pathlib, subprocess
+        out=pathlib.Path(os.environ['RUNNER_TEMP'])/'raw'
+        for p in json.loads((out.parent/'validated/PACKAGE-PLAN.json').read_text()):
+            result=subprocess.run(['npm','pack','--json','--pack-destination',str(out)],cwd=p['dir'],check=True,capture_output=True,text=True)
+            packed=json.loads(result.stdout)
+            if len(packed)!=1 or packed[0]['filename']!=p['file']: raise SystemExit('unexpected packed filename')
+        PY
+    - id: artifact
+      run: echo "name=npm-package-raw-${{ needs.validate.outputs.tag }}-${{ github.run_id
+        }}-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: "${{ steps.artifact.outputs.name }}"
+        path: "${{ runner.temp }}/raw"
+        if-no-files-found: error
+        retention-days: 30
+      id: raw-upload
+  assemble:
+    needs:
+    - validate
+    - tag
+    - build
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      artifact-name: "${{ steps.artifact.outputs.name }}"
+      artifact-id: "${{ steps.payload-upload.outputs.artifact-id }}"
+      artifact-digest: "${{ steps.payload-upload.outputs.artifact-digest }}"
+    steps:
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        path: "${{ runner.temp }}/payload"
+        artifact-ids: "${{ needs.validate.outputs.metadata-id }}"
+        merge-multiple: true
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        path: "${{ runner.temp }}/raw"
+        artifact-ids: "${{ needs.build.outputs.artifact-id }}"
+        merge-multiple: true
+    - name: Stage only planned tarballs
+      run: |-
+        python3 - <<'PYCODE'
+        import json, os, pathlib, shutil
+        root=pathlib.Path(os.environ['RUNNER_TEMP']); raw=root/'raw'; out=root/'payload'
+        plan=json.loads((out/'PACKAGE-PLAN.json').read_text())
+        if sorted(p.name for p in raw.iterdir())!=sorted(p['file'] for p in plan): raise SystemExit('raw payload differs from frozen package plan')
+        for p in plan:
+            f=raw/p['file']
+            if f.is_symlink() or not f.is_file(): raise SystemExit('invalid raw tarball')
+            shutil.copyfile(f,out/p['file'])
+        PYCODE
+    - name: Freeze inventory and checksums
+      env:
+        TAG: "${{ needs.validate.outputs.tag }}"
+        TARGET_SHA: "${{ needs.validate.outputs.target-sha }}"
+        RELEASE_VERSION: "${{ needs.validate.outputs.release-version }}"
+        EXPECTED_TAG_OBJECT: "${{ needs.tag.outputs.tag-object-sha }}"
+        PAYLOAD: "${{ runner.temp }}/payload"
+      run: |-
+        node <<'JS'
+        const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+        const dir=process.env.PAYLOAD;
+        const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
+        const assets=fs.readdirSync(dir).sort().map(name=>{
+          if(!/^[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]$/.test(name) || !fs.lstatSync(path.join(dir,name)).isFile()) throw new Error('unsafe asset');
+          const b=fs.readFileSync(path.join(dir,name));return {name,size:b.length,sha256:hash(b)};
+        });
+        const bytes=Buffer.from(JSON.stringify({repository:process.env.GITHUB_REPOSITORY,commit:process.env.TARGET_SHA,tag:process.env.TAG,assets},null,2)+'\n');
+        fs.writeFileSync(path.join(dir,'ASSET-INVENTORY.json'),bytes);
+        fs.writeFileSync(path.join(dir,'SHA256SUMS'),assets.map(a=>a.sha256+'  '+a.name+'\n').join('')+hash(bytes)+'  ASSET-INVENTORY.json\n');
+        JS
+    - id: artifact
+      run: echo "name=npm-package-payload-${{ needs.validate.outputs.tag }}-${{ github.run_id
+        }}-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: "${{ steps.artifact.outputs.name }}"
+        path: "${{ runner.temp }}/payload"
+        if-no-files-found: error
+        retention-days: 30
+      id: payload-upload
+  verify:
+    needs:
+    - validate
+    - assemble
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        path: "${{ runner.temp }}/payload"
+        artifact-ids: "${{ needs.assemble.outputs.artifact-id }}"
+        merge-multiple: true
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      with:
+        node-version: "${{ inputs.node-version }}"
+        package-manager-cache: false
+    - name: Independently verify frozen bytes
+      env:
+        TAG: "${{ needs.validate.outputs.tag }}"
+        TARGET_SHA: "${{ needs.validate.outputs.target-sha }}"
+        RELEASE_VERSION: "${{ needs.validate.outputs.release-version }}"
+        PAYLOAD: "${{ runner.temp }}/payload"
+      run: |
+        node <<'JS'
+        const fs=require('node:fs'), path=require('node:path'), crypto=require('node:crypto'), assert=require('node:assert/strict');
+        const dir=process.env.PAYLOAD;
+        const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
+        const inventoryBytes=fs.readFileSync(path.join(dir,'ASSET-INVENTORY.json'));
+        const inv=JSON.parse(inventoryBytes);
+        assert.equal(inv.repository,process.env.GITHUB_REPOSITORY); assert.equal(inv.commit,process.env.TARGET_SHA); assert.equal(inv.tag,process.env.TAG);
+        assert.deepEqual(fs.readdirSync(dir).sort(),[...inv.assets.map(a=>a.name),'ASSET-INVENTORY.json','SHA256SUMS'].sort());
+        assert.equal(new Set(inv.assets.map(a=>a.name.toLowerCase())).size,inv.assets.length);
+        for (const a of inv.assets) {
+          assert.match(a.name,/^[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]$/);
+          const p=path.join(dir,a.name); assert.ok(fs.lstatSync(p).isFile());
+          const b=fs.readFileSync(p); assert.equal(b.length,a.size); assert.equal(hash(b),a.sha256);
+        }
+        const sums=fs.readFileSync(path.join(dir,'SHA256SUMS'),'utf8');
+        assert.equal(sums,inv.assets.map(a=>a.sha256+'  '+a.name+'\n').join('')+hash(inventoryBytes)+'  ASSET-INVENTORY.json\n');
+        JS
+        python3 - <<'PY'
+        import json, os, pathlib, tarfile
+        root=pathlib.Path(os.environ['PAYLOAD'])
+        plan=json.loads((root/'PACKAGE-PLAN.json').read_text())
+        expected={p['file'] for p in plan}
+        if {p.name for p in root.glob('*.tgz')}!=expected: raise SystemExit('tarball set differs from frozen package plan')
+        for i,p in enumerate(plan):
+            with tarfile.open(root/p['file'],'r:gz') as t:
+                members=t.getmembers()
+                names=[m.name for m in members]
+                if len(names)!=len(set(names)): raise SystemExit('duplicate archive member')
+                for m in members:
+                    parts=pathlib.PurePosixPath(m.name).parts
+                    if not parts or parts[0]!='package' or '..' in parts or m.name.startswith('/') or not (m.isfile() or m.isdir()): raise SystemExit('unsafe archive member')
+                m=json.load(t.extractfile('package/package.json'))
+            if m.get('name')!=p['name'] or m.get('version')!=p['version'] or m.get('private'): raise SystemExit('packed identity differs from frozen manifest')
+            config=m.get('publishConfig',{})
+            if not isinstance(config,dict) or set(config)-{'registry','access','provenance'}: raise SystemExit('unsafe publishConfig key')
+            if config.get('registry','https://registry.npmjs.org').rstrip('/')!='https://registry.npmjs.org': raise SystemExit('alternate registry forbidden')
+            if config.get('access','public')!='public' or config.get('provenance',True) is not True: raise SystemExit('unsafe publishConfig policy')
+            for field in ['dependencies','optionalDependencies','peerDependencies','devDependencies','overrides','resolutions']:
+                def check(v):
+                    if isinstance(v,str) and (v.startswith(('workspace:','file:','link:'))): raise SystemExit('local dependency leaked into package')
+                    if isinstance(v,dict):
+                        for x in v.values(): check(x)
+                check(m.get(field,{}))
+            for field in ['dependencies','optionalDependencies','peerDependencies']:
+                for name,value in m.get(field,{}).items():
+                    sibling=next((x for x in plan if x['name']==name),None)
+                    if sibling and (value!=sibling['version'] or (field!='peerDependencies' and plan.index(sibling)>=i)): raise SystemExit('packed sibling needs exact pin and dependency-first order')
+        PY
+    - name: Smoke install frozen packages on clean runner
+      env:
+        SMOKE_COMMAND: "${{ inputs.smoke-command }}"
+      run: |-
+        set -euo pipefail
+        unset NODE_AUTH_TOKEN NPM_TOKEN GH_TOKEN GITHUB_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_RESULTS_URL ACTIONS_CACHE_URL
+        mkdir "$RUNNER_TEMP/smoke"
+        cd "$RUNNER_TEMP/smoke"
+        printf '{"private":true}' > package.json
+        mapfile -t tarballs < <(find "$RUNNER_TEMP/payload" -maxdepth 1 -name '*.tgz' -type f | sort)
+        npm install --ignore-scripts --no-audit --registry=https://registry.npmjs.org "${tarballs[@]}"
+        bash -e -o pipefail -c "$SMOKE_COMMAND"
+    - name: Attest exact payload
+      env:
+        PAYLOAD_ARTIFACT: "${{ needs.assemble.outputs.artifact-name }}"
+      run: |-
+        mkdir "$RUNNER_TEMP/attestation"
+        cp "$RUNNER_TEMP/payload/ASSET-INVENTORY.json" "$RUNNER_TEMP/payload/SHA256SUMS" "$RUNNER_TEMP/attestation/"
+        printf '%s\n' "$PAYLOAD_ARTIFACT" > "$RUNNER_TEMP/attestation/payload-artifact"
+        printf 'verified\n' > "$RUNNER_TEMP/attestation/verdict"
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: verified-ubuntu-latest-${{ needs.assemble.outputs.artifact-name }}
+        path: "${{ runner.temp }}/attestation"
+        if-no-files-found: error
+        retention-days: 30
+      id: attestation-upload
+    outputs:
+      artifact-id: "${{ steps.attestation-upload.outputs.artifact-id }}"
+      artifact-digest: "${{ steps.attestation-upload.outputs.artifact-digest }}"
+  publish-npm:
+    if: "!inputs.dry_run"
+    needs:
+    - validate
+    - tag
+    - assemble
+    - verify
+    - verify-arm
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        path: "${{ runner.temp }}/payload"
+        artifact-ids: "${{ needs.assemble.outputs.artifact-id }}"
+        merge-multiple: true
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        path: "${{ runner.temp }}/verified-ubuntu-latest"
+        artifact-ids: "${{ needs.verify.outputs.artifact-id }}"
+        merge-multiple: true
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        path: "${{ runner.temp }}/verified-ubuntu-24.04-arm"
+        artifact-ids: "${{ needs.verify-arm.outputs.artifact-id }}"
+        merge-multiple: true
+    - name: Bind both independent attestations
+      env:
+        PAYLOAD_ARTIFACT: "${{ needs.assemble.outputs.artifact-name }}"
+      run: |-
+        set -euo pipefail
+        for os in ubuntu-latest ubuntu-24.04-arm; do
+          proof="$RUNNER_TEMP/verified-$os"
+          [[ "$(cat "$proof/verdict")" == verified ]]
+          [[ "$(cat "$proof/payload-artifact")" == "$PAYLOAD_ARTIFACT" ]]
+          cmp "$proof/ASSET-INVENTORY.json" "$RUNNER_TEMP/payload/ASSET-INVENTORY.json"
+          cmp "$proof/SHA256SUMS" "$RUNNER_TEMP/payload/SHA256SUMS"
+        done
+        cd "$RUNNER_TEMP/payload"
+        sha256sum --strict -c SHA256SUMS
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      with:
+        node-version: '24'
+        package-manager-cache: false
+    - name: Recheck frozen tag before registry publication
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+      env:
+        TAG: "${{ needs.validate.outputs.tag }}"
+        TARGET_SHA: "${{ needs.validate.outputs.target-sha }}"
+        RELEASE_VERSION: "${{ needs.validate.outputs.release-version }}"
+        EXPECTED_TAG_OBJECT: "${{ needs.tag.outputs.tag-object-sha }}"
+      with:
+        script: |-
+          const ref = await github.rest.git.getRef({...context.repo, ref: 'tags/' + process.env.TAG});
+          if (ref.data.object.type !== 'tag' || ref.data.object.sha !== process.env.EXPECTED_TAG_OBJECT) throw new Error('frozen tag object changed');
+          const tag = await github.rest.git.getTag({...context.repo, tag_sha: ref.data.object.sha});
+          if (tag.data.object.type !== 'commit' || tag.data.object.sha !== process.env.TARGET_SHA) throw new Error('frozen tag target changed');
+    - name: Publish exact tarballs with trusted publishing
+      env:
+        TAG: "${{ needs.validate.outputs.tag }}"
+        TARGET_SHA: "${{ needs.validate.outputs.target-sha }}"
+        RELEASE_VERSION: "${{ needs.validate.outputs.release-version }}"
+        EXPECTED_TAG_OBJECT: "${{ needs.tag.outputs.tag-object-sha }}"
+        PAYLOAD: "${{ runner.temp }}/payload"
+        CALLER_WORKFLOW: "${{ github.workflow_ref }}"
+      run: |
+        set -euo pipefail
+        unset NODE_AUTH_TOKEN NPM_TOKEN GH_TOKEN GITHUB_TOKEN
+        export NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/empty.npmrc"
+        export NPM_CONFIG_REGISTRY=https://registry.npmjs.org
+        : > "$NPM_CONFIG_USERCONFIG"
+        node <<'JS'
+        (async () => {
+        const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),cp=require('node:child_process'),assert=require('node:assert/strict');
+        const plan=JSON.parse(fs.readFileSync(path.join(process.env.PAYLOAD,'PACKAGE-PLAN.json')));
+        const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+        const get=async url=>{const r=await fetch(url,{signal:AbortSignal.timeout(30000)});if(r.status===404)return null;if(!r.ok)throw new Error(`registry HTTP ${r.status}`);return r;};
+        const metadata=async p=>{const r=await get('https://registry.npmjs.org/'+encodeURIComponent(p.name)+'/'+p.version);return r?await r.json():null;};
+        const exact=async(p,m)=>{
+          assert.equal(m.name,p.name);assert.equal(m.version,p.version);
+          const local=fs.readFileSync(path.join(process.env.PAYLOAD,p.file));
+          const sri='sha512-'+crypto.createHash('sha512').update(local).digest('base64');
+          assert.equal(m.dist.integrity,sri,'existing version has different bytes; refusing to republish');
+          const url=new URL(m.dist.tarball);assert.equal(url.origin,'https://registry.npmjs.org');
+          const r=await get(url);assert.ok(r,'tarball not visible');
+          assert.deepEqual(Buffer.from(await r.arrayBuffer()),local,'registry tarball differs from verified payload');
+        };
+        // New package names cannot use npm trusted publishing. Fail before publishing any sibling.
+        for(const p of plan){if(!await get('https://registry.npmjs.org/'+encodeURIComponent(p.name)))throw new Error(`${p.name} must already exist and have caller trusted publishing configured`);}
+        for(const p of plan){
+          let m=await metadata(p);
+          if(m){await exact(p,m);console.log(`${p.name}@${p.version}: exact bytes already published; resuming`);continue;}
+          assert.equal(process.env.GITHUB_SHA,process.env.TARGET_SHA,'missing npm version must be published by a run at the frozen commit; dispatch the caller on the immutable version tag');
+          const started=Date.now(), deadline=started+10*60*1000;
+          const tag=p.version.includes('-')?'next':'latest';
+          const result=cp.spawnSync('npm',['publish',path.join(process.env.PAYLOAD,p.file),'--ignore-scripts','--provenance','--access','public','--tag',tag,'--registry=https://registry.npmjs.org'],{stdio:'inherit',timeout:120000});
+          let summarized=false,visible=false;
+          while(Date.now()<deadline){
+            try{m=await metadata(p);}catch(e){console.log(e.message);m=null;}
+            if(!summarized&&Date.now()-started>60000){
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,`\n${p.name}@${p.version}: npm visibility exceeded one minute; waiting up to ten minutes per package.\n`);summarized=true;
+            }
+            if(m){await exact(p,m);visible=true;break;}
+            await sleep(10000);
+          }
+          if(!visible)throw new Error(`${p.name}: registry visibility deadline exceeded (publish exit ${result.status})`);
+          if(result.status!==0)console.log('Publish returned an error but the exact payload is now public; continuing verification.');
+        }
+        })().catch(error => { console.error(error.message); process.exitCode=1; });
+        JS
+  provenance:
+    if: "!inputs.dry_run"
+    needs:
+    - validate
+    - tag
+    - assemble
+    - publish-npm
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        path: "${{ runner.temp }}/payload"
+        artifact-ids: "${{ needs.assemble.outputs.artifact-id }}"
+        merge-multiple: true
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      with:
+        node-version: '24'
+        package-manager-cache: false
+    - name: Verify npm signatures and provenance independently
+      env:
+        TAG: "${{ needs.validate.outputs.tag }}"
+        TARGET_SHA: "${{ needs.validate.outputs.target-sha }}"
+        RELEASE_VERSION: "${{ needs.validate.outputs.release-version }}"
+        EXPECTED_TAG_OBJECT: "${{ needs.tag.outputs.tag-object-sha }}"
+        PAYLOAD: "${{ runner.temp }}/payload"
+        CALLER_WORKFLOW: "${{ github.workflow_ref }}"
+      run: |
+        set -euo pipefail
+        unset NODE_AUTH_TOKEN NPM_TOKEN GH_TOKEN GITHUB_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
+        export NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/empty.npmrc"
+        export NPM_CONFIG_REGISTRY=https://registry.npmjs.org
+        : > "$NPM_CONFIG_USERCONFIG"
+        node <<'JS'
+        (async () => {
+        const fs=require('node:fs'),path=require('node:path'),cp=require('node:child_process'),crypto=require('node:crypto'),assert=require('node:assert/strict');
+        const plan=JSON.parse(fs.readFileSync(path.join(process.env.PAYLOAD,'PACKAGE-PLAN.json')));
+        const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+        const get=async url=>{const u=new URL(url);assert.equal(u.protocol,'https:');assert.equal(u.hostname,'registry.npmjs.org');const r=await fetch(u,{signal:AbortSignal.timeout(30000)});if(!r.ok)throw new Error(`registry HTTP ${r.status}`);return r.json();};
+        for(const p of plan){
+          const deadline=Date.now()+10*60*1000;let m,attestations;
+          while(true){
+            m=await get('https://registry.npmjs.org/'+encodeURIComponent(p.name)+'/'+p.version);
+            if(m.dist?.attestations?.url){try{attestations=await get(m.dist.attestations.url);}catch{}}
+            if(attestations)break;
+            if(Date.now()>=deadline)throw new Error('npm provenance visibility deadline exceeded');
+            await sleep(10000);
+          }
+          const bytes=fs.readFileSync(path.join(process.env.PAYLOAD,p.file));
+          const digest=crypto.createHash('sha512').update(bytes).digest('hex');
+          assert.equal(m.dist.integrity,'sha512-'+Buffer.from(digest,'hex').toString('base64'));
+          const caller=process.env.CALLER_WORKFLOW.split('@')[0];
+          const valid=attestations.attestations.some(a=>{
+            if(a.predicateType!=='https://slsa.dev/provenance/v1')return false;
+            const s=JSON.parse(Buffer.from(a.bundle.dsseEnvelope.payload,'base64').toString());
+            const b=s.predicate?.buildDefinition,w=b?.externalParameters?.workflow;
+            return s.predicateType==='https://slsa.dev/provenance/v1' && s.subject?.some(x=>x.digest?.sha512===digest) &&
+              w?.repository==='https://github.com/'+process.env.GITHUB_REPOSITORY &&
+              caller===process.env.GITHUB_REPOSITORY+'/'+w?.path &&
+              b?.resolvedDependencies?.some(x=>x.digest?.gitCommit===process.env.TARGET_SHA);
+          });
+          assert.ok(valid,'provenance does not bind exact package bytes, caller workflow and frozen commit');
+          const cwd=fs.mkdtempSync(path.join(process.env.RUNNER_TEMP,'provenance-'));
+          fs.writeFileSync(path.join(cwd,'package.json'),'{"private":true}');
+          cp.execFileSync('npm',['install','--ignore-scripts','--no-audit','--registry=https://registry.npmjs.org',p.name+'@'+p.version],{cwd,stdio:'inherit'});
+          // npm verifies the Sigstore signature and transparency proof, not just the decoded predicate.
+          cp.execFileSync('npm',['audit','signatures','--registry=https://registry.npmjs.org'],{cwd,stdio:'inherit'});
+        }
+        })().catch(error => { console.error(error.message); process.exitCode=1; });
+        JS
+  publish:
+    if: "${{ !cancelled() && !inputs.dry_run && needs.verify.result == 'success' &&
+      needs.verify-arm.result == 'success' && needs.provenance.result == 'success'
+      }}"
+    needs:
+    - validate
+    - tag
+    - assemble
+    - verify
+    - provenance
+    - verify-arm
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    outputs:
+      release-url: "${{ steps.release.outputs.release-url }}"
+    steps:
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        path: "${{ runner.temp }}/payload"
+        artifact-ids: "${{ needs.assemble.outputs.artifact-id }}"
+        merge-multiple: true
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        path: "${{ runner.temp }}/verified-ubuntu-latest"
+        artifact-ids: "${{ needs.verify.outputs.artifact-id }}"
+        merge-multiple: true
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        path: "${{ runner.temp }}/verified-ubuntu-24.04-arm"
+        artifact-ids: "${{ needs.verify-arm.outputs.artifact-id }}"
+        merge-multiple: true
+    - name: Bind both independent attestations
+      env:
+        PAYLOAD_ARTIFACT: "${{ needs.assemble.outputs.artifact-name }}"
+      run: |-
+        set -euo pipefail
+        for os in ubuntu-latest ubuntu-24.04-arm; do
+          proof="$RUNNER_TEMP/verified-$os"
+          [[ "$(cat "$proof/verdict")" == verified ]]
+          [[ "$(cat "$proof/payload-artifact")" == "$PAYLOAD_ARTIFACT" ]]
+          cmp "$proof/ASSET-INVENTORY.json" "$RUNNER_TEMP/payload/ASSET-INVENTORY.json"
+          cmp "$proof/SHA256SUMS" "$RUNNER_TEMP/payload/SHA256SUMS"
+        done
+        cd "$RUNNER_TEMP/payload"
+        sha256sum --strict -c SHA256SUMS
+    - name: Publish only attested GitHub release bytes
+      id: release
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+      env:
+        TAG: "${{ needs.validate.outputs.tag }}"
+        TARGET_SHA: "${{ needs.validate.outputs.target-sha }}"
+        RELEASE_VERSION: "${{ needs.validate.outputs.release-version }}"
+        EXPECTED_TAG_OBJECT: "${{ needs.tag.outputs.tag-object-sha }}"
+        PAYLOAD: "${{ runner.temp }}/payload"
+      with:
+        script: |
+          const ref = await github.rest.git.getRef({...context.repo, ref: 'tags/' + process.env.TAG});
+          if (ref.data.object.type !== 'tag' || ref.data.object.sha !== process.env.EXPECTED_TAG_OBJECT) throw new Error('frozen tag object changed');
+          const tag = await github.rest.git.getTag({...context.repo, tag_sha: ref.data.object.sha});
+          if (tag.data.object.type !== 'commit' || tag.data.object.sha !== process.env.TARGET_SHA) throw new Error('frozen tag target changed');
+          const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+          const dir=process.env.PAYLOAD;
+          const names=fs.readdirSync(dir).sort();
+          const notes=fs.readFileSync(path.join(dir,'RELEASE-NOTES.md'),'utf8');
+          const tagName=process.env.TAG;
+          let release;
+          try {release=(await github.rest.repos.getReleaseByTag({...context.repo,tag:tagName})).data;}catch(e){if(e.status!==404)throw e;}
+          const compare=async release=>{
+            const assets=await github.paginate(github.rest.repos.listReleaseAssets,{...context.repo,release_id:release.id,per_page:100});
+            assert.deepEqual(assets.map(a=>a.name).sort(),names,'release asset set differs from verified payload');
+            for(const a of assets){
+              const r=await github.request('GET /repos/{owner}/{repo}/releases/assets/{asset_id}',{...context.repo,asset_id:a.id,headers:{accept:'application/octet-stream'}});
+              assert.deepEqual(Buffer.from(r.data),fs.readFileSync(path.join(dir,a.name)),'release bytes differ: '+a.name);
+            }
+          };
+          if(release&&!release.draft){
+            assert.equal(release.tag_name,tagName);assert.equal(release.body,notes);await compare(release);
+            core.info('Existing public release matches exact verified bytes; no mutation.');
+          }else{
+            if(!release){release=(await github.rest.repos.createRelease({...context.repo,tag_name:tagName,target_commitish:process.env.TARGET_SHA,name:tagName,body:notes,draft:true,prerelease:tagName.includes('-')})).data;}
+            assert.equal(release.tag_name,tagName);
+            const existing=await github.paginate(github.rest.repos.listReleaseAssets,{...context.repo,release_id:release.id,per_page:100});
+            assert.ok(existing.every(a=>names.includes(a.name)),'unexpected existing draft asset');
+            for(const name of names){
+              const a=existing.find(a=>a.name===name);
+              const data=fs.readFileSync(path.join(dir,name));
+              if(a){
+                const r=await github.request('GET /repos/{owner}/{repo}/releases/assets/{asset_id}',{...context.repo,asset_id:a.id,headers:{accept:'application/octet-stream'}});
+                assert.deepEqual(Buffer.from(r.data),data,'existing draft differs; refusing overwrite');
+              }else{
+                await github.rest.repos.uploadReleaseAsset({...context.repo,release_id:release.id,name,data,headers:{'content-type':'application/octet-stream','content-length':data.length}});
+              }
+            }
+            await compare(release);
+            // Recheck after uploads too: a changed tag cannot be published by racing the initial check.
+            const finalRef=await github.rest.git.getRef({...context.repo,ref:'tags/'+tagName});
+            assert.equal(finalRef.data.object.type,'tag');assert.equal(finalRef.data.object.sha,process.env.EXPECTED_TAG_OBJECT);
+            const current=(await github.rest.repos.getRelease({...context.repo,release_id:release.id})).data;
+            assert.equal(current.tag_name,tagName);assert.equal(current.draft,true);
+            release=(await github.rest.repos.updateRelease({...context.repo,release_id:release.id,body:notes,draft:false})).data;
+          }
+          assert.equal(release.draft,false);
+          core.setOutput('release-url',release.html_url);
+  handoff:
+    if: "!inputs.dry_run && inputs.homebrew-formula != ''"
+    needs:
+    - validate
+    - assemble
+    - publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+    steps:
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        path: "${{ runner.temp }}/payload"
+        artifact-ids: "${{ needs.assemble.outputs.artifact-id }}"
+        merge-multiple: true
+    - name: Hand verified release to configured tap
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+      env:
+        TAG: "${{ needs.validate.outputs.tag }}"
+        PAYLOAD: "${{ runner.temp }}/payload"
+        TAP: "${{ inputs.homebrew-tap }}"
+        FORMULA: "${{ inputs.homebrew-formula }}"
+      with:
+        github-token: "${{ secrets.TAP_TOKEN }}"
+        script: |
+          const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+          const dir=process.env.PAYLOAD;
+          const inv=JSON.parse(fs.readFileSync(path.join(dir,'ASSET-INVENTORY.json')));
+          let name;
+          if(fs.existsSync(path.join(dir,'PACKAGE-PLAN.json'))){
+            const plan=JSON.parse(fs.readFileSync(path.join(dir,'PACKAGE-PLAN.json')));
+            name=plan[plan.length-1].file;
+          }else{name='source-'+process.env.TAG.slice(1)+'.tar.gz';}
+          const asset=inv.assets.find(a=>a.name===name);assert.ok(asset,'Homebrew requires a verified tarball; enable source-archives');
+          const url=`https://github.com/${process.env.GITHUB_REPOSITORY}/releases/download/${process.env.TAG}/${name}`;
+          const [owner,repo]=process.env.TAP.split('/'),workflow='update-formula.yml';
+          const target=(await github.rest.repos.get({owner,repo})).data;
+          await github.rest.actions.getWorkflow({owner,repo,workflow_id:workflow});
+          const requestId=`release-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`;
+          await github.rest.actions.createWorkflowDispatch({owner,repo,workflow_id:workflow,ref:target.default_branch,inputs:{formula:process.env.FORMULA,tag:process.env.TAG,repository:process.env.GITHUB_REPOSITORY,artifact_url:url,request_id:requestId}});
+          const deadline=Date.now()+15*60*1000;
+          while(Date.now()<deadline){
+            const runs=(await github.rest.actions.listWorkflowRuns({owner,repo,workflow_id:workflow,event:'workflow_dispatch',per_page:100})).data.workflow_runs;
+            const matches=runs.filter(r=>r.display_title.endsWith('('+requestId+')'));
+            assert.ok(matches.length<=1,'ambiguous tap handoff');
+            if(matches[0]?.status==='completed'){
+              assert.equal(matches[0].conclusion,'success','tap workflow failed');
+              const file=(await github.rest.repos.getContent({owner,repo,path:'Formula/'+process.env.FORMULA+'.rb',ref:target.default_branch})).data;
+              const text=Buffer.from(file.content,'base64').toString();
+              // source-formula-parser-begin
+              const parser=String.raw`
+          require 'ripper'
+          require 'json'
+          def reject(message); abort(message); end
+          def literal(node)
+            reject('non-literal formula argument') unless node.is_a?(Array)
+            case node[0]
+            when :string_literal
+              content=node[1]
+              reject('interpolated formula string') unless content[0]==:string_content && content[1..].all? { |t| t[0]==:@tstring_content && !t[1].match?(/[\\\r\n]/) }
+              content[1..].map { |t| t[1] }.join
+            when :symbol_literal
+              reject('dynamic symbol') unless node[1][0]==:symbol && [:@ident,:@op,:@kw].include?(node[1][1][0])
+              node[1][1][1]
+            when :@int
+              node[1]
+            when :hash, :bare_assoc_hash
+              list=node[0]==:hash ? node.dig(1,1) : node[1]
+              Array(list).each do |item|
+                reject('dynamic hash') unless item[0]==:assoc_new
+                literal(item[1]); literal(item[2])
+              end
+              nil
+            else
+              reject('unsupported literal')
+            end
+          end
+          program=Ripper.sexp(STDIN.read)
+          reject('invalid formula') unless program && program[0]==:program
+          roots=program[1].reject { |n| n[0]==:void_stmt }
+          reject('expected one formula class') unless roots.length==1 && roots[0][0]==:class
+          klass=roots[0]
+          reject('expected Formula superclass') unless klass[2]==[:var_ref, [:@const, 'Formula', klass[2].dig(1,2)]]
+          body=klass[3]
+          reject('class rescue/ensure forbidden') unless body[0]==:bodystmt && body[2..].all?(&:nil?)
+          values={}
+          body[1].each do |node|
+            next if node[0]==:void_stmt
+            if node[0]==:def
+              reject('unsupported method override') unless %w[install post_install caveats].include?(node[1][1])
+              next
+            end
+            if node[0]==:method_add_block
+              call=node[1]
+              reject('only test block allowed') unless call[0]==:method_add_arg && call[1][0]==:fcall && call[1][1][1]=='test' && call[2]==[]
+              next
+            end
+            reject('dynamic class body') unless node[0]==:command
+            method=node[1][1]
+            reject('unsupported formula setter') unless %w[desc homepage url sha256 license version revision head depends_on uses_from_macos keg_only conflicts_with skip_clean].include?(method)
+            args=node[2]
+            reject('block/splat argument') unless args[0]==:args_add_block && args[2]==false && args[1].is_a?(Array)
+            parsed=args[1].map { |arg| literal(arg) }
+            if %w[url sha256].include?(method)
+              reject('duplicate fetch setter') if values.key?(method)
+              reject('fetch setter must have one literal string') unless parsed.length==1 && args[1][0][0]==:string_literal
+              values[method]=parsed[0]
+            end
+          end
+          reject('missing stable fetch') unless values.keys.sort==%w[sha256 url]
+          puts JSON.generate(values)
+          `;
+              // source-formula-parser-end
+              const fetched=JSON.parse(require('node:child_process').execFileSync('ruby',['-e',parser],{input:text,encoding:'utf8'}));
+              assert.equal(fetched.url,url);assert.equal(fetched.sha256,asset.sha256);
+              core.info('Tap run and literal formula URL/SHA-256 verified: '+matches[0].html_url);return;
+            }
+            await new Promise(r=>setTimeout(r,15000));
+          }
+          throw new Error('tap handoff deadline exceeded');
+  verify-arm:
+    needs:
+    - validate
+    - assemble
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      actions: read
+    steps:
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        path: "${{ runner.temp }}/payload"
+        artifact-ids: "${{ needs.assemble.outputs.artifact-id }}"
+        merge-multiple: true
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      with:
+        node-version: "${{ inputs.node-version }}"
+        package-manager-cache: false
+    - name: Independently verify frozen bytes
+      env:
+        TAG: "${{ needs.validate.outputs.tag }}"
+        TARGET_SHA: "${{ needs.validate.outputs.target-sha }}"
+        RELEASE_VERSION: "${{ needs.validate.outputs.release-version }}"
+        PAYLOAD: "${{ runner.temp }}/payload"
+      run: |
+        node <<'JS'
+        const fs=require('node:fs'), path=require('node:path'), crypto=require('node:crypto'), assert=require('node:assert/strict');
+        const dir=process.env.PAYLOAD;
+        const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
+        const inventoryBytes=fs.readFileSync(path.join(dir,'ASSET-INVENTORY.json'));
+        const inv=JSON.parse(inventoryBytes);
+        assert.equal(inv.repository,process.env.GITHUB_REPOSITORY); assert.equal(inv.commit,process.env.TARGET_SHA); assert.equal(inv.tag,process.env.TAG);
+        assert.deepEqual(fs.readdirSync(dir).sort(),[...inv.assets.map(a=>a.name),'ASSET-INVENTORY.json','SHA256SUMS'].sort());
+        assert.equal(new Set(inv.assets.map(a=>a.name.toLowerCase())).size,inv.assets.length);
+        for (const a of inv.assets) {
+          assert.match(a.name,/^[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]$/);
+          const p=path.join(dir,a.name); assert.ok(fs.lstatSync(p).isFile());
+          const b=fs.readFileSync(p); assert.equal(b.length,a.size); assert.equal(hash(b),a.sha256);
+        }
+        const sums=fs.readFileSync(path.join(dir,'SHA256SUMS'),'utf8');
+        assert.equal(sums,inv.assets.map(a=>a.sha256+'  '+a.name+'\n').join('')+hash(inventoryBytes)+'  ASSET-INVENTORY.json\n');
+        JS
+        python3 - <<'PY'
+        import json, os, pathlib, tarfile
+        root=pathlib.Path(os.environ['PAYLOAD'])
+        plan=json.loads((root/'PACKAGE-PLAN.json').read_text())
+        expected={p['file'] for p in plan}
+        if {p.name for p in root.glob('*.tgz')}!=expected: raise SystemExit('tarball set differs from frozen package plan')
+        for i,p in enumerate(plan):
+            with tarfile.open(root/p['file'],'r:gz') as t:
+                members=t.getmembers()
+                names=[m.name for m in members]
+                if len(names)!=len(set(names)): raise SystemExit('duplicate archive member')
+                for m in members:
+                    parts=pathlib.PurePosixPath(m.name).parts
+                    if not parts or parts[0]!='package' or '..' in parts or m.name.startswith('/') or not (m.isfile() or m.isdir()): raise SystemExit('unsafe archive member')
+                m=json.load(t.extractfile('package/package.json'))
+            if m.get('name')!=p['name'] or m.get('version')!=p['version'] or m.get('private'): raise SystemExit('packed identity differs from frozen manifest')
+            config=m.get('publishConfig',{})
+            if not isinstance(config,dict) or set(config)-{'registry','access','provenance'}: raise SystemExit('unsafe publishConfig key')
+            if config.get('registry','https://registry.npmjs.org').rstrip('/')!='https://registry.npmjs.org': raise SystemExit('alternate registry forbidden')
+            if config.get('access','public')!='public' or config.get('provenance',True) is not True: raise SystemExit('unsafe publishConfig policy')
+            for field in ['dependencies','optionalDependencies','peerDependencies','devDependencies','overrides','resolutions']:
+                def check(v):
+                    if isinstance(v,str) and (v.startswith(('workspace:','file:','link:'))): raise SystemExit('local dependency leaked into package')
+                    if isinstance(v,dict):
+                        for x in v.values(): check(x)
+                check(m.get(field,{}))
+            for field in ['dependencies','optionalDependencies','peerDependencies']:
+                for name,value in m.get(field,{}).items():
+                    sibling=next((x for x in plan if x['name']==name),None)
+                    if sibling and (value!=sibling['version'] or (field!='peerDependencies' and plan.index(sibling)>=i)): raise SystemExit('packed sibling needs exact pin and dependency-first order')
+        PY
+    - name: Smoke install frozen packages on clean runner
+      env:
+        SMOKE_COMMAND: "${{ inputs.smoke-command }}"
+      run: |-
+        set -euo pipefail
+        unset NODE_AUTH_TOKEN NPM_TOKEN GH_TOKEN GITHUB_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_RESULTS_URL ACTIONS_CACHE_URL
+        mkdir "$RUNNER_TEMP/smoke"
+        cd "$RUNNER_TEMP/smoke"
+        printf '{"private":true}' > package.json
+        mapfile -t tarballs < <(find "$RUNNER_TEMP/payload" -maxdepth 1 -name '*.tgz' -type f | sort)
+        npm install --ignore-scripts --no-audit --registry=https://registry.npmjs.org "${tarballs[@]}"
+        bash -e -o pipefail -c "$SMOKE_COMMAND"
+    - name: Attest exact payload
+      env:
+        PAYLOAD_ARTIFACT: "${{ needs.assemble.outputs.artifact-name }}"
+      run: |-
+        mkdir "$RUNNER_TEMP/attestation"
+        cp "$RUNNER_TEMP/payload/ASSET-INVENTORY.json" "$RUNNER_TEMP/payload/SHA256SUMS" "$RUNNER_TEMP/attestation/"
+        printf '%s\n' "$PAYLOAD_ARTIFACT" > "$RUNNER_TEMP/attestation/payload-artifact"
+        printf 'verified\n' > "$RUNNER_TEMP/attestation/verdict"
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: verified-ubuntu-24.04-arm-${{ needs.assemble.outputs.artifact-name }}
+        path: "${{ runner.temp }}/attestation"
+        if-no-files-found: error
+        retention-days: 30
+      id: attestation-upload
+    outputs:
+      artifact-id: "${{ steps.attestation-upload.outputs.artifact-id }}"
+      artifact-digest: "${{ steps.attestation-upload.outputs.artifact-digest }}"

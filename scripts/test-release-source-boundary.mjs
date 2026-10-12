@@ -6,7 +6,7 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const head = 'a'.repeat(40);
 const frozen = 'b'.repeat(40);
 let failures = 0;
-for (const archetype of ['go-cli', 'swift-cli', 'electron']) {
+for (const archetype of ['go-cli', 'swift-cli', 'electron', 'source', 'npm-package']) {
   const script = workflowStep(loadWorkflow(`release-${archetype}.yml`), 'validate', 'name', 'Resolve protected release target').with.script;
   const execute = new AsyncFunction('github', 'context', 'core', 'process', script);
   for (const scenario of ['new tag', 'existing tag', 'unprotected', 'missing object', 'forbidden ref', 'outside history']) {

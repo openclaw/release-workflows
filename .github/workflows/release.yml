@@ -1,0 +1,26 @@
+name: Release workflows
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: SemVer to release
+        required: true
+        type: string
+      dry_run:
+        description: Validate without creating a tag or release
+        default: true
+        type: boolean
+permissions: {}
+jobs:
+  release:
+    permissions:
+      actions: read
+      checks: read
+      contents: write
+      statuses: read
+    uses: ./.github/workflows/release-source.yml
+    with:
+      version: ${{ inputs.version }}
+      dry_run: ${{ inputs.dry_run }}
+      test-command: bash -n scripts/validate-workflows.sh
+      source-archives: true
