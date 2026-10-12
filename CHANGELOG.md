@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.11.3 - 2026-10-12
+
 - Add the approval-gated `sparkle-app` release archetype with signed and notarized app/DMG/CLI assets, preserved and independently verified Downloader entitlements, early rejection of signed-feed requirements, Sparkle appcasts, three-runner verification, optional npm/Homebrew handoffs, dry runs, and appcast closeout PRs.
 
 - Preserve existing unprefixed source-catalog tags and project-branded release titles with optional `tag-prefix` and `release-name` inputs; require `v` tags for Go proxy releases.
