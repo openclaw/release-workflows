@@ -112,6 +112,40 @@ for invalid in ['<!DOCTYPE rss [<!ENTITY bad "bad">]>'+xml,xml.replace('</channe
 `);
 });
 
+test('appcast preserves repeated historical builds while requiring every new build to increase', () => {
+  python(`
+from appcast import update,validate
+import xml.etree.ElementTree as ET
+S='{http://www.andymatuschak.org/xml-namespaces/sparkle}'
+xml='<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel><title>Legacy</title></channel></rss>'
+root=ET.fromstring(xml)
+for version,build in [('1.0.2','3'),('1.0.1','1'),('1.0.0','1'),('0.9.0-beta.1','1')]:
+    item=ET.SubElement(root.find('channel'),'item')
+    ET.SubElement(item,'description').text='Published release & notes for '+version
+    ET.SubElement(item,'enclosure',{'url':'https://example.test/'+version+'.zip',S+'shortVersionString':version,S+'version':build})
+canonical=lambda item: ET.canonicalize(ET.tostring(item,encoding='unicode'),strip_text=True)
+history=[canonical(item) for item in root.findall('./channel/item')]
+xml=ET.tostring(root,encoding='unicode')
+entry=dict(title='New release',version='1.0.3',buildNumber='4',minimumSystemVersion='15.0',releaseUrl='https://example.test/release',assetUrl='https://example.test/new.zip',zipLength=55,edSignature='signature',pubDate='date')
+result=update(xml,entry)
+validate(result,entry)
+assert [canonical(item) for item in ET.fromstring(result).findall('./channel/item')[1:]]==history
+for candidate in [dict(entry,buildNumber='3'),dict(entry,buildNumber='1'),dict(entry,version='1.0.0')]:
+    try: update(xml,candidate); raise AssertionError('accepted invalid new release')
+    except ValueError: pass
+for bad_build in ['4','5']:
+    tampered=ET.fromstring(result)
+    tampered.findall('./channel/item')[1].find('enclosure').set(S+'version',bad_build)
+    try: validate(ET.tostring(tampered,encoding='unicode'),entry); raise AssertionError('accepted non-increasing new build')
+    except ValueError: pass
+bad_history=ET.fromstring(xml)
+bad_history.findall('./channel/item')[2].find('enclosure').set(S+'version','2')
+bad_history.findall('./channel/item')[1].find('enclosure').set(S+'version','1')
+try: update(ET.tostring(bad_history,encoding='unicode'),entry); raise AssertionError('accepted increasing history')
+except ValueError: pass
+`);
+});
+
 test('Sparkle private seed derives the configured public key and verifies exact ZIP bytes', () => {
   const require = createRequire(import.meta.url);
   const tool = require(join(root, 'sparkle.cjs'));

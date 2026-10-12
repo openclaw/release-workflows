@@ -1813,8 +1813,10 @@ jobs:
               items=ch.findall('item')
               ids=[identity(x) for x in items]
               fail(len({v for v,b in ids})==len(ids),'duplicate appcast version')
-              fail(all(ids[i][1]>ids[i+1][1] for i in range(len(ids)-1)),'appcast builds must strictly descend')
               fail(ids and ids[0]==(entry['version'],int(entry['buildNumber'])),'new item must be first')
+              fail(all(ids[0][1]>b for v,b in ids[1:]),'new build must increase')
+              # Published feeds may predate monotonic build numbering.
+              fail(all(ids[i][1]>=ids[i+1][1] for i in range(1,len(ids)-1)),'historical appcast builds must not increase')
               item=items[0]; enc=item.find('enclosure')
               for field,key in [('url','assetUrl'),('length','zipLength'),('{'+S+'}edSignature','edSignature'),('{'+S+'}shortVersionString','version')]:
                   fail(enc.get(field)==str(entry[key]),'appcast enclosure mismatch: '+key)
@@ -2522,8 +2524,10 @@ jobs:
               items=ch.findall('item')
               ids=[identity(x) for x in items]
               fail(len({v for v,b in ids})==len(ids),'duplicate appcast version')
-              fail(all(ids[i][1]>ids[i+1][1] for i in range(len(ids)-1)),'appcast builds must strictly descend')
               fail(ids and ids[0]==(entry['version'],int(entry['buildNumber'])),'new item must be first')
+              fail(all(ids[0][1]>b for v,b in ids[1:]),'new build must increase')
+              # Published feeds may predate monotonic build numbering.
+              fail(all(ids[i][1]>=ids[i+1][1] for i in range(1,len(ids)-1)),'historical appcast builds must not increase')
               item=items[0]; enc=item.find('enclosure')
               for field,key in [('url','assetUrl'),('length','zipLength'),('{'+S+'}edSignature','edSignature'),('{'+S+'}shortVersionString','version')]:
                   fail(enc.get(field)==str(entry[key]),'appcast enclosure mismatch: '+key)
