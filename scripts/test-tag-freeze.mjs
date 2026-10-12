@@ -16,6 +16,7 @@ async function runScenario({
   expected = '',
   peeledTarget = targetSha,
   peeledType = 'commit',
+  dryRun = false,
 } = {}) {
   const failures = [];
   const info = [];
@@ -51,6 +52,7 @@ async function runScenario({
   try {
     await executeTag(github, context, core, {
       env: {
+        DRY_RUN: String(dryRun),
         EXPECTED_TAG_OBJECT: expected,
         REPOSITORY_TYPE: 'openclaw',
         TAG: 'v1.2.3',
@@ -62,6 +64,10 @@ async function runScenario({
   }
   return { failures, info, mutations, thrown };
 }
+
+const dry = await runScenario({ dryRun: true });
+assert.deepEqual(dry.mutations, []);
+assert.equal(dry.thrown, undefined);
 
 const absent = await runScenario();
 assert.deepEqual(absent.failures, []);

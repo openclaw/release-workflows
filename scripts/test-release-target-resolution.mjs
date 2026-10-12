@@ -16,6 +16,9 @@ async function runScenario({
   tagObjectType = 'commit',
   tagRefType = 'tag',
   tagState = 'annotated',
+  eventName = 'workflow_dispatch',
+  dryRun = false,
+  releaseExists = false,
 } = {}) {
   const outputs = new Map();
   const failures = [];
@@ -24,6 +27,7 @@ async function runScenario({
   const github = {
     rest: {
       repos: {
+        getReleaseByTag: async () => { if (!releaseExists) throw missing(); return { data: {} }; },
         get: async () => ({ data: { default_branch: 'main' } }),
         getBranch: async () => ({ data: { protected: true, commit: { sha: branchHead } } }),
         compareCommitsWithBasehead: async (request) => {
@@ -44,6 +48,7 @@ async function runScenario({
     },
   };
   const context = {
+    eventName,
     ref: callerRef,
     repo: { owner: 'openclaw', repo: 'fixture' },
     sha: callerSha,
@@ -55,7 +60,7 @@ async function runScenario({
   };
   let thrown;
   try {
-    await executeResolver(github, context, core, { env: { TAG: 'v1.2.3' } });
+    await executeResolver(github, context, core, { env: { TAG: 'v1.2.3', DRY_RUN: String(dryRun) } });
   } catch (error) {
     thrown = error;
   }
@@ -63,6 +68,27 @@ async function runScenario({
 }
 
 const tests = [
+  ['dry run ignores historical tag and uses protected head', async () => {
+    const result = await runScenario({ dryRun: true });
+    assert.equal(result.thrown, undefined);
+    assert.deepEqual(result.failures, []);
+    assert.equal(result.outputs.get('target-sha'), 'b'.repeat(40));
+    assert.equal(result.outputs.get('tag-object-sha'), '');
+  }],
+  ['tag push freezes the event commit', async () => {
+    const result = await runScenario({ eventName: 'push', callerRef: 'refs/tags/v1.2.3', callerSha: 'a'.repeat(40) });
+    assert.equal(result.thrown, undefined);
+    assert.deepEqual(result.failures, []);
+    assert.equal(result.outputs.get('target-sha'), 'a'.repeat(40));
+  }],
+  ['moved tag is refused', async () => {
+    const result = await runScenario({ eventName: 'push', callerRef: 'refs/tags/v1.2.3', callerSha: 'e'.repeat(40) });
+    assert.match(result.thrown.message, /tag event/);
+  }],
+  ['existing releases are refused', async () => {
+    const result = await runScenario({ releaseExists: true });
+    assert.match(result.thrown.message, /release already exists/);
+  }],
   ['no tag freezes protected head', async () => {
     const result = await runScenario({ tagState: 'absent' });
     assert.deepEqual(result.failures, []);

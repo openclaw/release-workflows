@@ -23,6 +23,19 @@ jobs:
     uses: openclaw/release-workflows/.github/workflows/release-go-cli.yml@v1
 ```
 
+## Go CLI no-publish rehearsals
+
+The Go archetype accepts `dry-run: true`. It freezes protected main, validates
+release metadata and CI, builds, signs, notarizes, and runs both independent
+verifiers using retained Actions artifacts. It never creates a tag, draft,
+GitHub Release, tap dispatch, or closeout PR. Supply a dated changelog version;
+existing historical tags do not redirect the rehearsal away from current main.
+
+Tag-push callers can require signed tags and set `ci-check-events: '["push"]'`
+to require push CI on the frozen source. Real releases reject existing GitHub
+Releases before building. The workflow reuses an existing annotated tag and
+never replaces it.
+
 ## Ruleset workflows
 
 `crabbox-release-check.yml` is an organization-ruleset workflow for
