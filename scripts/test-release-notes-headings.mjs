@@ -25,7 +25,7 @@ const sections = [
   `${heading}\n\n- Inline <!-- comment\ncloses on a soft break --> here.\n\n`,
 ];
 let failures = 0;
-for (const archetype of ['go-cli', 'swift-cli', 'electron']) {
+for (const archetype of ['go-cli', 'swift-cli', 'electron', 'source', 'npm-package']) {
   const metadata = workflowStep(loadWorkflow(`release-${archetype}.yml`), 'validate', 'id', 'metadata').run;
   const program = extractMarkedSource(metadata, "<<'PY'\n", '\nPY');
   const cases = [
