@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Make npm and source dry-run dispatches prove the current protected branch commit when the requested version already has a release tag, without reading or changing that tag.
+
 ## 1.11.0 - 2026-10-11
 
 - Add npm and source-only release archetypes with protected frozen sources, no-publish dry runs, independent payload verification, exact-byte publication, OIDC npm provenance, and verified optional Homebrew handoff.
