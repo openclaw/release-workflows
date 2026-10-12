@@ -362,6 +362,22 @@ if [row['runner'] for row in sparkle_jobs['verify']['strategy']['matrix']['inclu
     raise SystemExit('Sparkle requires all three independent verifier runners')
 if 'inputs.dry-run' not in sparkle_jobs['verify']['if'] or 'always()' not in sparkle_jobs['verify']['if']:
     raise SystemExit('Sparkle dry-run verification must survive the skipped draft job')
+for name in ('build', 'sign', 'verify'):
+    source = '\n'.join(step.get('run', '') for step in sparkle_jobs[name]['steps'])
+    if "require(data.get('SURequireSignedFeed',False) is False" not in source or 'python3 "$RUNNER_TEMP/sparkle-tools/metadata.py"' not in source:
+        raise SystemExit(f'Sparkle {name} must reject signed-feed requirements on the built app')
+sign_steps = sparkle_jobs['sign']['steps']
+capture_step = next(i for i, step in enumerate(sign_steps) if 'downloader.py" capture ' in step.get('run', ''))
+identity_step = next(i for i, step in enumerate(sign_steps) if step.get('id') == 'signer')
+if capture_step >= identity_step:
+    raise SystemExit('Sparkle must freeze Downloader entitlements before importing signing credentials')
+sign_source = '\n'.join(step.get('run', '') for step in sign_steps)
+for control in ['downloader.py" sign "$app"', 'downloader.py" verify "$app"', "data['downloaderEntitlements']=json.loads(Path(e['RUNNER_TEMP'],'downloader-entitlements.json').read_text())"]:
+    if control not in sign_source:
+        raise SystemExit(f'missing Sparkle Downloader signing control: {control}')
+verify_source = '\n'.join(step.get('run', '') for step in sparkle_jobs['verify']['steps'])
+if 'downloader.py" verify-manifest "$app" release-assets/SIGNING-MANIFEST.json' not in verify_source:
+    raise SystemExit('every Sparkle verifier must check frozen Downloader entitlements')
 call = sparkle['on']['workflow_call'] if 'on' in sparkle else sparkle['true']['workflow_call']
 required_sparkle_secrets = {'MACOS_SIGNING_P12', 'MACOS_SIGNING_P12_PASSWORD', 'ASC_KEY_ID', 'ASC_ISSUER_ID', 'ASC_PRIVATE_KEY_P8', 'SPARKLE_PRIVATE_KEY'}
 if set(call['secrets']) != required_sparkle_secrets or not all(s['required'] for s in call['secrets'].values()):
