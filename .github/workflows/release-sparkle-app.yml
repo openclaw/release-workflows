@@ -746,6 +746,7 @@ jobs:
               info=app/'Contents/Info.plist'
               require(info.is_file() and not info.is_symlink(),'missing regular Info.plist')
               data=plistlib.loads(info.read_bytes())
+              require(data.get('SURequireSignedFeed',False) is False,'SURequireSignedFeed is unsupported: this workflow publishes an unsigned appcast; disable signed-feed requirements before releasing')
               for key,expected in [('CFBundleShortVersionString',e['VERSION']),('CFBundleIdentifier',e['BUNDLE_IDENTIFIER']),('LSMinimumSystemVersion',e['MINIMUM_SYSTEM_VERSION']),('SUFeedURL',e['APPCAST_FEED_URL']),('SUPublicEDKey',e['SPARKLE_PUBLIC_KEY'])]:
                   require(data.get(key)==expected,'Info.plist mismatch: '+key)
               require(bool(re.fullmatch('[1-9][0-9]*',str(data.get('CFBundleVersion','')))),'invalid build number')
@@ -1049,6 +1050,7 @@ jobs:
               info=app/'Contents/Info.plist'
               require(info.is_file() and not info.is_symlink(),'missing regular Info.plist')
               data=plistlib.loads(info.read_bytes())
+              require(data.get('SURequireSignedFeed',False) is False,'SURequireSignedFeed is unsupported: this workflow publishes an unsigned appcast; disable signed-feed requirements before releasing')
               for key,expected in [('CFBundleShortVersionString',e['VERSION']),('CFBundleIdentifier',e['BUNDLE_IDENTIFIER']),('LSMinimumSystemVersion',e['MINIMUM_SYSTEM_VERSION']),('SUFeedURL',e['APPCAST_FEED_URL']),('SUPublicEDKey',e['SPARKLE_PUBLIC_KEY'])]:
                   require(data.get(key)==expected,'Info.plist mismatch: '+key)
               require(bool(re.fullmatch('[1-9][0-9]*',str(data.get('CFBundleVersion','')))),'invalid build number')
@@ -1209,6 +1211,73 @@ jobs:
               for item in signing_paths(sys.argv[1]):sys.stdout.buffer.write(os.fsencode(item)+b'\0')
           # END signing.py
           SOURCE
+          cat >"$RUNNER_TEMP/sparkle-tools/downloader.py" <<'SOURCE'
+          # BEGIN downloader.py
+          import json,os,plistlib,subprocess,sys,tempfile
+          from pathlib import Path
+          from contract import require
+
+          def paths(app):
+              app=Path(app).resolve()
+              framework=app/'Contents/Frameworks/Sparkle.framework'
+              current=framework/'Versions/Current'
+              require(current.is_symlink(),'missing Sparkle Current alias')
+              version=current.resolve(strict=True)
+              require(version.parent==framework/'Versions','Sparkle version escapes framework')
+              bundle=version/'XPCServices/Downloader.xpc'
+              info=bundle/'Contents/Info.plist'
+              require(info.is_file() and not info.is_symlink(),'missing regular Downloader Info.plist')
+              name=plistlib.loads(info.read_bytes()).get('CFBundleExecutable','')
+              require(isinstance(name,str) and name not in ('','.','..') and '/' not in name,'invalid Downloader executable')
+              executable=bundle/'Contents/MacOS'/name
+              require(executable.is_file() and not executable.is_symlink(),'missing physical Downloader executable')
+              require(bundle.is_dir() and not bundle.is_symlink(),'missing physical Downloader bundle')
+              return app,bundle,executable
+
+          def canonical(data):
+              require(isinstance(data,dict),'Downloader entitlements must be a dictionary')
+              if 'com.apple.security.app-sandbox' in data:
+                  require(data['com.apple.security.app-sandbox'] is True,'Downloader app-sandbox entitlement must be true')
+              return plistlib.dumps(data,sort_keys=True).decode('utf-8')
+
+          def read(path,arch,allow_unsigned=False):
+              result=subprocess.run(['codesign','--display','--arch',arch,'--xml','--entitlements','-',str(path)],capture_output=True,env={**os.environ,'LC_ALL':'C'})
+              if allow_unsigned and result.returncode==1 and result.stderr.endswith(b': code object is not signed at all\n'):
+                  require(not result.stdout,'unexpected unsigned Downloader entitlements')
+                  return canonical({})
+              require(result.returncode==0,'cannot read Downloader entitlements: '+str(path)+' ('+arch+')')
+              return canonical(plistlib.loads(result.stdout) if result.stdout.strip() else {})
+
+          def capture(app,allow_unsigned=False):
+              app,bundle,executable=paths(app)
+              values=[read(path,arch,allow_unsigned) for path in (bundle,executable) for arch in ('arm64','x86_64')]
+              require(len(set(values))==1,'Downloader entitlements differ between bundle, executable or architectures')
+              return {'bundle':str(bundle.relative_to(app)),'entitlements':values[0]}
+
+          def verify(app,record,allow_unsigned=False):
+              require(capture(app,allow_unsigned)==record,'Downloader entitlements differ from frozen pre-signing record')
+
+          def sign(app,record):
+              from signing import signing_paths
+              verify(app,record,allow_unsigned=True)
+              _,bundle,executable=paths(app)
+              # Reapply frozen XML explicitly: preserve-metadata can ignore linker-signed input.
+              with tempfile.NamedTemporaryFile(dir=os.environ['RUNNER_TEMP'],suffix='.entitlements') as entitlements:
+                  entitlements.write(record['entitlements'].encode('utf-8'));entitlements.flush()
+                  for item in signing_paths(app):
+                      extra=['--entitlements',entitlements.name] if item in (bundle,executable) and plistlib.loads(record['entitlements'].encode('utf-8')) else []
+                      subprocess.run(['codesign','--force','--timestamp','--options','runtime',*extra,'--keychain',os.environ['KEYCHAIN'],'--sign',os.environ['IDENTITY'],str(item)],check=True)
+              verify(app,record)
+
+          if __name__=='__main__':
+              command,app,record=sys.argv[1:]
+              if command=='capture': Path(record).write_text(json.dumps(capture(app,allow_unsigned=True),sort_keys=True)+'\n')
+              elif command=='sign': sign(app,json.loads(Path(record).read_text()))
+              elif command=='verify': verify(app,json.loads(Path(record).read_text()))
+              elif command=='verify-manifest': verify(app,json.loads(Path(record).read_text())['downloaderEntitlements'])
+              else: raise ValueError('unknown Downloader command')
+          # END downloader.py
+          SOURCE
       - name: Validate and unpack frozen unsigned payload
         env:
           APP_NAME: ${{ inputs.app-name }}
@@ -1229,6 +1298,7 @@ jobs:
           python3 "$RUNNER_TEMP/sparkle-tools/unpack.py" raw/app.zip unsigned "$APP_NAME.app" zip
           python3 "$RUNNER_TEMP/sparkle-tools/metadata.py" "unsigned/$APP_NAME.app"
           python3 "$RUNNER_TEMP/sparkle-tools/signing.py" "unsigned/$APP_NAME.app" >/dev/null
+          python3 "$RUNNER_TEMP/sparkle-tools/downloader.py" capture "unsigned/$APP_NAME.app" "$RUNNER_TEMP/downloader-entitlements.json"
           if [[ -n "$CLI_BINARY_NAME" ]]; then
             python3 "$RUNNER_TEMP/sparkle-tools/unpack.py" raw/cli.tar.gz cli-unsigned sparkle-cli tar
           fi
@@ -1361,13 +1431,11 @@ jobs:
           mkdir signed-assets submissions
           app="unsigned/$APP_NAME.app"
           # Seal physical Mach-O leaves and bundles from the inside out. Never sign through framework aliases.
-          python3 "$RUNNER_TEMP/sparkle-tools/signing.py" "$app" >"$RUNNER_TEMP/sign-paths"
-          while IFS= read -r -d '' item; do
-            codesign --force --timestamp --options runtime --keychain "$KEYCHAIN" --sign "$IDENTITY" "$item"
-          done <"$RUNNER_TEMP/sign-paths"
+          python3 "$RUNNER_TEMP/sparkle-tools/downloader.py" sign "$app" "$RUNNER_TEMP/downloader-entitlements.json"
           requirement="identifier \"$BUNDLE_IDENTIFIER\" and anchor apple generic and certificate leaf[subject.OU] = \"$TEAM_ID\""
           codesign --force --timestamp --options runtime --identifier "$BUNDLE_IDENTIFIER" --requirements "=designated => $requirement" --entitlements frozen-inputs/app.entitlements --keychain "$KEYCHAIN" --sign "$IDENTITY" "$app"
           codesign --verify --strict --deep -R="$requirement" "$app"
+          python3 "$RUNNER_TEMP/sparkle-tools/downloader.py" verify "$app" "$RUNNER_TEMP/downloader-entitlements.json"
           /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$app" "$RUNNER_TEMP/app-submit.zip"
           python3 "$RUNNER_TEMP/sparkle-tools/notary.py" submit "$RUNNER_TEMP/app-submit.zip" submissions/app.json
           xcrun stapler staple "$app"
@@ -1433,6 +1501,7 @@ jobs:
           e=os.environ; root=Path('signed-assets')
           info=plistlib.loads((Path('unsigned')/(e['APP_NAME']+'.app')/'Contents/Info.plist').read_bytes())
           data={'schemaVersion':1,'repository':e['GITHUB_REPOSITORY'],'tag':e['TAG'],'commit':e['TARGET_SHA'],'teamId':e['TEAM_ID'],'authority':e['AUTHORITY'],'toolchain':{'build':json.loads(Path('raw/build-toolchain.json').read_text()),'sign':json.loads(Path(e['RUNNER_TEMP'],'toolchain.json').read_text())},'submissions':{p.stem:json.loads(p.read_text())['id'] for p in Path('submissions').glob('*.json')},'buildNumber':str(info['CFBundleVersion']),'edSignature':Path(e['RUNNER_TEMP'],'ed-signature').read_text().strip(),'digests':{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in root.iterdir()}}
+          data['downloaderEntitlements']=json.loads(Path(e['RUNNER_TEMP'],'downloader-entitlements.json').read_text())
           (root/'SIGNING-MANIFEST.json').write_text(json.dumps(data,indent=2)+'\n')
           PYCODE
           # The transport tar preserves executable modes; only release assets are published.
@@ -2310,6 +2379,7 @@ jobs:
               info=app/'Contents/Info.plist'
               require(info.is_file() and not info.is_symlink(),'missing regular Info.plist')
               data=plistlib.loads(info.read_bytes())
+              require(data.get('SURequireSignedFeed',False) is False,'SURequireSignedFeed is unsupported: this workflow publishes an unsigned appcast; disable signed-feed requirements before releasing')
               for key,expected in [('CFBundleShortVersionString',e['VERSION']),('CFBundleIdentifier',e['BUNDLE_IDENTIFIER']),('LSMinimumSystemVersion',e['MINIMUM_SYSTEM_VERSION']),('SUFeedURL',e['APPCAST_FEED_URL']),('SUPublicEDKey',e['SPARKLE_PUBLIC_KEY'])]:
                   require(data.get(key)==expected,'Info.plist mismatch: '+key)
               require(bool(re.fullmatch('[1-9][0-9]*',str(data.get('CFBundleVersion','')))),'invalid build number')
@@ -2324,6 +2394,73 @@ jobs:
               import sys
               check(sys.argv[1])
           # END metadata.py
+          SOURCE
+          cat >"$RUNNER_TEMP/sparkle-tools/downloader.py" <<'SOURCE'
+          # BEGIN downloader.py
+          import json,os,plistlib,subprocess,sys,tempfile
+          from pathlib import Path
+          from contract import require
+
+          def paths(app):
+              app=Path(app).resolve()
+              framework=app/'Contents/Frameworks/Sparkle.framework'
+              current=framework/'Versions/Current'
+              require(current.is_symlink(),'missing Sparkle Current alias')
+              version=current.resolve(strict=True)
+              require(version.parent==framework/'Versions','Sparkle version escapes framework')
+              bundle=version/'XPCServices/Downloader.xpc'
+              info=bundle/'Contents/Info.plist'
+              require(info.is_file() and not info.is_symlink(),'missing regular Downloader Info.plist')
+              name=plistlib.loads(info.read_bytes()).get('CFBundleExecutable','')
+              require(isinstance(name,str) and name not in ('','.','..') and '/' not in name,'invalid Downloader executable')
+              executable=bundle/'Contents/MacOS'/name
+              require(executable.is_file() and not executable.is_symlink(),'missing physical Downloader executable')
+              require(bundle.is_dir() and not bundle.is_symlink(),'missing physical Downloader bundle')
+              return app,bundle,executable
+
+          def canonical(data):
+              require(isinstance(data,dict),'Downloader entitlements must be a dictionary')
+              if 'com.apple.security.app-sandbox' in data:
+                  require(data['com.apple.security.app-sandbox'] is True,'Downloader app-sandbox entitlement must be true')
+              return plistlib.dumps(data,sort_keys=True).decode('utf-8')
+
+          def read(path,arch,allow_unsigned=False):
+              result=subprocess.run(['codesign','--display','--arch',arch,'--xml','--entitlements','-',str(path)],capture_output=True,env={**os.environ,'LC_ALL':'C'})
+              if allow_unsigned and result.returncode==1 and result.stderr.endswith(b': code object is not signed at all\n'):
+                  require(not result.stdout,'unexpected unsigned Downloader entitlements')
+                  return canonical({})
+              require(result.returncode==0,'cannot read Downloader entitlements: '+str(path)+' ('+arch+')')
+              return canonical(plistlib.loads(result.stdout) if result.stdout.strip() else {})
+
+          def capture(app,allow_unsigned=False):
+              app,bundle,executable=paths(app)
+              values=[read(path,arch,allow_unsigned) for path in (bundle,executable) for arch in ('arm64','x86_64')]
+              require(len(set(values))==1,'Downloader entitlements differ between bundle, executable or architectures')
+              return {'bundle':str(bundle.relative_to(app)),'entitlements':values[0]}
+
+          def verify(app,record,allow_unsigned=False):
+              require(capture(app,allow_unsigned)==record,'Downloader entitlements differ from frozen pre-signing record')
+
+          def sign(app,record):
+              from signing import signing_paths
+              verify(app,record,allow_unsigned=True)
+              _,bundle,executable=paths(app)
+              # Reapply frozen XML explicitly: preserve-metadata can ignore linker-signed input.
+              with tempfile.NamedTemporaryFile(dir=os.environ['RUNNER_TEMP'],suffix='.entitlements') as entitlements:
+                  entitlements.write(record['entitlements'].encode('utf-8'));entitlements.flush()
+                  for item in signing_paths(app):
+                      extra=['--entitlements',entitlements.name] if item in (bundle,executable) and plistlib.loads(record['entitlements'].encode('utf-8')) else []
+                      subprocess.run(['codesign','--force','--timestamp','--options','runtime',*extra,'--keychain',os.environ['KEYCHAIN'],'--sign',os.environ['IDENTITY'],str(item)],check=True)
+              verify(app,record)
+
+          if __name__=='__main__':
+              command,app,record=sys.argv[1:]
+              if command=='capture': Path(record).write_text(json.dumps(capture(app,allow_unsigned=True),sort_keys=True)+'\n')
+              elif command=='sign': sign(app,json.loads(Path(record).read_text()))
+              elif command=='verify': verify(app,json.loads(Path(record).read_text()))
+              elif command=='verify-manifest': verify(app,json.loads(Path(record).read_text())['downloaderEntitlements'])
+              else: raise ValueError('unknown Downloader command')
+          # END downloader.py
           SOURCE
           cat >"$RUNNER_TEMP/sparkle-tools/appcast.py" <<'SOURCE'
           # BEGIN appcast.py
@@ -2972,6 +3109,7 @@ jobs:
           python3 "$RUNNER_TEMP/sparkle-tools/unpack.py" "release-assets/$APP_NAME-$VERSION.app.zip" verified-app "$APP_NAME.app" zip
           app="verified-app/$APP_NAME.app"
           python3 "$RUNNER_TEMP/sparkle-tools/metadata.py" "$app"
+          python3 "$RUNNER_TEMP/sparkle-tools/downloader.py" verify-manifest "$app" release-assets/SIGNING-MANIFEST.json
           if [[ "$REPOSITORY_TYPE" == openclaw ]]; then
             team=FWJYW4S8P8
             authority="Developer ID Application: OpenClaw Foundation ($team)"

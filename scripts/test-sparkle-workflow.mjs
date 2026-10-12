@@ -77,6 +77,41 @@ test('signer pins tool checksums, private seed file permissions, and always-run 
   assert.equal(step('sign', 'Restore signing keychain').if, 'always()');
 });
 
+test('Downloader record is captured before signing and bound to every independent verifier', () => {
+  const unpack = step('sign', 'Validate and unpack frozen unsigned payload');
+  const sign = step('sign', 'Sign app inside out and notarize release payload').run;
+  assert.ok(w.jobs.sign.steps.indexOf(unpack) < w.jobs.sign.steps.findIndex(s => s.id === 'signer'));
+  assert.match(unpack.run, /downloader.py" capture "unsigned\/\$APP_NAME.app" "\$RUNNER_TEMP\/downloader-entitlements.json"/);
+  assert.match(sign, /downloader.py" sign "\$app" "\$RUNNER_TEMP\/downloader-entitlements.json"/);
+  assert.match(sign, /data\['downloaderEntitlements'\]=json.loads\(Path\(e\['RUNNER_TEMP'\],'downloader-entitlements.json'\).read_text\(\)\)/);
+  assert.ok(sign.indexOf('downloader.py" sign') < sign.indexOf('--entitlements frozen-inputs/app.entitlements'));
+  assert.ok(sign.indexOf('downloader.py" verify') > sign.indexOf('--entitlements frozen-inputs/app.entitlements'));
+  const verify = step('verify', 'Verify inventory, Sparkle signature, sealed app, DMG, and CLI').run;
+  assert.match(verify, /downloader.py" verify-manifest "\$app" release-assets\/SIGNING-MANIFEST.json/);
+  assert.ok(verify.indexOf('downloader.py" verify-manifest') < verify.indexOf("verdict='verified'"));
+  assert.match(verify, /bind_signed\(Path\(e\['GITHUB_WORKSPACE'\]\)/);
+  for (const job of ['sign', 'verify']) {
+    const tools = w.jobs[job].steps.map(s => s.run ?? '').join('\n');
+    const downloader = extractMarkedSource(tools, '# BEGIN downloader.py\n', '# END downloader.py');
+    assert.match(downloader, /for path in \(bundle,executable\) for arch in \('arm64','x86_64'\)/);
+  }
+});
+
+test('unsigned-feed policy runs on the built plist before signing, tag or draft effects', () => {
+  assert.ok(w.jobs.sign.needs.includes('build'));
+  const build = step('build', 'Validate and freeze raw build outputs').run;
+  assert.ok(build.indexOf('metadata.py') < build.indexOf('codesign --verify'));
+  assert.ok(build.indexOf('metadata.py') < build.indexOf('mkdir raw'));
+  for (const job of ['build', 'sign', 'verify']) {
+    const tools = w.jobs[job].steps.map(s => s.run ?? '').join('\n');
+    const metadata = extractMarkedSource(tools, '# BEGIN metadata.py\n', '# END metadata.py');
+    assert.match(metadata, /require\(data.get\('SURequireSignedFeed',False\) is False/);
+    assert.doesNotMatch(metadata, /data.get\('SUVerifyUpdateBeforeExtraction'/);
+    const commands = w.jobs[job].steps.map(s => s.run ?? '').join('\n').split('# END metadata.py')[1];
+    assert.match(commands, /python3 "\$RUNNER_TEMP\/sparkle-tools\/metadata.py"/);
+  }
+});
+
 function publisherFixture(scenario = '') {
   const notes = scenario === 'crlf' ? '## 1.2.3 - 2026-10-01\r\n\r\nFixture release.\r\n' : '## 1.2.3 - 2026-10-01\n\nFixture release.\n';
   const payloads = new Map([

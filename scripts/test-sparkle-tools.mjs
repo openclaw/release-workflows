@@ -267,6 +267,118 @@ except (ValueError,FileNotFoundError):pass
 `);
 });
 
+test('Downloader reapplies frozen entitlements to both signing passes and checks every slice', () => {
+  python(`
+import downloader,signing,plistlib,subprocess,os
+from pathlib import Path
+from unittest.mock import patch
+root=Path('Downloader.app').resolve();version=root/'Contents/Frameworks/Sparkle.framework/Versions/B'
+bundle=version/'XPCServices/Downloader.xpc';binary=bundle/'Contents/MacOS/Downloader'
+binary.parent.mkdir(parents=True);binary.write_bytes(b'macho')
+(bundle/'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleExecutable':'Downloader'}))
+(version.parent/'Current').symlink_to('B')
+other=version/'Autoupdate';other.write_bytes(b'macho')
+sandbox={'com.apple.security.network.client':True,'com.apple.security.app-sandbox':True,'fixture':{'b':2,'a':[True,'value']}}
+os.environ.update(RUNNER_TEMP=str(Path('.').resolve()),KEYCHAIN='fixture',IDENTITY='fixture')
+for initial in (sandbox,{}):
+    state={(str(p),a):dict(initial) for p in (bundle,binary) for a in ('arm64','x86_64')}
+    calls=[]
+    def run(args,**kwargs):
+        path=args[-1]
+        if '--display' in args:
+            value=state[(path,args[args.index('--arch')+1])]
+            return subprocess.CompletedProcess(args,0,plistlib.dumps(value,sort_keys=False) if value else b'',b'')
+        calls.append(args)
+        data=plistlib.loads(Path(args[args.index('--entitlements')+1]).read_bytes()) if '--entitlements' in args else {}
+        if path in (str(binary),str(bundle)):
+            for arch in ('arm64','x86_64'):state[(str(binary),arch)]=state[(str(bundle),arch)]=data
+        return subprocess.CompletedProcess(args,0)
+    with patch('subprocess.run',run),patch.object(signing,'signing_paths',lambda app:[binary,bundle,other]):
+        record=downloader.capture(root)
+        assert plistlib.loads(record['entitlements'].encode('utf-8'))==initial
+        downloader.sign(root,record)
+        assert [args[-1] for args in calls]==[str(binary),str(bundle),str(other)]
+        assert all(('--entitlements' in args)==bool(initial) for args in calls[:2])
+        assert calls[-1]==['codesign','--force','--timestamp','--options','runtime','--keychain','fixture','--sign','fixture',str(other)]
+        downloader.verify(root,record)
+        for value in ({},dict(initial,unexpected=True),dict(initial,**{'com.apple.security.app-sandbox':False}),dict(initial,**{'com.apple.security.network.client':False})):
+            if value==initial:continue
+            for target in ((str(binary),'arm64'),(str(bundle),'x86_64')):
+                before=state[target];state[target]=value
+                try:downloader.verify(root,record);raise AssertionError('changed entitlement accepted')
+                except ValueError:pass
+                state[target]=before
+        changed=dict(record,bundle='Contents/wrong.xpc')
+        try:downloader.verify(root,changed);raise AssertionError('changed bundle accepted')
+        except ValueError:pass
+        # A record change cannot redirect signing away from the frozen input.
+        calls.clear()
+        try:downloader.sign(root,dict(record,entitlements=downloader.canonical({'injected':True})));raise AssertionError('changed record accepted')
+        except ValueError:pass
+        assert calls==[]
+for code,out,err,accepted in [(1,b'',b'fixture: code object is not signed at all\\n',True),(1,b'',b'malformed signature',False),(0,b'bad plist',b'',False)]:
+    with patch('subprocess.run',lambda *a,**k:subprocess.CompletedProcess(a,code,out,err)):
+        if accepted:
+            assert plistlib.loads(downloader.read(binary,'arm64',allow_unsigned=True))=={}
+            try:downloader.read(binary,'arm64');raise AssertionError('unsigned verifier input accepted')
+            except ValueError:pass
+        else:
+            try:downloader.read(binary,'arm64',allow_unsigned=True);raise AssertionError('unreadable signature accepted')
+            except (ValueError,plistlib.InvalidFileException):pass
+`);
+});
+
+test('native ad-hoc Downloader signatures preserve sandbox and empty entitlements', { skip: process.platform !== 'darwin' }, () => {
+  python(`
+import downloader,signing,plistlib,subprocess,os
+from pathlib import Path
+from unittest.mock import patch
+root=Path('Native.app').resolve();version=root/'Contents/Frameworks/Sparkle.framework/Versions/B'
+bundle=version/'XPCServices/Downloader.xpc';binary=bundle/'Contents/MacOS/Downloader'
+binary.parent.mkdir(parents=True)
+(bundle/'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleExecutable':'Downloader','CFBundleIdentifier':'org.example.downloader','CFBundlePackageType':'XPC!'}))
+(version.parent/'Current').symlink_to('B')
+Path('main.c').write_text('int main(void) { return 0; }')
+subprocess.run(['clang','-arch','arm64','-arch','x86_64','-mmacosx-version-min=15.0','main.c','-o',str(binary)],check=True)
+os.environ.update(RUNNER_TEMP=str(Path('.').resolve()),KEYCHAIN='/dev/null',IDENTITY='-')
+for initial in ({'com.apple.security.app-sandbox':True,'com.apple.security.network.client':True},{}):
+    Path('native.entitlements').write_bytes(plistlib.dumps(initial))
+    subprocess.run(['codesign','--force','--sign','-','--entitlements','native.entitlements',str(bundle)],check=True)
+    record=downloader.capture(root)
+    assert plistlib.loads(record['entitlements'].encode('utf-8'))==initial
+    with patch.object(signing,'signing_paths',lambda app:[binary,bundle]):downloader.sign(root,record)
+    downloader.verify(root,record)
+    subprocess.run(['codesign','--verify','--strict',str(bundle)],check=True)
+    subprocess.run(['codesign','--force','--sign','-',str(bundle)],check=True)
+    if initial:
+        try:downloader.verify(root,record);raise AssertionError('stripped sandbox accepted')
+        except ValueError:pass
+    else:downloader.verify(root,record)
+`);
+});
+
+test('built Info.plist refuses signed feeds before Mach-O work but permits archive preverification', () => {
+  python(`
+import metadata,plistlib,os
+from pathlib import Path
+from unittest.mock import patch
+root=Path('Feed.app');(root/'Contents').mkdir(parents=True)
+base=dict(CFBundleShortVersionString='1.2.3',CFBundleIdentifier='org.example.feed',LSMinimumSystemVersion='15.0',SUFeedURL='https://example.test/feed.xml',SUPublicEDKey='key',CFBundleVersion='12',CFBundleExecutable='Feed')
+os.environ.update(VERSION='1.2.3',BUNDLE_IDENTIFIER='org.example.feed',MINIMUM_SYSTEM_VERSION='15.0',APPCAST_FEED_URL=base['SUFeedURL'],SPARKLE_PUBLIC_KEY='key')
+for required in (None,False,True,'YES',1):
+    for before in (False,True):
+        data=dict(base,SUVerifyUpdateBeforeExtraction=before)
+        if required is not None:data['SURequireSignedFeed']=required
+        (root/'Contents/Info.plist').write_bytes(plistlib.dumps(data))
+        with patch.object(metadata,'check_deployment'),patch('subprocess.check_output',return_value='arm64 x86_64') as command:
+            if required is None or required is False:metadata.check(root)
+            else:
+                try:metadata.check(root);raise AssertionError('signed feed accepted')
+                except ValueError as error:assert 'SURequireSignedFeed' in str(error) and 'unsigned appcast' in str(error)
+                command.assert_not_called()
+`);
+});
+
 test('post-sign caller packaging cannot replace the original signed artifact', () => {
   python(`
 from pathlib import Path
