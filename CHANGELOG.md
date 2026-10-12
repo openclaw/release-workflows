@@ -4,6 +4,10 @@
 
 - Add the approval-gated `sparkle-app` release archetype with signed and notarized app/DMG/CLI assets, preserved and independently verified Downloader entitlements, early rejection of signed-feed requirements, Sparkle appcasts, three-runner verification, optional npm/Homebrew handoffs, dry runs, and appcast closeout PRs.
 
+- Preserve existing unprefixed source-catalog tags and project-branded release titles with optional `tag-prefix` and `release-name` inputs; require `v` tags for Go proxy releases.
+
+- Allow source-only releases to build and test on a selected GitHub-hosted runner, including macOS-only SwiftPM libraries.
+
 ## 1.11.2 - 2026-10-12
 
 - Preserve npm pack lifecycle scripts and their output without treating script logs as JSON; validate tarballs against the frozen package plan.
