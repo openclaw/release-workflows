@@ -37,10 +37,28 @@ test('environment secrets are explicit, scoped to signing, and all public writes
   }
 });
 
-test('new archetype retains exact protected-target and tag race guards', () => {
+test('protected source and tag-event guards freeze the intended commit', async () => {
   const resolver = step('validate', 'Resolve protected release target').with.script;
-  const old = workflowStep(loadWorkflow('release-swift-cli.yml'), 'validate', 'name', 'Resolve protected release target').with.script;
-  assert.equal(resolver, old);
+  const execute = new AsyncFunction('github', 'context', 'core', 'process', resolver);
+  for (const scenario of ['main', 'dry', 'tag', 'moved', 'unprotected']) {
+    const outputs = new Map(); const errors = []; let tagReads = 0;
+    const github = {rest:{repos:{
+      get:async()=>({data:{default_branch:'main'}}),
+      getBranch:async()=>({data:{protected:scenario!=='unprotected',commit:{sha:'b'.repeat(40)}}}),
+      compareCommitsWithBasehead:async()=>({data:{status:'ahead'}}),
+    },git:{
+      getRef:async()=>{tagReads++;return {data:{object:{type:'tag',sha:'c'.repeat(40)}}};},
+      getTag:async()=>({data:{object:{type:'commit',sha:'a'.repeat(40)}}}),
+    }}};
+    const tagged=['tag','moved'].includes(scenario);
+    const context={repo:{owner:'openclaw',repo:'fixture'},eventName:tagged?'push':'workflow_dispatch',ref:tagged?'refs/tags/v1.2.3':'refs/heads/main',sha:tagged?(scenario==='moved'?'d':'a').repeat(40):'b'.repeat(40)};
+    try {
+      await execute(github,context,{info(){},setFailed:e=>errors.push(e),setOutput:(k,v)=>outputs.set(k,v)},{env:{TAG:'v1.2.3',DRY_RUN:String(scenario==='dry'),GITHUB_WORKFLOW_REF:'openclaw/fixture/.github/workflows/release.yml@'+context.ref}});
+    } catch (error) { errors.push(error.message); }
+    if (['moved','unprotected'].includes(scenario)) {assert.ok(errors.length);assert.equal(outputs.has('target-sha'),false);}
+    else {assert.deepEqual(errors,[]);assert.equal(outputs.get('target-sha'),(scenario==='dry'?'b':'a').repeat(40));}
+    if (scenario==='dry') assert.equal(tagReads,0);
+  }
   const freeze = step('tag', 'Create or reuse immutable annotated tag').with.script;
   for (const guard of ['EXPECTED_TAG_OBJECT', 'tag disappeared after validation', 'tag object changed after validation', 'tag appeared after validation']) assert.ok(freeze.includes(guard));
 });
@@ -138,3 +156,17 @@ for (const scenario of ['create', 'existing', 'stale', 'unavailable-blob']) {
     else { await run(); assert.deepEqual(calls, scenario === 'existing' ? [] : ['tree', 'ref', 'pr']); }
   });
 }
+
+test('frozen inputs and signed payloads are downloaded by immutable ID', () => {
+  for (const job of Object.values(w.jobs)) for (const item of job.steps ?? []) {
+    if (!item.uses?.startsWith('actions/download-artifact@')) continue;
+    if (item.with['artifact-ids'] || /^\$\{\{ needs\.(validate|sign|package)\.outputs\.[^}]+ \}\}$/.test(item.with.name ?? '')) {
+      assert.ok(item.with['artifact-ids']);
+      assert.equal(item.with['merge-multiple'], true);
+      assert.equal(item.with.name, undefined);
+    }
+  }
+  assert.equal(w.jobs.validate.outputs['frozen-inputs-id'], '${{ steps.frozen-upload.outputs.artifact-id }}');
+  assert.equal(w.jobs.sign.outputs['artifact-id'], '${{ steps.signed-upload.outputs.artifact-id }}');
+  assert.equal(w.jobs.package.outputs['artifact-id'], '${{ steps.package-upload.outputs.artifact-id }}');
+});

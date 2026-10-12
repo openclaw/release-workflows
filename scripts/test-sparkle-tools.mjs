@@ -198,21 +198,22 @@ test('npm archive embeds byte-identical executable and companions', () => {
   python(`
 from npm import verify_package
 from pathlib import Path
-import tarfile,io
+import tarfile,io,json
 cli=Path('cli.tgz')
 def add(archive,name,data,mode=0o755):
     p=tarfile.TarInfo(name);p.size=len(data);p.mode=mode;archive.addfile(p,io.BytesIO(data))
 with tarfile.open(cli,'w:gz') as archive:
     add(archive,'fixture-universal/tool',b'binary');add(archive,'fixture-universal/runtime.dylib',b'library')
-for case in ('valid','changed','library','mode','duplicate'):
+for case in ('valid','changed','library','mode','duplicate','version'):
     npm=Path('npm-'+case+'.tgz')
     with tarfile.open(npm,'w:gz') as archive:
+        add(archive,'package/package.json',json.dumps({'version':'1.2.4' if case=='version' else '1.2.3'}).encode())
         add(archive,'package/bin/tool',b'other' if case=='changed' else b'binary',0o644 if case=='mode' else 0o755)
         add(archive,'package/bin/runtime.dylib',b'other' if case=='library' else b'library')
         if case=='duplicate': add(archive,'package/bin/tool',b'binary')
-    if case=='valid': verify_package(cli,npm,'fixture','tool')
+    if case=='valid': verify_package(cli,npm,'fixture','tool','1.2.3')
     else:
-        try:verify_package(cli,npm,'fixture','tool');raise AssertionError(case)
+        try:verify_package(cli,npm,'fixture','tool','1.2.3');raise AssertionError(case)
         except ValueError:pass
 `);
 });
@@ -387,5 +388,15 @@ for channel in ('alpha','beta','rc'):
         except ValueError:pass
 stable=update(xml,dict(base,version='1.2.3'))
 assert '<sparkle:channel>' not in stable
+`);
+});
+
+ test('CLI version checks require exact SemVer equality', () => {
+  python(`
+from contract import cli_version_matches
+assert cli_version_matches('Peekaboo 1.2.3 (build 44)', '1.2.3')
+assert not cli_version_matches('Peekaboo 1.2.30', '1.2.3')
+assert not cli_version_matches('Peekaboo 1.2.3-beta.1', '1.2.3')
+assert cli_version_matches('Peekaboo 1.2.3-beta.1', '1.2.3-beta.1')
 `);
 });

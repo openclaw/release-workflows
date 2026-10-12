@@ -1,0 +1,38 @@
+name: Dry run archetypes
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version matching the dated changelog and synthetic package fixture
+        type: string
+        required: true
+        default: 1.11.0
+permissions: {}
+jobs:
+  npm-package:
+    permissions:
+      actions: read
+      checks: read
+      contents: write
+      statuses: read
+      id-token: write
+    uses: ./.github/workflows/release-npm-package.yml
+    with:
+      version: ${{ inputs.version }}
+      dry_run: true
+      package-dirs: '["scripts/fixtures/npm-monorepo/packages/core","scripts/fixtures/npm-monorepo/packages/cli"]'
+      install-command: ':'
+      build-command: ':'
+      smoke-command: node -e "require('node:assert/strict').equal(require('@release-fixture/cli').version, '1.11.0')"
+  source:
+    permissions:
+      actions: read
+      checks: read
+      contents: write
+      statuses: read
+    uses: ./.github/workflows/release-source.yml
+    with:
+      version: ${{ inputs.version }}
+      dry_run: true
+      source-archives: true
+      test-command: bash -n scripts/validate-workflows.sh

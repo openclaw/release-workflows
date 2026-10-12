@@ -126,6 +126,10 @@ on:
         required: false
         type: boolean
         default: true
+      require-signed-tag:
+        description: Require an existing SSH-signed version tag for publication
+        type: boolean
+        default: false
       dry-run:
         description: Real signing and verification without public writes
         required: false
@@ -165,6 +169,7 @@ jobs:
     outputs:
       default-branch: ${{ steps.source.outputs.default-branch }}
       release-notes-artifact-name: ${{ steps.metadata.outputs.release-notes-artifact-name }}
+      frozen-inputs-id: ${{ steps.frozen-upload.outputs.artifact-id }}
       release-version: ${{ steps.inputs.outputs.release-version }}
       tag: ${{ steps.inputs.outputs.tag }}
       tag-object-sha: ${{ steps.source.outputs.tag-object-sha }}
@@ -181,6 +186,9 @@ jobs:
 
           def require(ok, message):
               if not ok: raise ValueError(message)
+          def cli_version_matches(output, expected):
+              versions=re.findall(r'(?<![0-9A-Za-z.+-])v?([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)(?![0-9A-Za-z.+-])',output)
+              return versions == [expected]
           def safe_path(value):
               require(bool(re.fullmatch(r'[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*', value)), 'unsafe repo-relative path')
               require(all(part not in ('', '.', '..') for part in value.split('/')), 'unsafe path component')
@@ -312,11 +320,13 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
         env:
           TAG: ${{ steps.inputs.outputs.tag }}
+          DRY_RUN: ${{ inputs.dry-run }}
         with:
           script: |
             const repo = await github.rest.repos.get(context.repo);
             const branchName = repo.data.default_branch;
-            if (!process.env.GITHUB_WORKFLOW_REF.endsWith(`@refs/heads/${branchName}`)) {
+            const tagPush = context.eventName === 'push' && context.ref === `refs/tags/${process.env.TAG}`;
+            if (!tagPush && !process.env.GITHUB_WORKFLOW_REF.endsWith(`@refs/heads/${branchName}`)) {
               core.setFailed(`caller workflow must run from protected ${branchName}`);
               return;
             }
@@ -329,7 +339,7 @@ jobs:
               return;
             }
             const branchHead = branch.data.commit.sha;
-            if (context.ref !== `refs/heads/${branchName}` || context.sha !== branchHead) {
+            if (!tagPush && (context.ref !== `refs/heads/${branchName}` || context.sha !== branchHead)) {
               core.setFailed(`caller must run at protected ${branchName} head ${branchHead}; got ${context.ref}@${context.sha}`);
               return;
             }
@@ -339,7 +349,7 @@ jobs:
             let tagObjectSha = '';
             let existingTag = null;
             try {
-              existingTag = await github.rest.git.getRef({
+              if (process.env.DRY_RUN !== 'true') existingTag = await github.rest.git.getRef({
                 ...context.repo,
                 ref: `tags/${process.env.TAG}`,
               });
@@ -377,6 +387,7 @@ jobs:
             } else {
               core.info(`first-attempt target is protected ${branchName} head ${branchHead}`);
             }
+            if (tagPush && (!existingTag || ![targetSha,tagObjectSha].includes(context.sha))) throw new Error('tag event does not match immutable tag');
             core.setOutput('default-branch', branchName);
             core.setOutput('tag-object-sha', tagObjectSha);
             core.setOutput('target-sha', targetSha);
@@ -387,6 +398,15 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
           ref: ${{ steps.source.outputs.target-sha }}
+      - name: Verify release tag signature
+        if: inputs.require-signed-tag && !inputs.dry-run
+        env:
+          TAG: ${{ steps.inputs.outputs.tag }}
+          TARGET_SHA: ${{ steps.source.outputs.target-sha }}
+        run: |
+          test "$(git cat-file -t "refs/tags/$TAG")" = tag
+          test "$(git rev-parse "refs/tags/$TAG^{}")" = "$TARGET_SHA"
+          git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile=.github/release-allowed-signers verify-tag "$TAG"
       - name: Freeze release notes and data inputs
         id: metadata
         env:
@@ -521,6 +541,7 @@ jobs:
           echo "release-notes-artifact-name=sparkle-release-inputs-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >>"$GITHUB_OUTPUT"
           cp "$RUNNER_TEMP/RELEASE-NOTES.md" "$RUNNER_TEMP/frozen-inputs/RELEASE-NOTES.md"
       - name: Upload ${{ steps.metadata.outputs.release-notes-artifact-name }}
+        id: frozen-upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: ${{ steps.metadata.outputs.release-notes-artifact-name }}
@@ -619,6 +640,9 @@ jobs:
 
           def require(ok, message):
               if not ok: raise ValueError(message)
+          def cli_version_matches(output, expected):
+              versions=re.findall(r'(?<![0-9A-Za-z.+-])v?([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)(?![0-9A-Za-z.+-])',output)
+              return versions == [expected]
           def safe_path(value):
               require(bool(re.fullmatch(r'[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*', value)), 'unsafe repo-relative path')
               require(all(part not in ('', '.', '..') for part in value.split('/')), 'unsafe path component')
@@ -783,7 +807,8 @@ jobs:
               subprocess.run(['codesign','--verify','--strict',str(p)],check=True)
               require('Signature=adhoc' in subprocess.run(['codesign','-dv',str(p)],capture_output=True,text=True).stderr,'CLI/dylib must be ad-hoc signed')
           result=subprocess.check_output([str(root/name),'--version'],text=True)
-          require(os.environ['VERSION'] in result,'CLI version mismatch')
+          from contract import cli_version_matches
+          require(cli_version_matches(result,os.environ['VERSION']),'CLI version mismatch')
           PYCODE
             COPYFILE_DISABLE=1 tar -czf raw/cli.tar.gz -C dist sparkle-cli
           fi
@@ -806,6 +831,7 @@ jobs:
       actions: read
     outputs:
       artifact-name: ${{ steps.name.outputs.artifact-name }}
+      artifact-id: ${{ steps.signed-upload.outputs.artifact-id }}
     steps:
       - name: Validate signing credentials
         env:
@@ -850,7 +876,8 @@ jobs:
       - name: Download ${{ needs.validate.outputs.release-notes-artifact-name }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: ${{ needs.validate.outputs.release-notes-artifact-name }}
+          artifact-ids: ${{ needs.validate.outputs.frozen-inputs-id }}
+          merge-multiple: true
           path: frozen-inputs
       - name: Prepare workflow-owned release tools
         run: |
@@ -863,6 +890,9 @@ jobs:
 
           def require(ok, message):
               if not ok: raise ValueError(message)
+          def cli_version_matches(output, expected):
+              versions=re.findall(r'(?<![0-9A-Za-z.+-])v?([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)(?![0-9A-Za-z.+-])',output)
+              return versions == [expected]
           def safe_path(value):
               require(bool(re.fullmatch(r'[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*', value)), 'unsafe repo-relative path')
               require(all(part not in ('', '.', '..') for part in value.split('/')), 'unsafe path component')
@@ -1408,6 +1438,7 @@ jobs:
           # The transport tar preserves executable modes; only release assets are published.
           COPYFILE_DISABLE=1 tar -czf signed-sparkle.tar.gz signed-assets
       - name: Upload signed-sparkle-${{ github.run_id }}-${{ github.run_attempt }}
+        id: signed-upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: signed-sparkle-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1454,6 +1485,7 @@ jobs:
       contents: read
     outputs:
       artifact-name: ${{ steps.name.outputs.artifact-name }}
+      artifact-id: ${{ steps.package-upload.outputs.artifact-id }}
     steps:
       - name: Check out frozen npm packaging source
         if: ${{ inputs.npm-pack-script != '' }}
@@ -1466,11 +1498,13 @@ jobs:
       - name: Download ${{ needs.sign.outputs.artifact-name }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: ${{ needs.sign.outputs.artifact-name }}
+          artifact-ids: ${{ needs.sign.outputs.artifact-id }}
+          merge-multiple: true
       - name: Download ${{ needs.validate.outputs.release-notes-artifact-name }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: ${{ needs.validate.outputs.release-notes-artifact-name }}
+          artifact-ids: ${{ needs.validate.outputs.frozen-inputs-id }}
+          merge-multiple: true
           path: frozen-inputs
       - name: Pack npm with the signed universal CLI
         if: ${{ inputs.npm-pack-script != '' }}
@@ -1496,6 +1530,9 @@ jobs:
 
           def require(ok, message):
               if not ok: raise ValueError(message)
+          def cli_version_matches(output, expected):
+              versions=re.findall(r'(?<![0-9A-Za-z.+-])v?([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)(?![0-9A-Za-z.+-])',output)
+              return versions == [expected]
           def safe_path(value):
               require(bool(re.fullmatch(r'[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*', value)), 'unsafe repo-relative path')
               require(all(part not in ('', '.', '..') for part in value.split('/')), 'unsafe path component')
@@ -1740,11 +1777,11 @@ jobs:
           SOURCE
           cat >"$RUNNER_TEMP/sparkle-tools/npm.py" <<'SOURCE'
           # BEGIN npm.py
-          import tarfile
+          import tarfile,json
           from pathlib import Path
           from contract import require
 
-          def verify_package(cli_path,npm_path,prefix,binary):
+          def verify_package(cli_path,npm_path,prefix,binary,version):
               with tarfile.open(cli_path) as cli:
                   binary_bytes=cli.extractfile(prefix+'-universal/'+binary).read()
                   companions={p.name.rsplit('/',1)[-1]:cli.extractfile(p).read() for p in cli if p.isfile() and p.name.endswith('.dylib')}
@@ -1752,6 +1789,8 @@ jobs:
                   members=npm.getmembers(); names=[p.name for p in members]
                   require(len(names)==len(set(names)) and len(names)==len({n.casefold() for n in names}),'duplicate npm member')
                   require(all(not p.issym() and not p.islnk() and (p.isfile() or p.isdir()) and p.name.startswith('package/') and all(x not in ('','..','.') for x in p.name.rstrip('/').split('/')) and '\\' not in p.name for p in members),'unsafe npm member')
+                  metadata=json.loads(npm.extractfile('package/package.json').read())
+                  require(metadata.get('version')==version,'npm package version mismatch')
                   candidates=[p for p in members if p.isfile() and p.name.rsplit('/',1)[-1]==binary]
                   require(len(candidates)==1 and npm.extractfile(candidates[0]).read()==binary_bytes,'npm embedded binary differs from signed universal binary')
                   require(candidates[0].mode & 0o111,'npm binary is not executable')
@@ -1796,7 +1835,7 @@ jobs:
               packs=list(Path('source/dist/sparkle-npm').glob('*.tgz'))
               require(len(packs)==1 and packs[0].is_file() and not packs[0].is_symlink(),'npm script must emit exactly one regular .tgz')
               from npm import verify_package
-              verify_package(root/(e['CLI_ARCHIVE_PREFIX']+'-universal.tar.gz'),packs[0],e['CLI_ARCHIVE_PREFIX'],e['CLI_BINARY_NAME'])
+              verify_package(root/(e['CLI_ARCHIVE_PREFIX']+'-universal.tar.gz'),packs[0],e['CLI_ARCHIVE_PREFIX'],e['CLI_BINARY_NAME'],os.environ['VERSION'])
               require(not (root/packs[0].name).exists(),'npm asset name collision')
               shutil.copyfile(packs[0],root/packs[0].name)
           zipname=e['APP_NAME']+'-'+e['VERSION']+'.app.zip'
@@ -1810,6 +1849,7 @@ jobs:
           PYCODE
           COPYFILE_DISABLE=1 tar -czf sparkle-release-assets.tar.gz release-assets
       - name: Upload sparkle-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+        id: package-upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: sparkle-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1897,7 +1937,8 @@ jobs:
       - name: Download immutable signed payload
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: ${{ needs.package.outputs.artifact-name }}
+          artifact-ids: ${{ needs.package.outputs.artifact-id }}
+          merge-multiple: true
       - name: Prepare safe release transport reader
         run: |
           set -euo pipefail
@@ -1988,16 +2029,19 @@ jobs:
       - name: Download ${{ needs.package.outputs.artifact-name }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: ${{ needs.package.outputs.artifact-name }}
+          artifact-ids: ${{ needs.package.outputs.artifact-id }}
+          merge-multiple: true
       - name: Download ${{ needs.sign.outputs.artifact-name }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: ${{ needs.sign.outputs.artifact-name }}
+          artifact-ids: ${{ needs.sign.outputs.artifact-id }}
+          merge-multiple: true
           path: signer-original
       - name: Download ${{ needs.validate.outputs.release-notes-artifact-name }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: ${{ needs.validate.outputs.release-notes-artifact-name }}
+          artifact-ids: ${{ needs.validate.outputs.frozen-inputs-id }}
+          merge-multiple: true
           path: source-original
       - name: Prepare workflow-owned release tools
         run: |
@@ -2010,6 +2054,9 @@ jobs:
 
           def require(ok, message):
               if not ok: raise ValueError(message)
+          def cli_version_matches(output, expected):
+              versions=re.findall(r'(?<![0-9A-Za-z.+-])v?([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)(?![0-9A-Za-z.+-])',output)
+              return versions == [expected]
           def safe_path(value):
               require(bool(re.fullmatch(r'[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*', value)), 'unsafe repo-relative path')
               require(all(part not in ('', '.', '..') for part in value.split('/')), 'unsafe path component')
@@ -2848,11 +2895,11 @@ jobs:
           SOURCE
           cat >"$RUNNER_TEMP/sparkle-tools/npm.py" <<'SOURCE'
           # BEGIN npm.py
-          import tarfile
+          import tarfile,json
           from pathlib import Path
           from contract import require
 
-          def verify_package(cli_path,npm_path,prefix,binary):
+          def verify_package(cli_path,npm_path,prefix,binary,version):
               with tarfile.open(cli_path) as cli:
                   binary_bytes=cli.extractfile(prefix+'-universal/'+binary).read()
                   companions={p.name.rsplit('/',1)[-1]:cli.extractfile(p).read() for p in cli if p.isfile() and p.name.endswith('.dylib')}
@@ -2860,6 +2907,8 @@ jobs:
                   members=npm.getmembers(); names=[p.name for p in members]
                   require(len(names)==len(set(names)) and len(names)==len({n.casefold() for n in names}),'duplicate npm member')
                   require(all(not p.issym() and not p.islnk() and (p.isfile() or p.isdir()) and p.name.startswith('package/') and all(x not in ('','..','.') for x in p.name.rstrip('/').split('/')) and '\\' not in p.name for p in members),'unsafe npm member')
+                  metadata=json.loads(npm.extractfile('package/package.json').read())
+                  require(metadata.get('version')==version,'npm package version mismatch')
                   candidates=[p for p in members if p.isfile() and p.name.rsplit('/',1)[-1]==binary]
                   require(len(candidates)==1 and npm.extractfile(candidates[0]).read()==binary_bytes,'npm embedded binary differs from signed universal binary')
                   require(candidates[0].mode & 0o111,'npm binary is not executable')
@@ -2916,7 +2965,7 @@ jobs:
               from npm import verify_package
               packs=list(root.glob('*.tgz'))
               require(len(packs)==1,'expected exactly one npm package')
-              verify_package(root/(e['CLI_ARCHIVE_PREFIX']+'-universal.tar.gz'),packs[0],e['CLI_ARCHIVE_PREFIX'],e['CLI_BINARY_NAME'])
+              verify_package(root/(e['CLI_ARCHIVE_PREFIX']+'-universal.tar.gz'),packs[0],e['CLI_ARCHIVE_PREFIX'],e['CLI_BINARY_NAME'],os.environ['VERSION'])
           PYCODE
           signature=$(python3 -c 'import json; print(json.load(open("release-assets/appcast-entry.json"))["edSignature"])')
           node "$RUNNER_TEMP/sparkle-tools/sparkle.cjs" verify "release-assets/$APP_NAME-$VERSION.app.zip" "$signature"
@@ -3003,7 +3052,8 @@ jobs:
               native=Path('verified-'+os.environ['EXPECTED_ARCH'])/(os.environ['CLI_ARCHIVE_PREFIX']+'-'+os.environ['EXPECTED_ARCH'])/os.environ['CLI_BINARY_NAME']
               environment={k:v for k,v in os.environ.items() if not any(x in k for x in ('TOKEN','SECRET','ACTIONS_','ASC_','P12','SPARKLE_PRIVATE'))}
               result=subprocess.check_output([str(native),'--version'],env=environment,text=True)
-              require(os.environ['VERSION'] in result,'native CLI version mismatch')
+              from contract import cli_version_matches
+              require(cli_version_matches(result,os.environ['VERSION']),'native CLI version mismatch')
               args=json.loads(os.environ['CLI_SMOKE_ARGS'])
               if args: subprocess.run([str(native),*args],env=environment,check=True)
           PYCODE
@@ -3252,7 +3302,8 @@ jobs:
       - name: Download ${{ needs.package.outputs.artifact-name }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: ${{ needs.package.outputs.artifact-name }}
+          artifact-ids: ${{ needs.package.outputs.artifact-id }}
+          merge-multiple: true
       - name: Prepare safe release transport reader
         run: |
           set -euo pipefail

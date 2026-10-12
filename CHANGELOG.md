@@ -4,6 +4,11 @@
 
 - Add the approval-gated `sparkle-app` release archetype with signed and notarized app/DMG/CLI assets, Sparkle appcasts, three-runner verification, optional npm/Homebrew handoffs, dry runs, and appcast closeout PRs.
 
+## 1.11.0 - 2026-10-11
+
+- Add npm and source-only release archetypes with protected frozen sources, no-publish dry runs, independent payload verification, exact-byte publication, OIDC npm provenance, and verified optional Homebrew handoff.
+- Document and automate this repository’s source release and signed `v1` compatibility-tag update.
+
 - Upload Swift and Electron draft assets to the release upload URL so an older draft with the same tag does not receive them; thanks @SebTardif.
 
 ## 1.10.1 - 2026-09-23
