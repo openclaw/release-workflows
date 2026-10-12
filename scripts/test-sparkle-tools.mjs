@@ -51,6 +51,13 @@ test('production input validator rejects path, layout, version, secret and check
     { DMG_LAYOUT: base.DMG_LAYOUT.replace('180', '999') }, { BUILD_RUNNER: 'self-hosted' },
     { SIGNING_ENVIRONMENT: '../release' }, { XCODE_PATH: '/tmp/toolchain' },
   ]) assert.notEqual(run(patch).status, 0, JSON.stringify(patch));
+
+  // Malformed JSON inputs name the offending input instead of surfacing a decoder traceback.
+  for (const [patch, label] of [[{ CLI_SMOKE_ARGS: '--help' }, 'cli-smoke-args'], [{ CI_CHECK_EVENTS: 'push' }, 'ci-check-events'], [{ DMG_LAYOUT: 'window' }, 'dmg-layout']]) {
+    const result = run(patch);
+    assert.notEqual(result.status, 0, JSON.stringify(patch));
+    assert.match(result.stderr, new RegExp(`ValueError: ${label} must be valid JSON`), result.stderr);
+  }
 });
 
 test('notarization retries only pre-submission transient failures with injected scheduler', () => {
