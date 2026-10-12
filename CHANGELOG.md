@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.11.4 - 2026-10-12
+
 - Preserve repeated historical Sparkle appcast build numbers while requiring every new release to exceed all published builds and use a new version.
 - Accept zippered macOS/Mac Catalyst libraries in Sparkle deployment checks and Swift runtime audits while requiring a valid macOS minimum in every slice.
 
