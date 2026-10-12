@@ -194,8 +194,11 @@ jobs:
               require(all(part not in ('', '.', '..') for part in value.split('/')), 'unsafe path component')
           def safe_name(value):
               require(bool(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+-]{0,180}', value)) and not value.endswith('.'), 'unsafe asset name')
+          def json_input(value,label):
+              try: return json.loads(value)
+              except ValueError: raise ValueError(label+' must be valid JSON') from None
           def layout(value):
-              d=json.loads(value)
+              d=json_input(value,'dmg-layout')
               require(isinstance(d,dict) and set(d)=={'window-size','icon-size','app-position','applications-position','volume-name'}, 'invalid dmg-layout keys')
               for key in ('window-size','app-position','applications-position'):
                   require(isinstance(d[key],list) and len(d[key])==2 and all(type(v) is int and 0 <= v <= 4096 for v in d[key]), 'invalid layout pair')
@@ -270,9 +273,9 @@ jobs:
               url=urlsplit(e['APPCAST_FEED_URL'])
               require(url.scheme=='https' and bool(url.hostname) and not url.username and not url.password and not url.fragment and not re.search(r'[\x00-\x20\x7f]',e['APPCAST_FEED_URL']), 'invalid appcast-feed-url')
               require(e['SPARKLE_VERSION']=='2.10.0', 'unsupported checksum-pinned Sparkle version')
-              events=json.loads(e['CI_CHECK_EVENTS'])
+              events=json_input(e['CI_CHECK_EVENTS'],'ci-check-events')
               require(isinstance(events,list) and all(isinstance(x,str) and re.fullmatch('[a-z][a-z0-9_]*',x) for x in events) and len(events)==len(set(events)), 'invalid CI events')
-              args=json.loads(e['CLI_SMOKE_ARGS'])
+              args=json_input(e['CLI_SMOKE_ARGS'],'cli-smoke-args')
               require(isinstance(args,list) and all(isinstance(x,str) and not re.search(r'[\x00-\x1f]',x) for x in args), 'cli-smoke-args must be a JSON argv array')
               layout(e['DMG_LAYOUT'])
               names=['ASSET-INVENTORY.json','RELEASE-NOTES.md','SIGNING-MANIFEST.json','appcast.xml','appcast-entry.json',f'{e["APP_NAME"]}-{version}.app.zip',f'{e["APP_NAME"]}-{version}.dmg']
@@ -648,8 +651,11 @@ jobs:
               require(all(part not in ('', '.', '..') for part in value.split('/')), 'unsafe path component')
           def safe_name(value):
               require(bool(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+-]{0,180}', value)) and not value.endswith('.'), 'unsafe asset name')
+          def json_input(value,label):
+              try: return json.loads(value)
+              except ValueError: raise ValueError(label+' must be valid JSON') from None
           def layout(value):
-              d=json.loads(value)
+              d=json_input(value,'dmg-layout')
               require(isinstance(d,dict) and set(d)=={'window-size','icon-size','app-position','applications-position','volume-name'}, 'invalid dmg-layout keys')
               for key in ('window-size','app-position','applications-position'):
                   require(isinstance(d[key],list) and len(d[key])==2 and all(type(v) is int and 0 <= v <= 4096 for v in d[key]), 'invalid layout pair')
@@ -724,9 +730,9 @@ jobs:
               url=urlsplit(e['APPCAST_FEED_URL'])
               require(url.scheme=='https' and bool(url.hostname) and not url.username and not url.password and not url.fragment and not re.search(r'[\x00-\x20\x7f]',e['APPCAST_FEED_URL']), 'invalid appcast-feed-url')
               require(e['SPARKLE_VERSION']=='2.10.0', 'unsupported checksum-pinned Sparkle version')
-              events=json.loads(e['CI_CHECK_EVENTS'])
+              events=json_input(e['CI_CHECK_EVENTS'],'ci-check-events')
               require(isinstance(events,list) and all(isinstance(x,str) and re.fullmatch('[a-z][a-z0-9_]*',x) for x in events) and len(events)==len(set(events)), 'invalid CI events')
-              args=json.loads(e['CLI_SMOKE_ARGS'])
+              args=json_input(e['CLI_SMOKE_ARGS'],'cli-smoke-args')
               require(isinstance(args,list) and all(isinstance(x,str) and not re.search(r'[\x00-\x1f]',x) for x in args), 'cli-smoke-args must be a JSON argv array')
               layout(e['DMG_LAYOUT'])
               names=['ASSET-INVENTORY.json','RELEASE-NOTES.md','SIGNING-MANIFEST.json','appcast.xml','appcast-entry.json',f'{e["APP_NAME"]}-{version}.app.zip',f'{e["APP_NAME"]}-{version}.dmg']
@@ -899,8 +905,11 @@ jobs:
               require(all(part not in ('', '.', '..') for part in value.split('/')), 'unsafe path component')
           def safe_name(value):
               require(bool(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+-]{0,180}', value)) and not value.endswith('.'), 'unsafe asset name')
+          def json_input(value,label):
+              try: return json.loads(value)
+              except ValueError: raise ValueError(label+' must be valid JSON') from None
           def layout(value):
-              d=json.loads(value)
+              d=json_input(value,'dmg-layout')
               require(isinstance(d,dict) and set(d)=={'window-size','icon-size','app-position','applications-position','volume-name'}, 'invalid dmg-layout keys')
               for key in ('window-size','app-position','applications-position'):
                   require(isinstance(d[key],list) and len(d[key])==2 and all(type(v) is int and 0 <= v <= 4096 for v in d[key]), 'invalid layout pair')
@@ -975,9 +984,9 @@ jobs:
               url=urlsplit(e['APPCAST_FEED_URL'])
               require(url.scheme=='https' and bool(url.hostname) and not url.username and not url.password and not url.fragment and not re.search(r'[\x00-\x20\x7f]',e['APPCAST_FEED_URL']), 'invalid appcast-feed-url')
               require(e['SPARKLE_VERSION']=='2.10.0', 'unsupported checksum-pinned Sparkle version')
-              events=json.loads(e['CI_CHECK_EVENTS'])
+              events=json_input(e['CI_CHECK_EVENTS'],'ci-check-events')
               require(isinstance(events,list) and all(isinstance(x,str) and re.fullmatch('[a-z][a-z0-9_]*',x) for x in events) and len(events)==len(set(events)), 'invalid CI events')
-              args=json.loads(e['CLI_SMOKE_ARGS'])
+              args=json_input(e['CLI_SMOKE_ARGS'],'cli-smoke-args')
               require(isinstance(args,list) and all(isinstance(x,str) and not re.search(r'[\x00-\x1f]',x) for x in args), 'cli-smoke-args must be a JSON argv array')
               layout(e['DMG_LAYOUT'])
               names=['ASSET-INVENTORY.json','RELEASE-NOTES.md','SIGNING-MANIFEST.json','appcast.xml','appcast-entry.json',f'{e["APP_NAME"]}-{version}.app.zip',f'{e["APP_NAME"]}-{version}.dmg']
@@ -1607,8 +1616,11 @@ jobs:
               require(all(part not in ('', '.', '..') for part in value.split('/')), 'unsafe path component')
           def safe_name(value):
               require(bool(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+-]{0,180}', value)) and not value.endswith('.'), 'unsafe asset name')
+          def json_input(value,label):
+              try: return json.loads(value)
+              except ValueError: raise ValueError(label+' must be valid JSON') from None
           def layout(value):
-              d=json.loads(value)
+              d=json_input(value,'dmg-layout')
               require(isinstance(d,dict) and set(d)=={'window-size','icon-size','app-position','applications-position','volume-name'}, 'invalid dmg-layout keys')
               for key in ('window-size','app-position','applications-position'):
                   require(isinstance(d[key],list) and len(d[key])==2 and all(type(v) is int and 0 <= v <= 4096 for v in d[key]), 'invalid layout pair')
@@ -1683,9 +1695,9 @@ jobs:
               url=urlsplit(e['APPCAST_FEED_URL'])
               require(url.scheme=='https' and bool(url.hostname) and not url.username and not url.password and not url.fragment and not re.search(r'[\x00-\x20\x7f]',e['APPCAST_FEED_URL']), 'invalid appcast-feed-url')
               require(e['SPARKLE_VERSION']=='2.10.0', 'unsupported checksum-pinned Sparkle version')
-              events=json.loads(e['CI_CHECK_EVENTS'])
+              events=json_input(e['CI_CHECK_EVENTS'],'ci-check-events')
               require(isinstance(events,list) and all(isinstance(x,str) and re.fullmatch('[a-z][a-z0-9_]*',x) for x in events) and len(events)==len(set(events)), 'invalid CI events')
-              args=json.loads(e['CLI_SMOKE_ARGS'])
+              args=json_input(e['CLI_SMOKE_ARGS'],'cli-smoke-args')
               require(isinstance(args,list) and all(isinstance(x,str) and not re.search(r'[\x00-\x1f]',x) for x in args), 'cli-smoke-args must be a JSON argv array')
               layout(e['DMG_LAYOUT'])
               names=['ASSET-INVENTORY.json','RELEASE-NOTES.md','SIGNING-MANIFEST.json','appcast.xml','appcast-entry.json',f'{e["APP_NAME"]}-{version}.app.zip',f'{e["APP_NAME"]}-{version}.dmg']
@@ -2131,8 +2143,11 @@ jobs:
               require(all(part not in ('', '.', '..') for part in value.split('/')), 'unsafe path component')
           def safe_name(value):
               require(bool(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+-]{0,180}', value)) and not value.endswith('.'), 'unsafe asset name')
+          def json_input(value,label):
+              try: return json.loads(value)
+              except ValueError: raise ValueError(label+' must be valid JSON') from None
           def layout(value):
-              d=json.loads(value)
+              d=json_input(value,'dmg-layout')
               require(isinstance(d,dict) and set(d)=={'window-size','icon-size','app-position','applications-position','volume-name'}, 'invalid dmg-layout keys')
               for key in ('window-size','app-position','applications-position'):
                   require(isinstance(d[key],list) and len(d[key])==2 and all(type(v) is int and 0 <= v <= 4096 for v in d[key]), 'invalid layout pair')
@@ -2207,9 +2222,9 @@ jobs:
               url=urlsplit(e['APPCAST_FEED_URL'])
               require(url.scheme=='https' and bool(url.hostname) and not url.username and not url.password and not url.fragment and not re.search(r'[\x00-\x20\x7f]',e['APPCAST_FEED_URL']), 'invalid appcast-feed-url')
               require(e['SPARKLE_VERSION']=='2.10.0', 'unsupported checksum-pinned Sparkle version')
-              events=json.loads(e['CI_CHECK_EVENTS'])
+              events=json_input(e['CI_CHECK_EVENTS'],'ci-check-events')
               require(isinstance(events,list) and all(isinstance(x,str) and re.fullmatch('[a-z][a-z0-9_]*',x) for x in events) and len(events)==len(set(events)), 'invalid CI events')
-              args=json.loads(e['CLI_SMOKE_ARGS'])
+              args=json_input(e['CLI_SMOKE_ARGS'],'cli-smoke-args')
               require(isinstance(args,list) and all(isinstance(x,str) and not re.search(r'[\x00-\x1f]',x) for x in args), 'cli-smoke-args must be a JSON argv array')
               layout(e['DMG_LAYOUT'])
               names=['ASSET-INVENTORY.json','RELEASE-NOTES.md','SIGNING-MANIFEST.json','appcast.xml','appcast-entry.json',f'{e["APP_NAME"]}-{version}.app.zip',f'{e["APP_NAME"]}-{version}.dmg']
