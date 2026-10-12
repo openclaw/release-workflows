@@ -326,7 +326,7 @@ for initial in (sandbox,{}):
 for code,out,err,accepted in [(1,b'',b'fixture: code object is not signed at all\\n',True),(1,b'',b'malformed signature',False),(0,b'bad plist',b'',False)]:
     with patch('subprocess.run',lambda *a,**k:subprocess.CompletedProcess(a,code,out,err)):
         if accepted:
-            assert plistlib.loads(downloader.read(binary,'arm64',allow_unsigned=True))=={}
+            assert plistlib.loads(downloader.read(binary,'arm64',allow_unsigned=True).encode('utf-8'))=={}
             try:downloader.read(binary,'arm64');raise AssertionError('unsigned verifier input accepted')
             except ValueError:pass
         else:
