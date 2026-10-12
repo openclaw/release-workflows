@@ -23,6 +23,19 @@ jobs:
     uses: openclaw/release-workflows/.github/workflows/release-go-cli.yml@v1
 ```
 
+## Go CLI no-publish rehearsals
+
+The Go archetype accepts `dry-run: true`. It freezes protected main, validates
+release metadata and CI, builds, signs, notarizes, and runs both independent
+verifiers using retained Actions artifacts. It never creates a tag, draft,
+GitHub Release, tap dispatch, or closeout PR. Supply a dated changelog version;
+existing historical tags do not redirect the rehearsal away from current main.
+
+Tag-push callers can require signed tags and set `ci-check-events: '["push"]'`
+to require push CI on the frozen source. Real releases reject existing GitHub
+Releases before building. The workflow reuses an existing annotated tag and
+never replaces it.
+
 ## npm package archetype
 
 `release-npm-package.yml` releases one package or an ordered monorepo package list. It uses a protected frozen commit, the existing dated-changelog and exact-commit CI gate, an immutable same-run payload, and two write-free Linux verifiers. The publisher never checks out caller source or runs package lifecycle scripts. It publishes only the verified `.tgz` bytes with GitHub OIDC trusted publishing, then independently verifies registry integrity, Sigstore signatures, and provenance binding the tarball to the caller workflow and frozen commit before publishing the GitHub Release.
@@ -50,7 +63,7 @@ Stable releases publish with `latest`, prereleases with `next`. Visibility is po
 
 Use [`examples/release-source-caller.yml`](examples/release-source-caller.yml). `source-archives: true` attaches GitHub's tar and zip archives of the frozen **commit**, with their SHA-256 checksums; the release page's automatic tag archives remain GitHub-managed. `go-modules: '["."]'` additionally warms `proxy.golang.org`, uses a fresh module cache and `sum.golang.org`, and verifies the downloaded module version, checksum, and source commit. Submodules require their existing annotated `<directory>/vX.Y.Z` tags to point at the same commit; this workflow never invents or moves those tags. Go module path major suffixes must agree with the release version. Proxy warming is skipped during dry runs.
 
-Both new archetypes accept `require-signed-tag`, `strict-checks`, and `ci-check-events`; the default event filter is `["push"]`. They accept an existing annotated tag on protected-branch ancestry, or create one from protected main on a live dispatch. Set `require-signed-tag: true` to require an existing SSH-signed tag verified against `.github/release-allowed-signers` from the frozen source. Neither workflow moves version tags or overwrites releases. Dispatch callers must run on the protected default branch's current head; exact tag-push callers are also supported. A dry run defaults to true and never publishes, even when an existing tag is used.
+Both new archetypes accept `require-signed-tag`, `strict-checks`, and `ci-check-events`; the default event filter is `["push"]`. They accept an existing annotated tag on protected-branch ancestry, or create one from protected main on a live dispatch. Set `require-signed-tag: true` to require an existing SSH-signed tag verified against `.github/release-allowed-signers` from the frozen source. Neither workflow moves version tags or overwrites releases. Dispatch callers must run on the protected default branch's current head; exact tag-push callers are also supported. A dry run defaults to true and never publishes. A dry-run dispatch on the protected default branch always validates and builds that exact branch head, even if the requested version already has a tag; it neither reads nor modifies that unrelated tag, and signed-tag verification is deferred to a live release. A tag-triggered dry run still validates the tag and its signature when required.
 
 Optional `homebrew-formula` and `homebrew-tap` inputs dispatch `update-formula.yml` using `TAP_TOKEN`, a unique `request_id`, and the exact release-asset URL. The workflow waits for that run and checks the literal stable formula URL and SHA-256. Source releases require `source-archives: true`; npm handoff uses the last package in dependency order. This mode supports single-URL source/npm formulas, not platform-matrix binary formulas. The tap workflow must support `artifact_url` and `request_id` with the request ID in its run title, as the fleet taps do.
 

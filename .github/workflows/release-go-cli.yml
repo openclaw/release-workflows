@@ -7,6 +7,10 @@ on:
         description: SemVer release version, with or without a leading v
         required: true
         type: string
+      dry-run:
+        description: Build, sign and independently verify without creating tags or releases
+        type: boolean
+        default: false
       repository-type:
         description: Signing identity and stable identifier policy
         required: true
@@ -107,6 +111,8 @@ on:
       release-url:
         description: Published GitHub release URL
         value: ${{ jobs.publish.outputs.release-url }}
+
+permissions: {}
 
 concurrency:
   group: release-go-cli-${{ github.repository }}-${{ inputs.version }}
@@ -289,6 +295,7 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           TAG: ${{ steps.inputs.outputs.tag }}
+          DRY_RUN: ${{ inputs.dry-run }}
         with:
           script: |
             const repo = await github.rest.repos.get(context.repo);
@@ -302,7 +309,10 @@ jobs:
               return;
             }
             const branchHead = branch.data.commit.sha;
-            if (context.ref !== `refs/heads/${branchName}` || context.sha !== branchHead) {
+            const dryRun = process.env.DRY_RUN === 'true';
+            const mainDispatch = context.ref === `refs/heads/${branchName}` && context.sha === branchHead;
+            const tagPush = !dryRun && context.eventName === 'push' && context.ref === `refs/tags/${process.env.TAG}`;
+            if (!mainDispatch && !tagPush) {
               core.setFailed(`caller must run at protected ${branchName} head ${branchHead}; got ${context.ref}@${context.sha}`);
               return;
             }
@@ -312,7 +322,7 @@ jobs:
             let tagObjectSha = '';
             let existingTag = null;
             try {
-              existingTag = await github.rest.git.getRef({
+              if (!dryRun) existingTag = await github.rest.git.getRef({
                 ...context.repo,
                 ref: `tags/${process.env.TAG}`,
               });
@@ -350,6 +360,18 @@ jobs:
             } else {
               core.info(`first-attempt target is protected ${branchName} head ${branchHead}`);
             }
+            if (tagPush && existingTag === null) throw new Error('release tag disappeared');
+            if (tagPush && ![targetSha, tagObjectSha].includes(context.sha)) {
+              throw new Error('tag event does not match the immutable tag');
+            }
+            if (!dryRun) {
+              try {
+                await github.rest.repos.getReleaseByTag({ ...context.repo, tag: process.env.TAG });
+                throw new Error('release already exists; refusing to republish');
+              } catch (error) {
+                if (error.status !== 404) throw error;
+              }
+            }
             core.setOutput('default-branch', branchName);
             core.setOutput('tag-object-sha', tagObjectSha);
             core.setOutput('target-sha', targetSha);
@@ -359,10 +381,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ inputs.require-signed-tag && steps.inputs.outputs.tag || steps.repository.outputs.target-sha }}
+          ref: ${{ inputs.require-signed-tag && !inputs.dry-run && steps.inputs.outputs.tag || steps.repository.outputs.target-sha }}
 
       - name: Verify required SSH-signed tag
-        if: inputs.require-signed-tag
+        if: inputs.require-signed-tag && !inputs.dry-run
         env:
           TAG: ${{ steps.inputs.outputs.tag }}
           TARGET_SHA: ${{ steps.repository.outputs.target-sha }}
@@ -928,12 +950,17 @@ jobs:
       - name: Create immutable annotated tag
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
+          DRY_RUN: ${{ inputs.dry-run }}
           EXPECTED_TAG_OBJECT: ${{ needs.validate.outputs.tag-object-sha }}
           REPOSITORY_TYPE: ${{ inputs.repository-type }}
           TAG: ${{ needs.validate.outputs.tag }}
           TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
         with:
           script: |
+            if (process.env.DRY_RUN === 'true') {
+              core.info('dry run: do not create or modify a tag');
+              return;
+            }
             let existing = null;
             try {
               existing = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
@@ -1005,7 +1032,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ needs.validate.outputs.tag }}
+          ref: ${{ needs.validate.outputs.target-sha }}
           fetch-depth: 0
       - name: Verify tag target
         env:
@@ -1153,7 +1180,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ needs.validate.outputs.tag }}
+          ref: ${{ needs.validate.outputs.target-sha }}
           fetch-depth: 0
       - name: Verify tag target
         env:
@@ -1914,7 +1941,7 @@ jobs:
         with:
           path: reproducible-source
           persist-credentials: false
-          ref: ${{ needs.validate.outputs.tag }}
+          ref: ${{ needs.validate.outputs.target-sha }}
           fetch-depth: 0
       - name: Verify independent rebuild source
         if: inputs.reproducible-rebuild != 'disabled'
@@ -2403,6 +2430,7 @@ jobs:
           retention-days: 30
 
       - name: Create draft and upload exact assets
+        if: ${{ !inputs.dry-run }}
         id: release
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
@@ -2834,7 +2862,7 @@ jobs:
     name: 6 · Publish verified draft
     if: >-
       ${{
-        always() &&
+        !inputs.dry-run && always() &&
         needs.validate.result == 'success' &&
         needs.draft.result == 'success' &&
         needs.verify.result == 'success'
@@ -2853,6 +2881,7 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ needs.validate.outputs.tag }}
+          fetch-depth: 0
       - name: Reverify required SSH-signed tag before publication
         if: inputs.require-signed-tag
         env:

@@ -25,6 +25,35 @@ for(const w of workflows){
   assert.match(w.jobs.publish.if,/!inputs.dry_run/);
   assert.ok(!JSON.stringify(w.jobs.publish).includes('actions/checkout'));
   assert.match(step(w,'publish','Publish only attested GitHub release bytes').with.script,/await compare\(release\)/);
+  const resolver=workflowStep(w,'validate','id','repository').with.script;
+  const resolve=new asyncFunction('github','context','core','process',resolver);
+  {
+    const outputs=new Map();
+    let tagReads=0;
+    const head='b'.repeat(40);
+    const github={rest:{repos:{
+      get:async()=>({data:{default_branch:'main'}}),
+      getBranch:async()=>({data:{protected:true,commit:{sha:head}}}),
+    },git:{getRef:async()=>{tagReads++; throw new Error('must not read an old tag');}}}};
+    const context={repo:{owner:'openclaw',repo:'fixture'},ref:'refs/heads/main',sha:head};
+    const core={info(){},setOutput(k,v){outputs.set(k,v);},setFailed(m){throw new Error(m);}};
+    await resolve(github,context,core,{env:{TAG:'v1.2.3',DRY_RUN:'true'}});
+    assert.equal(outputs.get('target-sha'),head);
+    assert.equal(outputs.get('tag-object-sha'),'');
+    assert.equal(tagReads,0,'main dry run ignores previously released tags');
+    const checkout=workflowStep(w,'validate','name','Check out exact release target');
+    assert.match(checkout.with.ref,/!\(inputs.dry_run && github.event_name == 'workflow_dispatch'\)/);
+    assert.match(step(w,'validate','Verify required SSH-signed tag').if,/!\(inputs.dry_run && github.event_name == 'workflow_dispatch'\)/);
+    context.sha='d'.repeat(40);
+    await assert.rejects(resolve(github,context,core,{env:{TAG:'v1.2.3',DRY_RUN:'true'}}),/caller must run at protected/);
+    context.sha=head;
+    github.rest.repos.getBranch=async()=>({data:{protected:false,commit:{sha:head}}});
+    await assert.rejects(resolve(github,context,core,{env:{TAG:'v1.2.3',DRY_RUN:'true'}}),/not protected/);
+    // Tag events retain the immutable-tag validation path, including failures.
+    github.rest.repos.getBranch=async()=>({data:{protected:true,commit:{sha:head}}});
+    context.ref='refs/tags/v1.2.3';
+    await assert.rejects(resolve(github,context,core,{env:{TAG:'v1.2.3',DRY_RUN:'true'}}),/must not read an old tag/);
+  }
   const freeze=step(w,'tag','Create immutable annotated tag').with.script;
   let writes=0;
   const core={setOutput(){},info(){},setFailed(m){throw new Error(m)}};
@@ -33,6 +62,7 @@ for(const w of workflows){
   const execute=new asyncFunction('github','context','core','process',freeze);
   await execute(github,context,core,{env:{EXPECTED_TAG_OBJECT:'',DRY_RUN:'true',TAG:'v1.2.3',TARGET_SHA:'a'.repeat(40)}});
   assert.equal(writes,0,'dry run must not create a tag');
+  await execute({...github,rest:{git:{getRef:async()=>{throw new Error('dry run must not inspect tags');}}}},context,core,{env:{EXPECTED_TAG_OBJECT:'',DRY_RUN:'true',TAG:'v1.2.3',TARGET_SHA:'b'.repeat(40)}});
   await execute(github,context,core,{env:{EXPECTED_TAG_OBJECT:'',DRY_RUN:'false',TAG:'v1.2.3',TARGET_SHA:'a'.repeat(40)}});
   assert.equal(writes,2);
   const metadata=workflowStep(w,'validate','id','metadata').run;

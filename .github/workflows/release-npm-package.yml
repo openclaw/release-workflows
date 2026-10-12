@@ -133,6 +133,7 @@ jobs:
       uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
       env:
         TAG: "${{ steps.inputs.outputs.tag }}"
+        DRY_RUN: "${{ inputs.dry_run }}"
       with:
         script: |
           const repo = await github.rest.repos.get(context.repo);
@@ -148,6 +149,15 @@ jobs:
           const branchHead = branch.data.commit.sha;
           if (context.ref !== `refs/tags/${process.env.TAG}` && (context.ref !== `refs/heads/${branchName}` || context.sha !== branchHead)) {
             core.setFailed(`caller must run at protected ${branchName} head ${branchHead}; got ${context.ref}@${context.sha}`);
+            return;
+          }
+
+          // A dispatch proof must exercise the checked-out main revision, even after release.
+          if (process.env.DRY_RUN === 'true' && context.ref === `refs/heads/${branchName}`) {
+            core.setOutput('default-branch', branchName);
+            core.setOutput('tag-object-sha', '');
+            core.setOutput('target-sha', branchHead);
+            core.setOutput('target-source', 'protected-head');
             return;
           }
 
@@ -204,10 +214,10 @@ jobs:
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
         persist-credentials: false
-        ref: "${{ inputs.require-signed-tag && steps.inputs.outputs.tag || steps.repository.outputs.target-sha
+        ref: "${{ inputs.require-signed-tag && !(inputs.dry_run && github.event_name == 'workflow_dispatch') && steps.inputs.outputs.tag || steps.repository.outputs.target-sha
           }}"
     - name: Verify required SSH-signed tag
-      if: inputs.require-signed-tag
+      if: inputs.require-signed-tag && !(inputs.dry_run && github.event_name == 'workflow_dispatch')
       env:
         TAG: "${{ steps.inputs.outputs.tag }}"
         TARGET_SHA: "${{ steps.repository.outputs.target-sha }}"
@@ -709,6 +719,7 @@ jobs:
         DRY_RUN: "${{ inputs.dry_run }}"
       with:
         script: |
+          if (process.env.DRY_RUN === 'true') { core.info('dry run: no tag created or changed'); return; }
           let existing = null;
           try {
             existing = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
@@ -746,7 +757,6 @@ jobs:
             core.setFailed(`tag appeared after validation: ${process.env.TAG}`);
             return;
           }
-          if (process.env.DRY_RUN === 'true') { core.info('dry run: no tag created'); return; }
           const tagObject = await github.rest.git.createTag({
             ...context.repo,
             tag: process.env.TAG,

@@ -4,6 +4,11 @@
 
 - Add the approval-gated `sparkle-app` release archetype with signed and notarized app/DMG/CLI assets, Sparkle appcasts, three-runner verification, optional npm/Homebrew handoffs, dry runs, and appcast closeout PRs.
 
+## 1.11.1 - 2026-10-12
+
+- Make npm and source dry-run dispatches prove the current protected branch commit when the requested version already has a release tag, without reading or changing that tag.
+- Add tag-push entrypoints and full no-publish Go CLI rehearsals, retaining signed verification artifacts without tags, drafts, tap updates, or closeout PRs.
+
 ## 1.11.0 - 2026-10-11
 
 - Add npm and source-only release archetypes with protected frozen sources, no-publish dry runs, independent payload verification, exact-byte publication, OIDC npm provenance, and verified optional Homebrew handoff.
