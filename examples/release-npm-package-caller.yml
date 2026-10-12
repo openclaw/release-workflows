@@ -1,0 +1,41 @@
+name: Release npm package
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: SemVer to release
+        required: true
+        type: string
+      dry_run:
+        description: Validate and smoke test without publishing
+        default: true
+        type: boolean
+permissions: {}
+jobs:
+  release:
+    permissions:
+      actions: read
+      checks: read
+      contents: write
+      statuses: read
+      id-token: write
+    uses: openclaw/release-workflows/.github/workflows/release-npm-package.yml@v1
+    with:
+      version: ${{ inputs.version || github.ref_name }}
+      dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+      node-version: '24'
+      package-manager: pnpm
+      package-manager-version: '11.28.5'
+      package-dirs: '["packages/core","packages/cli"]'
+      build-command: pnpm build
+      smoke-command: node -e "require('@example/core')"
+      # require-signed-tag: true
+      # homebrew-formula: example-cli
+    # secrets:
+    #   TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+# Configure npm trusted publishing for EACH existing package against THIS CALLER
+# filename (e.g. release.yml), not release-npm-package.yml in release-workflows:
+# npm trust github @example/core --file release.yml --repo owner/repo --allow-publish --yes
+# No NODE_AUTH_TOKEN or npm token secret. The caller must grant id-token: write.

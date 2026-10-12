@@ -3,9 +3,9 @@
 Fleet-standard reusable release pipelines. Every archetype follows one trust boundary:
 
 1. freeze a protected-branch commit, reusing an immutable annotated tag on retries;
-2. build, freeze an immutable same-run artifact payload, and create an unpublished draft from those bytes;
+2. build and freeze an immutable same-run artifact payload, staging an unpublished draft where the archetype requires it;
 3. independently verify that artifact on arm64 and x86_64 without signing or release-write credentials, emitting the exact verified `ASSET-INVENTORY.json`, configured checksum asset (`SHA256SUMS` by default), plus a verdict;
-4. let the publisher re-download every draft asset and require exact name and digest equality with both verifier attestations before un-drafting.
+4. let the publisher require exact name and digest equality with both verifier attestations before publication, re-downloading staged draft assets before un-drafting.
 
 All archetypes reject an unprotected default branch. Only a missing tag ref starts a release from the protected head; a missing or unreadable annotated-tag object fails validation without exporting a build target.
 
@@ -22,6 +22,39 @@ jobs:
   release:
     uses: openclaw/release-workflows/.github/workflows/release-go-cli.yml@v1
 ```
+
+## npm package archetype
+
+`release-npm-package.yml` releases one package or an ordered monorepo package list. It uses a protected frozen commit, the existing dated-changelog and exact-commit CI gate, an immutable same-run payload, and two write-free Linux verifiers. The publisher never checks out caller source or runs package lifecycle scripts. It publishes only the verified `.tgz` bytes with GitHub OIDC trusted publishing, then independently verifies registry integrity, Sigstore signatures, and provenance binding the tarball to the caller workflow and frozen commit before publishing the GitHub Release.
+
+Use [`examples/release-npm-package-caller.yml`](examples/release-npm-package-caller.yml). The caller grants `id-token: write`; no `NODE_AUTH_TOKEN` or npm token secret is accepted. Configure npm trusted publishing for **the caller filename**, for example `release.yml`, not this repository's `release-npm-package.yml`. Every package must already exist in npm and have its own trusted publisher; newly reserved names are outside this workflow.
+
+| Input | Contract |
+| --- | --- |
+| `version` | Release SemVer, optionally prefixed by `v`; every package has this exact version. |
+| `dry_run` | Defaults to `true`; validates, builds, packs, installs, and smoke-tests without creating tags or publishing. Callers explicitly pass false for tag pushes. |
+| `node-version` | Build and smoke Node version; defaults to `24`. OIDC publication and provenance verification use Node 24 and its modern npm CLI. |
+| `package-manager` / `package-manager-version` | `npm`, `pnpm`, or `bun`; pnpm and bun require an exact manager version. |
+| `package-dirs` | JSON array, default `["."]`; dependency-first order, unique names and archive filenames, no symlinked directories. |
+| `install-command` | Optional install override. Defaults to `npm ci`, `pnpm install --frozen-lockfile`, or `bun install --frozen-lockfile`. |
+| `build-command` / `test-command` | Credential-free caller commands; build defaults to `npm run build --if-present`, tests default empty. |
+| `smoke-command` | Required command run outside the source checkout after installing all frozen tarballs on clean x64 and arm64 runners. Install scripts are disabled. |
+
+Packing uses `npm pack` for all three build managers. Prepare publishable manifests before release: sibling dependencies and peer dependencies must use exact versions; runtime dependencies must precede dependents in `package-dirs`. Both source and packed manifests are checked. Packed manifests may not leak `workspace:`, `file:`, or `link:` references, including development dependencies. Loose peer ranges are deliberately rejected for siblings. All packages must be public and use the npm registry.
+
+Stable releases publish with `latest`, prereleases with `next`. Visibility is polled for up to ten minutes per package, with a job summary when waiting exceeds one minute. Downloads bind to producer-exported immutable artifact IDs; recreating an artifact under the same name cannot replace validation metadata or payloads. Packed `publishConfig` accepts only public access, the npm registry, and provenance enabled. An existing version resumes only when its registry integrity **and downloaded tarball bytes** equal the frozen payload; it is never republished. A partial multi-package publish is recoverable by dispatching the caller on the immutable version tag (`--ref vX.Y.Z`) with `dry_run=false`. New npm publication requires `GITHUB_SHA` to equal the frozen commit; a newer-main dispatch may verify already published bytes but cannot publish missing siblings with incorrect provenance. If rebuilding produces different bytes, stop and investigate; existing registry versions cannot be overwritten. Provenance has its own ten-minute visibility allowance per package. The GitHub Release contains all tarballs, exact changelog notes, the package plan, inventory, and `SHA256SUMS`.
+
+## Source-only archetype
+
+`release-source.yml` fits SwiftPM libraries, Go libraries, skill catalogs, and this repository itself. It validates version metadata, a real calendar date in one unambiguous changelog section, protected-branch ancestry, and green independent push CI at the frozen commit. An optional `test-command` runs without write credentials. Two fresh runners verify the same-run inventory, checksums, source identity, and exact notes before publishing a GitHub Release.
+
+Use [`examples/release-source-caller.yml`](examples/release-source-caller.yml). `source-archives: true` attaches GitHub's tar and zip archives of the frozen **commit**, with their SHA-256 checksums; the release page's automatic tag archives remain GitHub-managed. `go-modules: '["."]'` additionally warms `proxy.golang.org`, uses a fresh module cache and `sum.golang.org`, and verifies the downloaded module version, checksum, and source commit. Submodules require their existing annotated `<directory>/vX.Y.Z` tags to point at the same commit; this workflow never invents or moves those tags. Go module path major suffixes must agree with the release version. Proxy warming is skipped during dry runs.
+
+Both new archetypes accept `require-signed-tag`, `strict-checks`, and `ci-check-events`; the default event filter is `["push"]`. They accept an existing annotated tag on protected-branch ancestry, or create one from protected main on a live dispatch. Set `require-signed-tag: true` to require an existing SSH-signed tag verified against `.github/release-allowed-signers` from the frozen source. Neither workflow moves version tags or overwrites releases. Dispatch callers must run on the protected default branch's current head; exact tag-push callers are also supported. A dry run defaults to true and never publishes, even when an existing tag is used.
+
+Optional `homebrew-formula` and `homebrew-tap` inputs dispatch `update-formula.yml` using `TAP_TOKEN`, a unique `request_id`, and the exact release-asset URL. The workflow waits for that run and checks the literal stable formula URL and SHA-256. Source releases require `source-archives: true`; npm handoff uses the last package in dependency order. This mode supports single-URL source/npm formulas, not platform-matrix binary formulas. The tap workflow must support `artifact_url` and `request_id` with the request ID in its run title, as the fleet taps do.
+
+See [RELEASING.md](RELEASING.md) for this repository's no-publish proof, release publication, and signed `v1` compatibility-tag update.
 
 ## Ruleset workflows
 
@@ -243,3 +276,5 @@ All three archetypes extract the exact dated Markdown release section, ignoring 
 Literal comment markers in inline code spans or escaped Markdown do not start HTML comments and cannot hide later release headings.
 
 `node scripts/test-electron-signing.mjs` executes the production Electron unpacking and signing steps against synthetic apps, including unsafe archives, nested seals, independent DMG notarization, and failure cleanup. On macOS, `--native-packaging` also exercises real `ditto`/`hdiutil` packaging and versioned framework symlinks; Apple signing and notarization are simulated.
+
+The dispatch-only `dry-run-archetypes.yml` exercises both new workflows on protected main. Its npm caller uses the committed synthetic monorepo, packs and installs both sibling packages on clean x64/arm64 runners, and runs the exported API assertion. `dry_run` is hardcoded true; no npm account or registry publication is involved. The source caller downloads and verifies frozen GitHub archives. Dispatch with the version matching the fixture and dated changelog.
