@@ -14,6 +14,7 @@ for (const archetype of ['go-cli', 'swift-cli', 'electron', 'source', 'npm-packa
     const errors = [];
     const github = { rest: {
       repos: {
+        getReleaseByTag: async () => { throw Object.assign(new Error("missing release"), { status: 404 }); },
         get: async () => ({ data: { default_branch: 'main' } }),
         getBranch: async () => ({ data: { protected: scenario !== 'unprotected', commit: { sha: head } } }),
         compareCommitsWithBasehead: async () => ({ data: { status: scenario === 'outside history' ? 'diverged' : 'ahead' } }),

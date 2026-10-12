@@ -23,6 +23,19 @@ jobs:
     uses: openclaw/release-workflows/.github/workflows/release-go-cli.yml@v1
 ```
 
+## Go CLI no-publish rehearsals
+
+The Go archetype accepts `dry-run: true`. It freezes protected main, validates
+release metadata and CI, builds, signs, notarizes, and runs both independent
+verifiers using retained Actions artifacts. It never creates a tag, draft,
+GitHub Release, tap dispatch, or closeout PR. Supply a dated changelog version;
+existing historical tags do not redirect the rehearsal away from current main.
+
+Tag-push callers can require signed tags and set `ci-check-events: '["push"]'`
+to require push CI on the frozen source. Real releases reject existing GitHub
+Releases before building. The workflow reuses an existing annotated tag and
+never replaces it.
+
 ## npm package archetype
 
 `release-npm-package.yml` releases one package or an ordered monorepo package list. It uses a protected frozen commit, the existing dated-changelog and exact-commit CI gate, an immutable same-run payload, and two write-free Linux verifiers. The publisher never checks out caller source or runs package lifecycle scripts. It publishes only the verified `.tgz` bytes with GitHub OIDC trusted publishing, then independently verifies registry integrity, Sigstore signatures, and provenance binding the tarball to the caller workflow and frozen commit before publishing the GitHub Release.

@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Make npm and source dry-run dispatches prove the current protected branch commit when the requested version already has a release tag, without reading or changing that tag.
+- Add tag-push entrypoints and full no-publish Go CLI rehearsals, retaining signed verification artifacts without tags, drafts, tap updates, or closeout PRs.
 
 ## 1.11.0 - 2026-10-11
 
