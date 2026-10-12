@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Allow source-only releases to build and test on a selected GitHub-hosted runner, including macOS-only SwiftPM libraries.
+
 ## 1.11.2 - 2026-10-12
 
 - Preserve npm pack lifecycle scripts and their output without treating script logs as JSON; validate tarballs against the frozen package plan.

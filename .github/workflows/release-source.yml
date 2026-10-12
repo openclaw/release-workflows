@@ -27,6 +27,11 @@ name: Release source
         required: false
         default: '["push"]'
         type: string
+      test-runs-on:
+        description: GitHub-hosted runner for the credential-free caller tests
+        required: false
+        default: ubuntu-latest
+        type: string
       test-command:
         description: Optional credential-free caller test command
         required: false
@@ -88,12 +93,17 @@ jobs:
     - name: Validate inputs
       id: inputs
       env:
+        TEST_RUNS_ON: "${{ inputs.test-runs-on }}"
         SOURCE_ARCHIVES: "${{ inputs.source-archives }}"
         VERSION: "${{ inputs.version }}"
         HOMEBREW_TAP: "${{ inputs.homebrew-tap }}"
         HOMEBREW_FORMULA: "${{ inputs.homebrew-formula }}"
       run: |
         set -euo pipefail
+        case "$TEST_RUNS_ON" in
+          ubuntu-latest|ubuntu-24.04|ubuntu-24.04-arm|macos-latest|macos-15|macos-15-intel|macos-26) ;;
+          *) echo 'test-runs-on must select a supported GitHub-hosted runner' >&2; exit 1 ;;
+        esac
         [[ -z "$HOMEBREW_FORMULA" || "$SOURCE_ARCHIVES" == true ]] || { echo 'enable source-archives for Homebrew handoff'; exit 1; }
         v=$(printf '%s'  "$VERSION" | sed 's/^v//')
         [[ "$v" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]] || { echo 'invalid release SemVer'; exit 1; }
@@ -767,7 +777,7 @@ jobs:
     needs:
     - validate
     - tag
-    runs-on: ubuntu-latest
+    runs-on: "${{ inputs.test-runs-on }}"
     permissions:
       contents: read
       actions: read

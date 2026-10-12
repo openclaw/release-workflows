@@ -14,6 +14,15 @@ const root=mkdtempSync(path.join(tmpdir(),'source-npm-proof-'));
 try {
 for(const w of workflows){
   const call=(w.on??w.true).workflow_call;
+  if(w.name==='Release source') {
+    assert.equal(call.inputs['test-runs-on'].default,'ubuntu-latest');
+    assert.equal(w.jobs.build['runs-on'],'${{ inputs.test-runs-on }}');
+    assert.deepEqual(w.jobs.build.permissions,{contents:'read',actions:'read'});
+    const validate=step(w,'validate','Validate inputs').run;
+    const runnerEnv={...process.env,VERSION:'1.2.3',HOMEBREW_TAP:'openclaw/homebrew-tap',HOMEBREW_FORMULA:'',SOURCE_ARCHIVES:'true',GITHUB_OUTPUT:path.join(root,'runner-output')};
+    for(const runner of ['ubuntu-latest','macos-26','macos-15-intel']) run('bash',['-c',validate],{env:{...runnerEnv,TEST_RUNS_ON:runner}});
+    for(const runner of ['self-hosted','untrusted-runner']) assert.throws(()=>run('bash',['-c',validate],{env:{...runnerEnv,TEST_RUNS_ON:runner}}),/Command failed/);
+  }
   assert.equal(call.inputs.dry_run.default,true);
   assert.deepEqual(w.permissions,{});
   assert.equal(w.jobs.verify.permissions.actions,'read');
