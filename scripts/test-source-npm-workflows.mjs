@@ -22,6 +22,17 @@ for(const w of workflows){
     const runnerEnv={...process.env,VERSION:'1.2.3',HOMEBREW_TAP:'openclaw/homebrew-tap',HOMEBREW_FORMULA:'',SOURCE_ARCHIVES:'true',GITHUB_OUTPUT:path.join(root,'runner-output')};
     for(const runner of ['ubuntu-latest','macos-26','macos-15-intel']) run('bash',['-c',validate],{env:{...runnerEnv,TEST_RUNS_ON:runner}});
     for(const runner of ['self-hosted','untrusted-runner']) assert.throws(()=>run('bash',['-c',validate],{env:{...runnerEnv,TEST_RUNS_ON:runner}}),/Command failed/);
+    assert.equal(call.inputs['tag-prefix'].default,'v');
+    for(const prefix of ['v','']) {
+      writeFileSync(runnerEnv.GITHUB_OUTPUT,'');
+      run('bash',['-c',validate],{env:{...runnerEnv,TEST_RUNS_ON:'ubuntu-latest',TAG_PREFIX:prefix,GO_MODULES:'[]'}});
+      assert.match(readFileSync(runnerEnv.GITHUB_OUTPUT,'utf8'),new RegExp(`^tag=${prefix}1\\.2\\.3$`,'m'));
+    }
+    for(const env of [{TAG_PREFIX:'release-'},{TAG_PREFIX:'',GO_MODULES:'["."]'}]) {
+      assert.throws(()=>run('bash',['-c',validate],{env:{...runnerEnv,TEST_RUNS_ON:'ubuntu-latest',...env}}),/Command failed/);
+    }
+    assert.equal(call.inputs['release-name'].default,'');
+    assert.match(step(w,'publish','Publish only attested GitHub release bytes').with.script,/name:releaseName/);
   }
   assert.equal(call.inputs.dry_run.default,true);
   assert.deepEqual(w.permissions,{});

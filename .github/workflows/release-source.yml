@@ -7,6 +7,16 @@ name: Release source
         description: SemVer release version, with optional v
         required: true
         type: string
+      tag-prefix:
+        description: Version tag prefix, either v or empty for existing unprefixed catalogs
+        required: false
+        default: v
+        type: string
+      release-name:
+        description: Optional project name placed before the version in the release title
+        required: false
+        default: ''
+        type: string
       dry_run:
         description: Validate, build and verify without creating tags or publishing
         required: false
@@ -96,10 +106,17 @@ jobs:
         TEST_RUNS_ON: "${{ inputs.test-runs-on }}"
         SOURCE_ARCHIVES: "${{ inputs.source-archives }}"
         VERSION: "${{ inputs.version }}"
+        TAG_PREFIX: "${{ inputs.tag-prefix }}"
+        GO_MODULES: "${{ inputs.go-modules }}"
         HOMEBREW_TAP: "${{ inputs.homebrew-tap }}"
         HOMEBREW_FORMULA: "${{ inputs.homebrew-formula }}"
       run: |
         set -euo pipefail
+        case "${TAG_PREFIX-v}" in
+          v|'') ;;
+          *) echo 'tag-prefix must be v or empty' >&2; exit 1 ;;
+        esac
+        [[ "${TAG_PREFIX-v}" == v || "${GO_MODULES-[]}" == '[]' ]] || { echo 'Go modules require v-prefixed tags'; exit 1; }
         case "$TEST_RUNS_ON" in
           ubuntu-latest|ubuntu-24.04|ubuntu-24.04-arm|macos-latest|macos-15|macos-15-intel|macos-26) ;;
           *) echo 'test-runs-on must select a supported GitHub-hosted runner' >&2; exit 1 ;;
@@ -114,7 +131,7 @@ jobs:
         pre=sys.argv[1].partition('-')[2]
         if any(x.isdigit() and len(x)>1 and x.startswith('0') for x in pre.split('.')): raise SystemExit('numeric prerelease identifiers cannot have leading zeros')
         SEMVER
-        printf 'release-version=%s\ntag=v%s\n' "$v" "$v" >> "$GITHUB_OUTPUT"
+        printf 'release-version=%s\ntag=%s%s\n' "$v" "${TAG_PREFIX-v}" "$v" >> "$GITHUB_OUTPUT"
     - name: Resolve protected release target
       id: repository
       uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
@@ -979,6 +996,7 @@ jobs:
         TAG: "${{ needs.validate.outputs.tag }}"
         TARGET_SHA: "${{ needs.validate.outputs.target-sha }}"
         RELEASE_VERSION: "${{ needs.validate.outputs.release-version }}"
+        RELEASE_NAME: "${{ inputs.release-name }}"
         EXPECTED_TAG_OBJECT: "${{ needs.tag.outputs.tag-object-sha }}"
         PAYLOAD: "${{ runner.temp }}/payload"
       with:
@@ -992,6 +1010,7 @@ jobs:
           const names=fs.readdirSync(dir).sort();
           const notes=fs.readFileSync(path.join(dir,'RELEASE-NOTES.md'),'utf8');
           const tagName=process.env.TAG;
+          const releaseName=process.env.RELEASE_NAME ? process.env.RELEASE_NAME+' '+process.env.RELEASE_VERSION : tagName;
           let release;
           try {release=(await github.rest.repos.getReleaseByTag({...context.repo,tag:tagName})).data;}catch(e){if(e.status!==404)throw e;}
           const compare=async release=>{
@@ -1006,7 +1025,7 @@ jobs:
             assert.equal(release.tag_name,tagName);assert.equal(release.body,notes);await compare(release);
             core.info('Existing public release matches exact verified bytes; no mutation.');
           }else{
-            if(!release){release=(await github.rest.repos.createRelease({...context.repo,tag_name:tagName,target_commitish:process.env.TARGET_SHA,name:tagName,body:notes,draft:true,prerelease:tagName.includes('-')})).data;}
+            if(!release){release=(await github.rest.repos.createRelease({...context.repo,tag_name:tagName,target_commitish:process.env.TARGET_SHA,name:releaseName,body:notes,draft:true,prerelease:tagName.includes('-')})).data;}
             assert.equal(release.tag_name,tagName);
             const existing=await github.paginate(github.rest.repos.listReleaseAssets,{...context.repo,release_id:release.id,per_page:100});
             assert.ok(existing.every(a=>names.includes(a.name)),'unexpected existing draft asset');

@@ -27,6 +27,8 @@ jobs:
       test-runs-on: macos-26
       test-command: swift build -c release --jobs 2 && swift test --jobs 2
       source-archives: true
+      # Existing unprefixed catalogs: tag-prefix: '' (also change the push filter)
+      # Optional branded title: release-name: Example Library
       # Go libraries: test-command: go test ./... and go-modules: '["."]'
       # Skill catalogs: use the catalog's validation command; omit go-modules.
       # require-signed-tag: true
