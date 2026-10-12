@@ -236,7 +236,11 @@ jobs:
                       kind=block.splitlines()[0].strip()
                       if kind not in ('LC_BUILD_VERSION','LC_VERSION_MIN_MACOSX'):continue
                       fields=dict(re.findall(r'(?m)^\s*(platform|minos|version)\s+(\S+)\s*$',block))
-                      if kind=='LC_BUILD_VERSION':require(fields.get('platform','').lower() in ('1','macos'),'non-macOS Mach-O platform')
+                      if kind=='LC_BUILD_VERSION':
+                          platform=fields.get('platform','').lower()
+                          # Zippered dylibs also describe Catalyst, whose minimum is iOS-numbered.
+                          if platform in ('6','maccatalyst'):continue
+                          require(platform in ('1','macos'),'non-macOS Mach-O platform')
                       value=fields.get('minos' if kind=='LC_BUILD_VERSION' else 'version','')
                       require(bool(re.fullmatch(r'[0-9]+(?:\.[0-9]+)*',value)),'missing Mach-O minimum OS')
                       minima.append(version(value))
@@ -693,7 +697,11 @@ jobs:
                       kind=block.splitlines()[0].strip()
                       if kind not in ('LC_BUILD_VERSION','LC_VERSION_MIN_MACOSX'):continue
                       fields=dict(re.findall(r'(?m)^\s*(platform|minos|version)\s+(\S+)\s*$',block))
-                      if kind=='LC_BUILD_VERSION':require(fields.get('platform','').lower() in ('1','macos'),'non-macOS Mach-O platform')
+                      if kind=='LC_BUILD_VERSION':
+                          platform=fields.get('platform','').lower()
+                          # Zippered dylibs also describe Catalyst, whose minimum is iOS-numbered.
+                          if platform in ('6','maccatalyst'):continue
+                          require(platform in ('1','macos'),'non-macOS Mach-O platform')
                       value=fields.get('minos' if kind=='LC_BUILD_VERSION' else 'version','')
                       require(bool(re.fullmatch(r'[0-9]+(?:\.[0-9]+)*',value)),'missing Mach-O minimum OS')
                       minima.append(version(value))
@@ -947,7 +955,11 @@ jobs:
                       kind=block.splitlines()[0].strip()
                       if kind not in ('LC_BUILD_VERSION','LC_VERSION_MIN_MACOSX'):continue
                       fields=dict(re.findall(r'(?m)^\s*(platform|minos|version)\s+(\S+)\s*$',block))
-                      if kind=='LC_BUILD_VERSION':require(fields.get('platform','').lower() in ('1','macos'),'non-macOS Mach-O platform')
+                      if kind=='LC_BUILD_VERSION':
+                          platform=fields.get('platform','').lower()
+                          # Zippered dylibs also describe Catalyst, whose minimum is iOS-numbered.
+                          if platform in ('6','maccatalyst'):continue
+                          require(platform in ('1','macos'),'non-macOS Mach-O platform')
                       value=fields.get('minos' if kind=='LC_BUILD_VERSION' else 'version','')
                       require(bool(re.fullmatch(r'[0-9]+(?:\.[0-9]+)*',value)),'missing Mach-O minimum OS')
                       minima.append(version(value))
@@ -1658,7 +1670,11 @@ jobs:
                       kind=block.splitlines()[0].strip()
                       if kind not in ('LC_BUILD_VERSION','LC_VERSION_MIN_MACOSX'):continue
                       fields=dict(re.findall(r'(?m)^\s*(platform|minos|version)\s+(\S+)\s*$',block))
-                      if kind=='LC_BUILD_VERSION':require(fields.get('platform','').lower() in ('1','macos'),'non-macOS Mach-O platform')
+                      if kind=='LC_BUILD_VERSION':
+                          platform=fields.get('platform','').lower()
+                          # Zippered dylibs also describe Catalyst, whose minimum is iOS-numbered.
+                          if platform in ('6','maccatalyst'):continue
+                          require(platform in ('1','macos'),'non-macOS Mach-O platform')
                       value=fields.get('minos' if kind=='LC_BUILD_VERSION' else 'version','')
                       require(bool(re.fullmatch(r'[0-9]+(?:\.[0-9]+)*',value)),'missing Mach-O minimum OS')
                       minima.append(version(value))
@@ -2185,7 +2201,11 @@ jobs:
                       kind=block.splitlines()[0].strip()
                       if kind not in ('LC_BUILD_VERSION','LC_VERSION_MIN_MACOSX'):continue
                       fields=dict(re.findall(r'(?m)^\s*(platform|minos|version)\s+(\S+)\s*$',block))
-                      if kind=='LC_BUILD_VERSION':require(fields.get('platform','').lower() in ('1','macos'),'non-macOS Mach-O platform')
+                      if kind=='LC_BUILD_VERSION':
+                          platform=fields.get('platform','').lower()
+                          # Zippered dylibs also describe Catalyst, whose minimum is iOS-numbered.
+                          if platform in ('6','maccatalyst'):continue
+                          require(platform in ('1','macos'),'non-macOS Mach-O platform')
                       value=fields.get('minos' if kind=='LC_BUILD_VERSION' else 'version','')
                       require(bool(re.fullmatch(r'[0-9]+(?:\.[0-9]+)*',value)),'missing Mach-O minimum OS')
                       minima.append(version(value))
@@ -2878,8 +2898,13 @@ jobs:
                   if kind not in ("LC_BUILD_VERSION", "LC_VERSION_MIN_MACOSX"):
                       continue
                   fields = dict(re.findall(r"(?m)^\s*(platform|minos|version)\s+(\S+)\s*$", command))
-                  if kind == "LC_BUILD_VERSION" and fields.get("platform", "").lower() not in ("1", "macos"):
-                      fail(f"{binary}: {arch} LC_BUILD_VERSION platform is not macOS")
+                  if kind == "LC_BUILD_VERSION":
+                      platform = fields.get("platform", "").lower()
+                      # Zippered dylibs also describe Catalyst, whose minimum is iOS-numbered.
+                      if platform in ("6", "maccatalyst"):
+                          continue
+                      if platform not in ("1", "macos"):
+                          fail(f"{binary}: {arch} LC_BUILD_VERSION platform is not macOS")
                   value = fields.get("minos" if kind == "LC_BUILD_VERSION" else "version")
                   if value is None:
                       fail(f"{binary}: {arch} missing minimum macOS")

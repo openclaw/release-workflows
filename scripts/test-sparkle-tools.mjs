@@ -455,6 +455,126 @@ for value in ('14.0','15.0','26.0'):
 `);
 });
 
+test('deployment parsers require a valid macOS minimum in every slice and ignore only Catalyst', () => {
+  python(`
+from contract import check_deployment
+import runtime
+from unittest.mock import patch
+def build(platform,minimum):return 'cmd LC_BUILD_VERSION\\n platform '+platform+'\\n minos '+minimum+'\\n'
+def legacy(minimum):return 'cmd LC_VERSION_MIN_MACOSX\\n version '+minimum+'\\n'
+def check(slices,expected=None,too_new=False):
+    def output(args,**kw):return ' '.join(slices) if args[0]=='lipo' else slices[args[2]]
+    with patch('subprocess.check_output',output):
+        if expected is None or too_new:
+            try:check_deployment('binary','15.0');raise AssertionError('invalid deployment accepted: '+repr(slices))
+            except ValueError:pass
+        else:check_deployment('binary','15.0')
+    for arch,text in slices.items():
+        with patch.object(runtime,'run',return_value=text):
+            if expected is None:
+                try:runtime.minimum_macos('binary',arch);raise AssertionError('invalid runtime minimum accepted: '+text)
+                except runtime.AuditError:pass
+            else:assert runtime.minimum_macos('binary',arch)==expected[arch]
+for macos in ('1','macos','MACOS'):
+    for catalyst in ('6','maccatalyst','MACCATALYST'):
+        for text in (build(macos,'11.0')+build(catalyst,'26.0'),build(catalyst,'26.0')+build(macos,'11.0')):
+            check({'arm64':text},{'arm64':'11.0'})
+for text in (legacy('10.15'),build('6','26.0')+legacy('10.15')):
+    check({'x86_64':text},{'x86_64':'10.15'})
+check({'arm64':build('1','11.0')+build('1','14.0')},{'arm64':'14.0'})
+check({'x86_64':build('1','11.0')+legacy('15.1')+build('6','26.0')},{'x86_64':'15.1'},too_new=True)
+check({'arm64':build('1','11.0'),'x86_64':build('1','15.1')+build('6','26.0')},{'arm64':'11.0','x86_64':'15.1'},too_new=True)
+for platform in ('2','ios','7','iossimulator','10','driverkit','unknown',''):
+    for text in (build(platform,'11.0'),build('1','11.0')+build(platform,'11.0')):
+        check({'arm64':text})
+for minimum in ('','bad','11.x','-1','11..0'):
+    for text in (build('1',minimum),build('1','11.0')+build('1',minimum),legacy(minimum)):
+        check({'arm64':text})
+for text in ('',build('6','14.0'),build('maccatalyst','26.0')):
+    check({'arm64':text})
+# A valid first slice must not hide a Catalyst-only later slice.
+with patch('subprocess.check_output',lambda args,**kw:'arm64 x86_64' if args[0]=='lipo' else build('1' if args[2]=='arm64' else '6','11.0')):
+    try:check_deployment('binary','15.0');raise AssertionError('Catalyst-only second slice accepted')
+    except ValueError:pass
+`);
+});
+
+test('native macOS and zippered dylibs retain only macOS deployment minima', { skip: process.platform !== 'darwin' }, async (t) => {
+  writeFileSync(join(root, 'deployment.c'), 'int fixture(void) { return 42; }\n');
+  function build(name, target, variant, sdk = 'macosx') {
+    const result = spawnSync('xcrun', ['--sdk', sdk, 'clang', '-dynamiclib', '-target', target,
+      ...(variant ? ['-darwin-target-variant', variant] : []), 'deployment.c', '-o', name],
+    { cwd: root, encoding: 'utf8', timeout: 60_000 });
+    return { ...result, name };
+  }
+  function available(result, context) {
+    assert.ifError(result.error);
+    if (result.status === 0) return true;
+    assert.match(result.stderr, /SDK .* cannot be located|unable to find utility "clang"|(?:unsupported option|unknown argument):? ['"]-darwin-target-variant['"]|(?:unsupported|not supported).*\b(?:macabi|macCatalyst)\b|\b(?:macabi|macCatalyst)\b.*(?:unsupported|not supported)|library (?:not found for -lSystem|'System' not found)/i,
+      `unexpected compiler failure for ${result.name}: ${result.stderr}`);
+    context.skip(`local SDK/toolchain cannot build ${result.name}: ${result.stderr}`);
+    return false;
+  }
+  function commands(name, arch) {
+    const result = spawnSync('otool', ['-arch', arch, '-l', name], { cwd: root, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    const blocks = result.stdout.split(/^\s*cmd /m).filter((block) => block.startsWith('LC_BUILD_VERSION\n'));
+    return blocks.map((block) => [block.match(/^\s*platform\s+(\S+)/m)?.[1].toLowerCase(), block.match(/^\s*minos\s+(\S+)/m)?.[1]]);
+  }
+  function macosMinimum(name, arch, expected) {
+    python(`from runtime import minimum_macos\nassert minimum_macos(${JSON.stringify(name)},${JSON.stringify(arch)})==${JSON.stringify(expected)}`);
+  }
+  await t.test('macOS-only dylib passes', () => {
+    const result = build('macos-only.dylib', 'arm64-apple-macos11');
+    assert.equal(result.status, 0, result.error ?? result.stderr);
+    python("from contract import check_deployment\ncheck_deployment('macos-only.dylib','15.0')");
+    macosMinimum(result.name, 'arm64', '11.0');
+  });
+  await t.test('zippered arm64 and optional universal dylib pass with macOS 11.0', (context) => {
+    const arm = build('zippered-arm64.dylib', 'arm64-apple-macos11', 'arm64-apple-ios14.0-macabi');
+    if (!available(arm, context)) return;
+    const intel = build('zippered-x86_64.dylib', 'x86_64-apple-macos11', 'x86_64-apple-ios14.0-macabi');
+    const intelAvailable = available(intel, { skip: (reason) => context.diagnostic(`optional x86_64 slice skipped: ${reason}`) });
+    const arches = intelAvailable ? ['arm64', 'x86_64'] : ['arm64'];
+    let name = arm.name;
+    if (intelAvailable) {
+      name = 'zippered-universal.dylib';
+      const merged = spawnSync('lipo', ['-create', arm.name, intel.name, '-output', name], { cwd: root, encoding: 'utf8' });
+      assert.equal(merged.status, 0, merged.stderr);
+    }
+    for (const arch of arches) {
+      const observed = commands(name, arch);
+      assert.deepEqual(observed, [['1', '11.0'], ['6', '14.0']]);
+      context.diagnostic(`otool -arch ${arch} -l ${name}: ${JSON.stringify(observed)}`);
+      macosMinimum(name, arch, '11.0');
+    }
+    python(`from contract import check_deployment\ncheck_deployment(${JSON.stringify(name)},'15.0')`);
+  });
+  await t.test('zippered macOS minimum above 15.0 fails', (context) => {
+    const result = build('zippered-newer.dylib', 'arm64-apple-macos15.1', 'arm64-apple-ios18.2-macabi');
+    if (!available(result, context)) return;
+    assert.deepEqual(commands(result.name, 'arm64'), [['1', '15.1'], ['6', '18.2']]);
+    macosMinimum(result.name, 'arm64', '15.1');
+    python(`from contract import check_deployment
+try:check_deployment('zippered-newer.dylib','15.0');raise AssertionError('newer macOS accepted')
+except ValueError as error:assert 'newer macOS' in str(error)`);
+  });
+  for (const [label, target, sdk, platform] of [
+    ['Catalyst', 'arm64-apple-ios14.0-macabi', 'macosx', '6'],
+    ['iOS', 'arm64-apple-ios14.0', 'iphoneos', '2'],
+  ]) await t.test(`${label}-only dylib fails both deployment parsers`, (context) => {
+    const result = build(`${label}-only.dylib`, target, null, sdk);
+    if (!available(result, context)) return;
+    assert.deepEqual(commands(result.name, 'arm64'), [[platform, '14.0']]);
+    python(`from contract import check_deployment
+from runtime import minimum_macos,AuditError
+try:check_deployment(${JSON.stringify(result.name)},'15.0');raise AssertionError('non-macOS accepted')
+except ValueError:pass
+try:minimum_macos(${JSON.stringify(result.name)},'arm64');raise AssertionError('non-macOS runtime accepted')
+except AuditError:pass`);
+  });
+});
+
 test('production attestation preserves CRLF release-note bytes', () => {
   const run = workflowStep(workflow, 'verify', 'name', 'Verify inventory, Sparkle signature, sealed app, DMG, and CLI').run;
   const program = run.split("python3 - <<'PYCODE'\n").at(-1).split('\nPYCODE')[0];
