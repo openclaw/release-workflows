@@ -24,3 +24,4 @@ jobs:
       dry_run: ${{ inputs.dry_run }}
       test-command: bash -n scripts/validate-workflows.sh
       source-archives: true
+      require-signed-tag: true
