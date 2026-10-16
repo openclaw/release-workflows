@@ -1076,7 +1076,6 @@ jobs:
         script: |-
           const fs = require('node:fs');
           const plan = JSON.parse(fs.readFileSync(`${process.env.PAYLOAD}/PACKAGE-PLAN.json`, 'utf8'));
-          let idToken;
           for (const p of plan) {
             // Completed versions still take the publisher's exact-byte resume path.
             const metadata = await fetch(`https://registry.npmjs.org/${encodeURIComponent(p.name)}/${p.version}`, {
@@ -1084,11 +1083,9 @@ jobs:
             }).catch(() => { throw new Error(`${p.name}: npm metadata request failed during trusted-publisher preflight`); });
             if (metadata.ok) continue;
             if (metadata.status !== 404) throw new Error(`${p.name}: npm metadata preflight failed (HTTP ${metadata.status})`);
-            if (!idToken) {
-              idToken = await core.getIDToken('npm:registry.npmjs.org').catch(() => {
-                throw new Error(`${p.name}: GitHub OIDC token unavailable; grant id-token: write in the caller workflow`);
-              });
-            }
+            const idToken = await core.getIDToken('npm:registry.npmjs.org').catch(() => {
+              throw new Error(`${p.name}: GitHub OIDC token unavailable; grant id-token: write in the caller workflow`);
+            });
             // Exchange only; never publish, persist tokens, or retry a failed request.
             const escapedName = p.name.replace('/', '%2f');
             const response = await fetch(`https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/${escapedName}`, {

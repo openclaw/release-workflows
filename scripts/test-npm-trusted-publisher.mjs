@@ -18,11 +18,12 @@ const registryToken = 'synthetic-registry-token';
 
 async function scenario({ failure, existing = [], missingOIDC = false, missingToken = false } = {}) {
   const calls = [], logs = [];
+  let tokenRequests = 0;
   const core = {
     async getIDToken(audience) {
       assert.equal(audience, 'npm:registry.npmjs.org');
       if (missingOIDC) throw new Error(oidcToken);
-      return oidcToken;
+      return `${oidcToken}-${++tokenRequests}`;
     },
     info: message => logs.push(message),
   };
@@ -33,7 +34,7 @@ async function scenario({ failure, existing = [], missingOIDC = false, missingTo
       return existing.some(name => String(url).includes(encodeURIComponent(name)))
         ? { ok: true, status: 200 } : { ok: false, status: 404 };
     }
-    assert.equal(options.headers.Authorization, `Bearer ${oidcToken}`);
+    assert.equal(options.headers.Authorization, `Bearer ${oidcToken}-${tokenRequests}`);
     assert.match(String(url), /\/-\/npm\/v1\/oidc\/token\/exchange\/package\/@fixture%2f(?:core|cli)$/);
     if (failure && String(url).endsWith('cli')) {
       if (failure.network) throw new Error(oidcToken);
@@ -51,12 +52,13 @@ async function scenario({ failure, existing = [], missingOIDC = false, missingTo
   const output = [...logs, error?.message ?? ''].join('\n');
   assert.ok(!output.includes(oidcToken));
   assert.ok(!output.includes(registryToken));
-  return { calls, error, output };
+  return { calls, error, output, tokenRequests };
 }
 
 const success = await scenario();
 assert.equal(success.error, undefined);
 assert.equal(success.calls.filter(c => c.options.method === 'POST').length, 2);
+assert.equal(success.tokenRequests, 2, 'each unpublished package gets a fresh short-lived OIDC token');
 for (const failure of [{ status: 404 }, { status: 400, code: 'ENEEDAUTH' }, { status: 400, error: 'ENEEDAUTH' }, { status: 401 }, { status: 403 }]) {
   const result = await scenario({ failure });
   assert.match(result.error?.message ?? '', /@fixture\/cli/);
@@ -75,5 +77,6 @@ assert.match((await scenario({ missingToken: true })).error?.message ?? '', /@fi
 const resumed = await scenario({ existing: packages.map(p => p.name) });
 assert.equal(resumed.error, undefined);
 assert.equal(resumed.calls.filter(c => c.options.method === 'POST').length, 0, 'already published versions need no publish credentials');
+assert.equal(resumed.tokenRequests, 0);
 assert.equal((await scenario({ existing: ['@fixture/core'] })).calls.filter(c => c.options.method === 'POST').length, 1);
 console.log('npm trusted publisher preflight: expiry, ENEEDAUTH, sanitization, no retries, all siblings and resume passed');
