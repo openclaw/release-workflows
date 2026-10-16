@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Retry Sparkle and Electron `stapler validate` only on transient Apple ticket-lookup network errors, with bounded backoff; other validation failures still fail immediately.
+
 ## 1.11.4 - 2026-10-12
 
 - Preserve repeated historical Sparkle appcast build numbers while requiring every new release to exceed all published builds and use a new version.

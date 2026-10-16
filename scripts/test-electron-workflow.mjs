@@ -74,6 +74,8 @@ for (const secret of [
 }
 assert.match(sign, /notarytool submit/);
 assert.match(sign, /stapler staple/);
+assert.match(sign, /stapler_validate "\$app"/);
+assert.match(sign, /stapler_validate "\$dmg"/);
 assert.match(sign, /codesign --force/);
 assert.match(sign, /hdiutil create/);
 assert.match(sign, /ditto -c -k --sequesterRsrc --keepParent/);
@@ -84,7 +86,8 @@ assert.doesNotMatch(assemble, /raw-electron-macos/);
 
 assert.match(verify, /macos-15-intel/);
 assert.match(verify, /macos-14/);
-assert.match(verify, /stapler validate/);
+assert.match(verify, /stapler_validate "\$app"/);
+assert.match(verify, /stapler_validate "\$mount\/\$PRODUCT_NAME\.app"/);
 assert.match(verify, /\.AppImage/);
 assert.match(verify, /PE32\|MS Windows/);
 assert.match(publish, /listReleaseAssets/);

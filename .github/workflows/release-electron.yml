@@ -722,6 +722,28 @@ jobs:
           VERSION: ${{ needs.validate.outputs.release-version }}
         run: |
           set -euo pipefail
+          # BEGIN stapler-validate
+          # Apple's CloudKit ticket lookup can drop runner connections; retry only those network transients.
+          stapler_validate() {
+            local target=$1 attempt=1 delay=10 rc output
+            local transient='NSURLErrorDomain Code=-10(01|03|04|05|09)([^0-9]|$)'
+            while :; do
+              echo "stapler validate attempt $attempt/4: $target"
+              rc=0
+              output=$(xcrun stapler validate "$target" 2>&1) || rc=$?
+              printf '%s\n' "$output"
+              if [[ $rc -eq 0 ]]; then return 0; fi
+              if [[ $attempt -ge 4 || ! $output =~ $transient ]]; then
+                echo "stapler validate failed for $target (exit $rc)" >&2
+                return "$rc"
+              fi
+              echo "transient Apple network failure; retrying in ${delay}s" >&2
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+            done
+          }
+          # END stapler-validate
           inherit="$RUNNER_TEMP/electron-inherit.plist"
           main_entitlements="$RUNNER_TEMP/electron-app.plist"
           cat >"$inherit" <<'PLIST'
@@ -789,7 +811,7 @@ jobs:
             submission="$RUNNER_TEMP/$PRODUCT_NAME-$arch.zip"; ditto -c -k --sequesterRsrc --keepParent "$app" "$submission"
             xcrun notarytool submit "$submission" --key "$p8" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --no-s3-acceleration --wait --output-format json >"$submission.json"
             [[ "$(jq -r '.status' "$submission.json")" == Accepted ]]
-            xcrun stapler staple "$app"; xcrun stapler validate "$app"; spctl --assess --type execute "$app"
+            xcrun stapler staple "$app"; stapler_validate "$app"; spctl --assess --type execute "$app"
             ditto -c -k --sequesterRsrc --keepParent "$app" "signed-macos/$PRODUCT_NAME-$VERSION-mac-$arch.zip"
             stage="$RUNNER_TEMP/dmg-$arch"
             rm -rf "$stage"
@@ -802,7 +824,7 @@ jobs:
             xcrun notarytool submit "$dmg" --key "$p8" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --no-s3-acceleration --wait --output-format json >"$RUNNER_TEMP/dmg-$arch.json"
             [[ "$(jq -r '.status' "$RUNNER_TEMP/dmg-$arch.json")" == Accepted ]]
             xcrun stapler staple "$dmg"
-            xcrun stapler validate "$dmg"
+            stapler_validate "$dmg"
           done
           (
             cd signed-macos
@@ -971,16 +993,38 @@ jobs:
           VERSION: ${{ needs.validate.outputs.release-version }}
         run: |
           set -euo pipefail
+          # BEGIN stapler-validate
+          # Apple's CloudKit ticket lookup can drop runner connections; retry only those network transients.
+          stapler_validate() {
+            local target=$1 attempt=1 delay=10 rc output
+            local transient='NSURLErrorDomain Code=-10(01|03|04|05|09)([^0-9]|$)'
+            while :; do
+              echo "stapler validate attempt $attempt/4: $target"
+              rc=0
+              output=$(xcrun stapler validate "$target" 2>&1) || rc=$?
+              printf '%s\n' "$output"
+              if [[ $rc -eq 0 ]]; then return 0; fi
+              if [[ $attempt -ge 4 || ! $output =~ $transient ]]; then
+                echo "stapler validate failed for $target (exit $rc)" >&2
+                return "$rc"
+              fi
+              echo "transient Apple network failure; retrying in ${delay}s" >&2
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+            done
+          }
+          # END stapler-validate
           tar -xzf electron-release-assets.tar.gz; cd release-assets; shasum -a 256 -c "$CHECKSUM_FILENAME"
           jq -e --arg repo "$GITHUB_REPOSITORY" --arg tag "$TAG" --arg commit "$TARGET_SHA" '.schemaVersion == 1 and .repository == $repo and .tag == $tag and .commit == $commit' ASSET-INVENTORY.json >/dev/null
           zip="$PRODUCT_NAME-$VERSION-mac-$ARTIFACT_ARCH.zip"; dmg="$PRODUCT_NAME-$VERSION-mac-$ARTIFACT_ARCH.dmg"; [[ -f "$zip" && -f "$dmg" ]]
           mkdir zip-app; ditto -x -k "$zip" zip-app; app="zip-app/$PRODUCT_NAME.app"; [[ -d "$app" ]]
           if [[ "$REPOSITORY_TYPE" == openclaw ]]; then team=FWJYW4S8P8; else team=Y5PE65HELJ; fi
           requirement="identifier \"$BUNDLE_IDENTIFIER\" and anchor apple generic and certificate leaf[subject.OU] = \"$team\""
-          codesign --verify --strict --deep -R="$requirement" "$app"; spctl --assess --type execute "$app"; xcrun stapler validate "$app"
+          codesign --verify --strict --deep -R="$requirement" "$app"; spctl --assess --type execute "$app"; stapler_validate "$app"
           [[ "$(lipo -archs "$app/Contents/MacOS/$PRODUCT_NAME")" == "$EXPECTED_ARCH" ]]
           mount="$RUNNER_TEMP/electron-dmg"; mkdir "$mount"; hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount" -quiet
-          codesign --verify --strict --deep -R="$requirement" "$mount/$PRODUCT_NAME.app"; xcrun stapler validate "$mount/$PRODUCT_NAME.app"; hdiutil detach "$mount" -quiet
+          codesign --verify --strict --deep -R="$requirement" "$mount/$PRODUCT_NAME.app"; stapler_validate "$mount/$PRODUCT_NAME.app"; hdiutil detach "$mount" -quiet
           find . -maxdepth 1 -name '*.AppImage' -print -quit | grep -q .; file ./*.AppImage | grep -q ELF
           find . -maxdepth 1 -name '*.exe' -print -quit | grep -q .; file ./*.exe | grep -Eq 'PE32|MS Windows'
           jq -n --arg repository "$GITHUB_REPOSITORY" --arg runId "$GITHUB_RUN_ID" --arg payloadArtifact "${{ needs.draft.outputs.verification-artifact-name }}" --arg tag "$TAG" --arg commit "$TARGET_SHA" --arg architecture "$EXPECTED_ARCH" --rawfile assetInventory ASSET-INVENTORY.json --rawfile sha256sums "$CHECKSUM_FILENAME" --rawfile releaseNotes RELEASE-NOTES.md '{schemaVersion:1,repository:$repository,runId:$runId,payloadArtifact:$payloadArtifact,tag:$tag,commit:$commit,architecture:$architecture,verdict:"verified",assetInventory:$assetInventory,sha256sums:$sha256sums,releaseNotes:$releaseNotes}' >verified-electron-attestation.json

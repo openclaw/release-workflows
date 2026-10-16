@@ -1436,6 +1436,28 @@ jobs:
           AUTHORITY: ${{ steps.signer.outputs.authority }}
         run: |
           set -euo pipefail
+          # BEGIN stapler-validate
+          # Apple's CloudKit ticket lookup can drop runner connections; retry only those network transients.
+          stapler_validate() {
+            local target=$1 attempt=1 delay=10 rc output
+            local transient='NSURLErrorDomain Code=-10(01|03|04|05|09)([^0-9]|$)'
+            while :; do
+              echo "stapler validate attempt $attempt/4: $target"
+              rc=0
+              output=$(xcrun stapler validate "$target" 2>&1) || rc=$?
+              printf '%s\n' "$output"
+              if [[ $rc -eq 0 ]]; then return 0; fi
+              if [[ $attempt -ge 4 || ! $output =~ $transient ]]; then
+                echo "stapler validate failed for $target (exit $rc)" >&2
+                return "$rc"
+              fi
+              echo "transient Apple network failure; retrying in ${delay}s" >&2
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+            done
+          }
+          # END stapler-validate
           umask 077
           export NOTARY_KEY="$RUNNER_TEMP/sparkle-notary.p8"
           sparkle_key="$RUNNER_TEMP/sparkle-private-key"
@@ -1460,7 +1482,7 @@ jobs:
           /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$app" "$RUNNER_TEMP/app-submit.zip"
           python3 "$RUNNER_TEMP/sparkle-tools/notary.py" submit "$RUNNER_TEMP/app-submit.zip" submissions/app.json
           xcrun stapler staple "$app"
-          xcrun stapler validate "$app"
+          stapler_validate "$app"
           python3 "$RUNNER_TEMP/sparkle-tools/notary.py" ticket "$app"
           spctl --assess --type execute "$app"
           zip="signed-assets/$APP_NAME-$VERSION.app.zip"
@@ -1513,7 +1535,7 @@ jobs:
           codesign --force --timestamp --keychain "$KEYCHAIN" --sign "$IDENTITY" "$dmg"
           python3 "$RUNNER_TEMP/sparkle-tools/notary.py" submit "$dmg" submissions/dmg.json
           xcrun stapler staple "$dmg"
-          xcrun stapler validate "$dmg"
+          stapler_validate "$dmg"
           python3 "$RUNNER_TEMP/sparkle-tools/notary.py" ticket "$dmg"
           spctl --assess --type open --context context:primary-signature "$dmg"
           python3 - <<'PYCODE'
@@ -3120,6 +3142,28 @@ jobs:
           NPM_PACK_SCRIPT: ${{ inputs.npm-pack-script }}
         run: |
           set -euo pipefail
+          # BEGIN stapler-validate
+          # Apple's CloudKit ticket lookup can drop runner connections; retry only those network transients.
+          stapler_validate() {
+            local target=$1 attempt=1 delay=10 rc output
+            local transient='NSURLErrorDomain Code=-10(01|03|04|05|09)([^0-9]|$)'
+            while :; do
+              echo "stapler validate attempt $attempt/4: $target"
+              rc=0
+              output=$(xcrun stapler validate "$target" 2>&1) || rc=$?
+              printf '%s\n' "$output"
+              if [[ $rc -eq 0 ]]; then return 0; fi
+              if [[ $attempt -ge 4 || ! $output =~ $transient ]]; then
+                echo "stapler validate failed for $target (exit $rc)" >&2
+                return "$rc"
+              fi
+              echo "transient Apple network failure; retrying in ${delay}s" >&2
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+            done
+          }
+          # END stapler-validate
           python3 "$RUNNER_TEMP/sparkle-tools/payload.py" sparkle-release-assets.tar.gz "$RUNNER_TEMP/sparkle-payload"
           cd "$RUNNER_TEMP/sparkle-payload"
           tar -xzf "$GITHUB_WORKSPACE/signer-original/signed-sparkle.tar.gz" -C "$GITHUB_WORKSPACE/signer-original"
@@ -3165,12 +3209,12 @@ jobs:
           requirement="identifier \"$BUNDLE_IDENTIFIER\" and anchor apple generic and certificate leaf[subject.OU] = \"$team\""
           codesign --verify --strict --deep -R="$requirement" "$app"
           python3 "$RUNNER_TEMP/sparkle-tools/notary.py" ticket "$app"
-          xcrun stapler validate "$app"
+          stapler_validate "$app"
           spctl --assess --type execute "$app"
           dmg="release-assets/$APP_NAME-$VERSION.dmg"
           codesign --verify --strict -R="anchor apple generic and certificate leaf[subject.OU] = \"$team\"" "$dmg"
           python3 "$RUNNER_TEMP/sparkle-tools/notary.py" ticket "$dmg"
-          xcrun stapler validate "$dmg"
+          stapler_validate "$dmg"
           spctl --assess --type open --context context:primary-signature "$dmg"
           mount="$RUNNER_TEMP/sparkle-dmg"
           mkdir "$mount"
