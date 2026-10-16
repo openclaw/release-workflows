@@ -16,7 +16,7 @@ const packages = [{ name: '@fixture/core', version: '1.2.3' }, { name: '@fixture
 const oidcToken = 'synthetic-oidc-token';
 const registryToken = 'synthetic-registry-token';
 
-async function scenario({ failure, existing = [], missingOIDC = false, missingToken = false } = {}) {
+async function scenario({ failure, existing = [], missingPackage, missingOIDC = false, missingToken = false } = {}) {
   const calls = [], logs = [];
   let tokenRequests = 0;
   const core = {
@@ -31,11 +31,18 @@ async function scenario({ failure, existing = [], missingOIDC = false, missingTo
     calls.push({ url: String(url), options });
     assert.equal(options.redirect, 'error');
     if (options.method !== 'POST') {
+      if (!String(url).endsWith('/1.2.3')) {
+        return missingPackage && String(url).endsWith(encodeURIComponent(missingPackage))
+          ? { ok: false, status: 404 } : { ok: true, status: 200 };
+      }
       return existing.some(name => String(url).includes(encodeURIComponent(name)))
         ? { ok: true, status: 200 } : { ok: false, status: 404 };
     }
     assert.equal(options.headers.Authorization, `Bearer ${oidcToken}-${tokenRequests}`);
     assert.match(String(url), /\/-\/npm\/v1\/oidc\/token\/exchange\/package\/@fixture%2f(?:core|cli)$/);
+    if (missingPackage && String(url).endsWith(missingPackage.replace('/', '%2f'))) {
+      return { ok: false, status: 404, json: async () => ({ message: 'Package not found' }) };
+    }
     if (failure && String(url).endsWith('cli')) {
       if (failure.network) throw new Error(oidcToken);
       return { ok: false, status: failure.status, json: async () => ({ code: failure.code, error: failure.error, message: registryToken }) };
@@ -79,4 +86,8 @@ assert.equal(resumed.error, undefined);
 assert.equal(resumed.calls.filter(c => c.options.method === 'POST').length, 0, 'already published versions need no publish credentials');
 assert.equal(resumed.tokenRequests, 0);
 assert.equal((await scenario({ existing: ['@fixture/core'] })).calls.filter(c => c.options.method === 'POST').length, 1);
+const missing = await scenario({ missingPackage: '@fixture/cli' });
+assert.match(missing.error?.message ?? '', /@fixture\/cli must already exist/);
+assert.doesNotMatch(missing.output, /expired/);
+assert.equal(missing.tokenRequests, 1, 'missing packages fail before requesting credentials');
 console.log('npm trusted publisher preflight: expiry, ENEEDAUTH, sanitization, no retries, all siblings and resume passed');
