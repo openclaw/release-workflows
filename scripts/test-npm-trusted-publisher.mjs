@@ -6,6 +6,8 @@ const workflow = loadWorkflow('release-npm-package.yml');
 const step = workflowStep(workflow, 'publish-npm', 'name', 'Preflight npm trusted publishers');
 const steps = workflow.jobs['publish-npm'].steps;
 assert.ok(steps.indexOf(step) < steps.findIndex(s => s.name === 'Publish exact tarballs with trusted publishing'));
+assert.ok(steps.indexOf(step) < steps.findIndex(s => s.name === 'Recheck frozen tag before registry publication'),
+  'slow OIDC preflight must not extend the final frozen-tag check to publication interval');
 assert.equal(workflow.jobs['publish-npm'].if, '!inputs.dry_run');
 const run = new (Object.getPrototypeOf(async function () {}).constructor)(
   'require', 'fetch', 'core', 'process', step.with.script,

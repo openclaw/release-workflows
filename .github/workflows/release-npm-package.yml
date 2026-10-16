@@ -1068,19 +1068,6 @@ jobs:
       with:
         node-version: '24'
         package-manager-cache: false
-    - name: Recheck frozen tag before registry publication
-      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
-      env:
-        TAG: "${{ needs.validate.outputs.tag }}"
-        TARGET_SHA: "${{ needs.validate.outputs.target-sha }}"
-        RELEASE_VERSION: "${{ needs.validate.outputs.release-version }}"
-        EXPECTED_TAG_OBJECT: "${{ needs.tag.outputs.tag-object-sha }}"
-      with:
-        script: |-
-          const ref = await github.rest.git.getRef({...context.repo, ref: 'tags/' + process.env.TAG});
-          if (ref.data.object.type !== 'tag' || ref.data.object.sha !== process.env.EXPECTED_TAG_OBJECT) throw new Error('frozen tag object changed');
-          const tag = await github.rest.git.getTag({...context.repo, tag_sha: ref.data.object.sha});
-          if (tag.data.object.type !== 'commit' || tag.data.object.sha !== process.env.TARGET_SHA) throw new Error('frozen tag target changed');
     - name: Preflight npm trusted publishers
       uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
       env:
@@ -1118,6 +1105,19 @@ jobs:
             if (typeof body.token !== 'string' || !body.token) throw new Error(`${p.name}: npm OIDC exchange returned no token; no publication was attempted`);
             core.info(`${p.name}: trusted-publisher preflight passed`);
           }
+    - name: Recheck frozen tag before registry publication
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+      env:
+        TAG: "${{ needs.validate.outputs.tag }}"
+        TARGET_SHA: "${{ needs.validate.outputs.target-sha }}"
+        RELEASE_VERSION: "${{ needs.validate.outputs.release-version }}"
+        EXPECTED_TAG_OBJECT: "${{ needs.tag.outputs.tag-object-sha }}"
+      with:
+        script: |-
+          const ref = await github.rest.git.getRef({...context.repo, ref: 'tags/' + process.env.TAG});
+          if (ref.data.object.type !== 'tag' || ref.data.object.sha !== process.env.EXPECTED_TAG_OBJECT) throw new Error('frozen tag object changed');
+          const tag = await github.rest.git.getTag({...context.repo, tag_sha: ref.data.object.sha});
+          if (tag.data.object.type !== 'commit' || tag.data.object.sha !== process.env.TARGET_SHA) throw new Error('frozen tag target changed');
     - name: Publish exact tarballs with trusted publishing
       env:
         TAG: "${{ needs.validate.outputs.tag }}"
