@@ -19,6 +19,7 @@ const registryToken = 'synthetic-registry-token';
 async function scenario({ failure, existing = [], missingPackage, missingOIDC = false, missingToken = false } = {}) {
   const calls = [], logs = [];
   let tokenRequests = 0;
+  let cancelledBodies = 0;
   const core = {
     async getIDToken(audience) {
       assert.equal(audience, 'npm:registry.npmjs.org');
@@ -31,12 +32,10 @@ async function scenario({ failure, existing = [], missingPackage, missingOIDC = 
     calls.push({ url: String(url), options });
     assert.equal(options.redirect, 'error');
     if (options.method !== 'POST') {
-      if (!String(url).endsWith('/1.2.3')) {
-        return missingPackage && String(url).endsWith(encodeURIComponent(missingPackage))
-          ? { ok: false, status: 404 } : { ok: true, status: 200 };
-      }
-      return existing.some(name => String(url).includes(encodeURIComponent(name)))
-        ? { ok: true, status: 200 } : { ok: false, status: 404 };
+      const found = String(url).endsWith('/1.2.3')
+        ? existing.some(name => String(url).includes(encodeURIComponent(name)))
+        : !(missingPackage && String(url).endsWith(encodeURIComponent(missingPackage)));
+      return { ok: found, status: found ? 200 : 404, body: { async cancel() { cancelledBodies++; } } };
     }
     assert.equal(options.headers.Authorization, `Bearer ${oidcToken}-${tokenRequests}`);
     assert.match(String(url), /\/-\/npm\/v1\/oidc\/token\/exchange\/package\/@fixture%2f(?:core|cli)$/);
@@ -59,13 +58,14 @@ async function scenario({ failure, existing = [], missingPackage, missingOIDC = 
   const output = [...logs, error?.message ?? ''].join('\n');
   assert.ok(!output.includes(oidcToken));
   assert.ok(!output.includes(registryToken));
-  return { calls, error, output, tokenRequests };
+  return { calls, error, output, tokenRequests, cancelledBodies };
 }
 
 const success = await scenario();
 assert.equal(success.error, undefined);
 assert.equal(success.calls.filter(c => c.options.method === 'POST').length, 2);
 assert.equal(success.tokenRequests, 2, 'each unpublished package gets a fresh short-lived OIDC token');
+assert.equal(success.cancelledBodies, 4, 'release each status-only metadata response before the next request');
 for (const failure of [{ status: 404 }, { status: 400, code: 'ENEEDAUTH' }, { status: 400, error: 'ENEEDAUTH' }, { status: 401 }, { status: 403 }]) {
   const result = await scenario({ failure });
   assert.match(result.error?.message ?? '', /@fixture\/cli/);
@@ -85,6 +85,7 @@ const resumed = await scenario({ existing: packages.map(p => p.name) });
 assert.equal(resumed.error, undefined);
 assert.equal(resumed.calls.filter(c => c.options.method === 'POST').length, 0, 'already published versions need no publish credentials');
 assert.equal(resumed.tokenRequests, 0);
+assert.equal(resumed.cancelledBodies, 2);
 assert.equal((await scenario({ existing: ['@fixture/core'] })).calls.filter(c => c.options.method === 'POST').length, 1);
 const missing = await scenario({ missingPackage: '@fixture/cli' });
 assert.match(missing.error?.message ?? '', /@fixture\/cli must already exist/);

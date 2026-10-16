@@ -1081,11 +1081,13 @@ jobs:
             const metadata = await fetch(`https://registry.npmjs.org/${encodeURIComponent(p.name)}/${p.version}`, {
               redirect: 'error', signal: AbortSignal.timeout(30000),
             }).catch(() => { throw new Error(`${p.name}: npm metadata request failed during trusted-publisher preflight`); });
+            await metadata.body?.cancel();
             if (metadata.ok) continue;
             if (metadata.status !== 404) throw new Error(`${p.name}: npm metadata preflight failed (HTTP ${metadata.status})`);
             const existingPackage = await fetch(`https://registry.npmjs.org/${encodeURIComponent(p.name)}`, {
               redirect: 'error', signal: AbortSignal.timeout(30000),
             }).catch(() => { throw new Error(`${p.name}: npm package existence request failed during trusted-publisher preflight`); });
+            await existingPackage.body?.cancel();
             if (existingPackage.status === 404) throw new Error(`${p.name} must already exist and have caller trusted publishing configured`);
             if (!existingPackage.ok) throw new Error(`${p.name}: npm package existence preflight failed (HTTP ${existingPackage.status})`);
             const idToken = await core.getIDToken('npm:registry.npmjs.org').catch(() => {
