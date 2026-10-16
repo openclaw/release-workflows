@@ -1098,7 +1098,7 @@ jobs:
             const body = await response.json().catch(() => ({}));
             if (!response.ok) {
               if ([401, 403, 404].includes(response.status) || body.code === 'ENEEDAUTH' || body.error === 'ENEEDAUTH') {
-                throw new Error(`${p.name}: npm OIDC exchange failed (HTTP ${response.status}). The trusted publisher may be missing or expired: npm deletes an unused record after 2 days without a successful OIDC publish. Configure or recreate this package's trusted publisher with the same repository and caller workflow filename (not release-npm-package.yml), then rerun the release. No publication was attempted.`);
+                throw new Error(`${p.name}: npm OIDC exchange failed (HTTP ${response.status}). The trusted publisher may be missing or expired: an unused record expires after 2 days without a successful OIDC publish and cannot be used or edited. Delete any expired record and recreate this package's trusted publisher with the same repository and caller workflow filename (not release-npm-package.yml), then complete the first publish within 2 days. No publication was attempted.`);
               }
               throw new Error(`${p.name}: npm OIDC exchange failed (HTTP ${response.status}); no publication was attempted`);
             }

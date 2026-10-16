@@ -61,6 +61,7 @@ for (const failure of [{ status: 404 }, { status: 400, code: 'ENEEDAUTH' }, { st
   const result = await scenario({ failure });
   assert.match(result.error?.message ?? '', /@fixture\/cli/);
   assert.match(result.output, /2 days/);
+  assert.match(result.output, /Delete any expired record/);
   assert.match(result.output, /recreate.*trusted.publisher/i);
   assert.match(result.output, /caller.*filename/i);
   assert.equal(result.calls.filter(c => c.options.method === 'POST').length, 2, 'one exchange per package, no retries');
