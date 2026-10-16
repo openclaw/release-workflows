@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Preflight npm trusted-publisher exchange before publishing any package, with package-specific recovery instructions for expired trust records, and document the 2-day unused-record expiry.
 - Retry Sparkle and Electron `stapler validate` only on transient Apple ticket-lookup network errors, with bounded backoff; other validation failures still fail immediately.
 
 ## 1.11.4 - 2026-10-12

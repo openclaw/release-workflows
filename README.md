@@ -42,6 +42,8 @@ never replaces it.
 
 Use [`examples/release-npm-package-caller.yml`](examples/release-npm-package-caller.yml). The caller grants `id-token: write`; no `NODE_AUTH_TOKEN` or npm token secret is accepted. Configure npm trusted publishing for **the caller filename**, for example `release.yml`, not this repository's `release-npm-package.yml`. Every package must already exist in npm and have its own trusted publisher; newly reserved names are outside this workflow.
 
+Configure trust **right before the first release**: npm deletes an unused trusted-publisher record after 2 days without a successful OIDC publish. If a record is older than 2 days and has never published successfully, recreate it with the same repository and caller workflow filename before releasing. An expired record can surface as `404 OIDC token exchange error - package not found` or `ENEEDAUTH` even when the package exists. The publisher preflights OIDC exchange for every unpublished package before any publish attempt and names the package and recovery steps on failure; it never retries publication. Already-published versions retain the exact-byte resume checks below.
+
 | Input | Contract |
 | --- | --- |
 | `version` | Release SemVer, optionally prefixed by `v`; every package has this exact version. |

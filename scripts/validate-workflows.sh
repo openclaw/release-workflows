@@ -14,6 +14,7 @@ actionlint "${workflow_files[@]}"
 
 node scripts/test-source-npm-workflows.mjs
 node scripts/test-package-publication.mjs
+node scripts/test-npm-trusted-publisher.mjs
 node scripts/test-source-formula.mjs
 node scripts/test-release-target-resolution.mjs
 node scripts/test-release-source-boundary.mjs

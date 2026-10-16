@@ -1081,6 +1081,43 @@ jobs:
           if (ref.data.object.type !== 'tag' || ref.data.object.sha !== process.env.EXPECTED_TAG_OBJECT) throw new Error('frozen tag object changed');
           const tag = await github.rest.git.getTag({...context.repo, tag_sha: ref.data.object.sha});
           if (tag.data.object.type !== 'commit' || tag.data.object.sha !== process.env.TARGET_SHA) throw new Error('frozen tag target changed');
+    - name: Preflight npm trusted publishers
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+      env:
+        PAYLOAD: "${{ runner.temp }}/payload"
+      with:
+        script: |-
+          const fs = require('node:fs');
+          const plan = JSON.parse(fs.readFileSync(`${process.env.PAYLOAD}/PACKAGE-PLAN.json`, 'utf8'));
+          let idToken;
+          for (const p of plan) {
+            // Completed versions still take the publisher's exact-byte resume path.
+            const metadata = await fetch(`https://registry.npmjs.org/${encodeURIComponent(p.name)}/${p.version}`, {
+              redirect: 'error', signal: AbortSignal.timeout(30000),
+            }).catch(() => { throw new Error(`${p.name}: npm metadata request failed during trusted-publisher preflight`); });
+            if (metadata.ok) continue;
+            if (metadata.status !== 404) throw new Error(`${p.name}: npm metadata preflight failed (HTTP ${metadata.status})`);
+            if (!idToken) {
+              idToken = await core.getIDToken('npm:registry.npmjs.org').catch(() => {
+                throw new Error(`${p.name}: GitHub OIDC token unavailable; grant id-token: write in the caller workflow`);
+              });
+            }
+            // Exchange only; never publish, persist tokens, or retry a failed request.
+            const escapedName = p.name.replace('/', '%2f');
+            const response = await fetch(`https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/${escapedName}`, {
+              method: 'POST', headers: { Authorization: `Bearer ${idToken}` },
+              redirect: 'error', signal: AbortSignal.timeout(30000),
+            }).catch(() => { throw new Error(`${p.name}: npm OIDC exchange request failed; no publication was attempted`); });
+            const body = await response.json().catch(() => ({}));
+            if (!response.ok) {
+              if ([401, 403, 404].includes(response.status) || body.code === 'ENEEDAUTH' || body.error === 'ENEEDAUTH') {
+                throw new Error(`${p.name}: npm OIDC exchange failed (HTTP ${response.status}). The trusted publisher may be missing or expired: npm deletes an unused record after 2 days without a successful OIDC publish. Configure or recreate this package's trusted publisher with the same repository and caller workflow filename (not release-npm-package.yml), then rerun the release. No publication was attempted.`);
+              }
+              throw new Error(`${p.name}: npm OIDC exchange failed (HTTP ${response.status}); no publication was attempted`);
+            }
+            if (typeof body.token !== 'string' || !body.token) throw new Error(`${p.name}: npm OIDC exchange returned no token; no publication was attempted`);
+            core.info(`${p.name}: trusted-publisher preflight passed`);
+          }
     - name: Publish exact tarballs with trusted publishing
       env:
         TAG: "${{ needs.validate.outputs.tag }}"

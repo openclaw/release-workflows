@@ -38,4 +38,8 @@ jobs:
 # Configure npm trusted publishing for EACH existing package against THIS CALLER
 # filename (e.g. release.yml), not release-npm-package.yml in release-workflows:
 # npm trust github @example/core --file release.yml --repo owner/repo --allow-publish --yes
+# Configure trust right before the first release. npm deletes an unused record
+# after 2 days without a successful OIDC publish; recreate an older unused record
+# with the same settings before releasing. Expiry can appear as a 404 OIDC token
+# exchange error (package not found) or ENEEDAUTH even though the package exists.
 # No NODE_AUTH_TOKEN or npm token secret. The caller must grant id-token: write.
