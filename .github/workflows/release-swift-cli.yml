@@ -415,7 +415,7 @@ jobs:
             actual=$(sed -nE 's/^MARKETING_VERSION=(.*)$/\1/p' "$VERSION_FILE")
             [[ "$actual" == "$RELEASE_VERSION" ]] || { echo "$VERSION_FILE version mismatch" >&2; exit 1; }
           fi
-          if [[ -n "$METADATA_CHECK_SCRIPT" ]]; then "$METADATA_CHECK_SCRIPT" "v$RELEASE_VERSION"; fi
+          if [[ -n "$METADATA_CHECK_SCRIPT" ]]; then "./$METADATA_CHECK_SCRIPT" "v$RELEASE_VERSION"; fi
           python3 - "$RELEASE_VERSION" "$RUNNER_TEMP/RELEASE-NOTES.md" <<'PY'
           from pathlib import Path
           import re
@@ -828,6 +828,7 @@ jobs:
           ASC_PRIVATE_KEY_P8: ${{ secrets.ASC_PRIVATE_KEY_P8 }}
           BINARY_IDENTIFIER: ${{ inputs.binary-identifier }}
           BINARY_NAME: ${{ inputs.binary-name }}
+          ENTITLEMENTS_ENABLED: ${{ inputs.entitlements-file != '' }}
           INCLUDE_HELPER: ${{ inputs.include-helper }}
           HELPER_IDENTIFIER: ${{ inputs.helper-identifier }}
           HELPER_NAME: ${{ inputs.helper-name }}
@@ -845,7 +846,17 @@ jobs:
           entitlements="payload/release.entitlements"
           [[ -f "$cli" && -x "$cli" ]]
           set --
-          if [[ -f "$entitlements" ]]; then set -- --entitlements "$entitlements"; fi
+          if [[ "$INCLUDE_HELPER" != true ]] && [[ ( -n "$HELPER_NAME" && -e "$helper" ) || -n "$(find payload -type f -name '*.dylib' -print -quit)" ]]; then
+            echo "disabled helper is present in the raw payload" >&2
+            exit 1
+          fi
+          if [[ "$ENTITLEMENTS_ENABLED" == true ]]; then
+            [[ -f "$entitlements" ]]
+            set -- --entitlements "$entitlements"
+          elif [[ -e "$entitlements" ]]; then
+            echo "disabled entitlements are present in the raw payload" >&2
+            exit 1
+          fi
           cli_requirement="identifier \"$BINARY_IDENTIFIER\" and anchor apple generic and certificate leaf[subject.OU] = \"$TEAM_ID\""
           helper_requirement="identifier \"$HELPER_IDENTIFIER\" and anchor apple generic and certificate leaf[subject.OU] = \"$TEAM_ID\""
           codesign --force --timestamp --options runtime --identifier "$BINARY_IDENTIFIER" --requirements "=designated => $cli_requirement" "$@" --keychain "$KEYCHAIN" --sign "$IDENTITY" "$cli"
@@ -1051,6 +1062,11 @@ jobs:
           cli="macos/$BINARY_NAME"
           helper="macos/$HELPER_NAME"
           [[ -x "$cli" && ( "$INCLUDE_HELPER" != true || -f "$helper" ) ]]
+          if [[ "$INCLUDE_HELPER" != true ]] && [[ ( -n "$HELPER_NAME" && -e "$helper" ) || -n "$(find macos -type f -name '*.dylib' -print -quit)" ]]; then
+            echo "disabled helper is present in the verified archive" >&2
+            exit 1
+          fi
+          [[ ! -e macos/release.entitlements ]]
           [[ "$REQUIRE_RESOURCE_BUNDLES" != true || -n "$(find macos -maxdepth 1 -type d -name '*.bundle' -print -quit)" ]]
           if [[ "$REPOSITORY_TYPE" == openclaw ]]; then team=FWJYW4S8P8; else team=Y5PE65HELJ; fi
           cli_requirement="identifier \"$BINARY_IDENTIFIER\" and anchor apple generic and certificate leaf[subject.OU] = \"$team\""

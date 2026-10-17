@@ -133,3 +133,34 @@ try {
   shell(inputScript, inputRoot, { ...optional, METADATA_CHECK_SCRIPT: '' }, false);
   shell(inputScript, inputRoot, { ...optional, MACOS_BUILD_SCRIPT: '../unsafe.sh' }, false);
 } finally { rmSync(inputRoot, { recursive: true, force: true }); }
+
+const signerScript = workflowStep(workflow, 'sign', 'name', 'Sign and notarize exact macOS payload').run;
+const signerPreflight = signerScript.slice(0, signerScript.indexOf('cli_requirement='));
+for (const reserved of ['release.entitlements', 'helper.dylib']) {
+  const root = mkdtempSync(join(tmpdir(), 'swift-reserved-'));
+  try {
+    mkdirSync(join(root, 'fixture'));
+    mkdirSync(join(root, 'raw-macos'));
+    writeFileSync(join(root, 'fixture/fixture'), 'synthetic executable', { mode: 0o755 });
+    writeFileSync(join(root, 'fixture', reserved), 'unexpected artifact');
+    const env = { ...process.env, BINARY_NAME: 'fixture', HELPER_NAME: 'helper.dylib',
+      INCLUDE_HELPER: 'false', ENTITLEMENTS_ENABLED: 'false' };
+    shell('tar -czf raw-macos/raw-swift-macos.tar.gz -C fixture .', root, env);
+    shell(signerPreflight, root, env, false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}
+
+const metadata = workflowStep(workflow, 'validate', 'id', 'metadata').run;
+const metadataRoot = mkdtempSync(join(tmpdir(), 'swift-root-validator-'));
+try {
+  for (const name of ['Package.swift', 'Package.resolved', 'build.sh']) writeFileSync(join(metadataRoot, name), 'fixture');
+  writeFileSync(join(metadataRoot, 'CHANGELOG.md'), '## 1.2.3 - 2026-10-16\n\n- Fixture.\n');
+  writeFileSync(join(metadataRoot, 'check-version.sh'), '#!/bin/sh\n[ "$1" = v1.2.3 ] && touch validator-ran\n', { mode: 0o755 });
+  const env = { ...process.env, RUNNER_TEMP: metadataRoot, GITHUB_OUTPUT: join(metadataRoot, 'outputs'),
+    RELEASE_VERSION: '1.2.3', METADATA_CHECK_SCRIPT: 'check-version.sh', MACOS_BUILD_SCRIPT: 'build.sh',
+    VERSION_FILE: '', LINUX_BUILD_SCRIPT: '', INCLUDE_LINUX: 'false', PREPARE_SCRIPT: '',
+    GENERATE_VERSION_SCRIPT: '', ENTITLEMENTS_FILE: '', GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1' };
+  shell('git init -q && git add . && git -c user.name=Fixture -c user.email=fixture@example.com -c commit.gpgsign=false commit -qm fixture', metadataRoot, env);
+  shell(metadata, metadataRoot, env);
+  assert.equal(readFileSync(join(metadataRoot, 'validator-ran')).length, 0);
+} finally { rmSync(metadataRoot, { recursive: true, force: true }); }
