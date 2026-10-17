@@ -42,7 +42,7 @@ assert.match(tag, /release tag object changed after validation/);
 for (const build of [buildMac, buildLinux]) {
   assert.doesNotMatch(build, /secrets\./, 'build jobs cannot receive release credentials');
   assert.match(build, /persist-credentials: false/);
-  assert.match(build, /needs\.validate\.outputs\.tag/);
+  assert.match(build, /needs\.validate\.outputs\.target-sha/);
 }
 
 assert.match(buildMac, /CODESIGN_IDENTITY=-/);
@@ -67,7 +67,7 @@ assert.match(sign, /ASSET-INVENTORY\.json/);
 assert.doesNotMatch(verify, /secrets\./);
 assert.match(verify, /permissions:\n      actions: read/);
 assert.match(verify, /macos-15-intel/);
-assert.match(verify, /macos-14/);
+assert.match(verify, /inputs.verify-arm64-runner/);
 assert.match(verify, /arm64e arm64 x86_64/);
 assert.match(verify, /ELF\.\*x86-64/);
 assert.match(verify, /unset[^\n]*GITHUB_TOKEN/);

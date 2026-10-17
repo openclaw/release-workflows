@@ -7,6 +7,10 @@ on:
         description: SemVer to release
         required: true
         type: string
+      dry_run:
+        description: Sign and verify without creating tags or publishing
+        type: boolean
+        default: true
 
 permissions: {}
 
@@ -21,6 +25,7 @@ jobs:
     uses: openclaw/release-workflows/.github/workflows/release-swift-cli.yml@v1
     with:
       version: ${{ inputs.version }}
+      dry_run: ${{ inputs.dry_run }}
       repository-type: personal
       homebrew-tap: steipete/homebrew-tap
       homebrew-formula: imsg

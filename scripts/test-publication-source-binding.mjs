@@ -33,7 +33,8 @@ let failures = 0;
 for (const archetype of ['go-cli', 'swift-cli', 'electron']) {
   const script = workflowStep(loadWorkflow(`release-${archetype}.yml`), 'publish', 'id', 'publish').with.script;
   const execute = new AsyncFunction('github', 'context', 'core', 'process', 'require', script);
-  for (const scenario of scenarios) {
+  const cases = archetype === 'swift-cli' ? [...scenarios, { name: 'replaced signed tag object is rejected', expectedTagObject: 'd'.repeat(40), error: /tag object changed/ }] : scenarios;
+  for (const scenario of cases) {
     const calls = [];
     let thrown;
     const github = {
@@ -81,7 +82,7 @@ for (const archetype of ['go-cli', 'swift-cli', 'electron']) {
     try {
       await execute(github, { repo: repository, runId: Number(runId) }, {
         info() {}, warning() {}, setOutput() {}, setFailed(message) { throw new Error(message); },
-      }, { env: { CHECKSUM_FILENAME: 'SHA256SUMS', RELEASE_ID: '7', TAG: tag, TARGET_SHA: targetSha, GITHUB_RUN_ID: runId, VERIFICATION_ARTIFACT: artifact, VERIFICATION_PAYLOAD_ARTIFACT: artifact } }, testRequire);
+      }, { env: { EXPECTED_TAG_OBJECT: scenario.expectedTagObject, CHECKSUM_FILENAME: 'SHA256SUMS', RELEASE_ID: '7', TAG: tag, TARGET_SHA: targetSha, GITHUB_RUN_ID: runId, VERIFICATION_ARTIFACT: artifact, VERIFICATION_PAYLOAD_ARTIFACT: artifact } }, testRequire);
     } catch (error) { thrown = error; }
     try {
       if (scenario.valid) {

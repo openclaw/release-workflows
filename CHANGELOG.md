@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.11.6 - 2026-10-16
+
+- Add Swift CLI dry runs that sign, notarize, and independently verify current protected main without release writes, with optional helper dylib, Linux archive, and resource bundles; support macOS-only signed-tag callers and configurable macOS verification hosts.
+
 ## 1.11.5 - 2026-10-16
 
 - Preflight npm trusted-publisher exchange before publishing any package, with package-specific recovery instructions for expired trust records, and document the 2-day unused-record expiry.
