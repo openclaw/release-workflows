@@ -28,6 +28,7 @@ process.on('exit', () => rmSync(root, { recursive: true, force: true }));
 function python(source, env = {}) {
   const result = spawnSync('python3', ['-c', source], { cwd: root, env: { ...process.env, ...env }, encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr + result.stdout);
+  return result;
 }
 
 test('all extracted production Python tools compile', () => {
@@ -35,7 +36,8 @@ test('all extracted production Python tools compile', () => {
 });
 
 test('macOS runner provides the older SDK required by the Swift runtime audit', { skip: process.platform !== 'darwin' }, () => {
-  python("from runtime import discover_sdks, choose_sdk\nchoose_sdk(discover_sdks(), '15.0')");
+  const result = python("from runtime import discover_sdks, choose_sdk\nchoose_sdk(discover_sdks(), '15.0')");
+  console.log(result.stderr);
 });
 
 test('production input validator rejects path, layout, version, secret and checksum ambiguity', () => {
