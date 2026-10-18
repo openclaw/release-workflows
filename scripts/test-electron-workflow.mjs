@@ -84,8 +84,8 @@ assert.match(sign, /electron-desktop-mac-\$\{\{ github\.run_id \}\}/);
 assert.match(assemble, /needs: \[validate, build-server, build-desktop, sign\]/);
 assert.doesNotMatch(assemble, /raw-electron-macos/);
 
-assert.match(verify, /macos-15-intel/);
-assert.match(verify, /macos-14/);
+assert.match(verify, /runner: xcode-27/);
+assert.match(verify, /arch -x86_64 \/usr\/bin\/true/);
 assert.match(verify, /stapler_validate "\$app"/);
 assert.match(verify, /stapler_validate "\$mount\/\$PRODUCT_NAME\.app"/);
 assert.match(verify, /\.AppImage/);

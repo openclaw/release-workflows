@@ -11,7 +11,7 @@ assert.match(workflow, /^  pull_request:$/m);
 assert.match(workflow, /^permissions:\n  contents: read$/m);
 assert.match(workflow, /^    name: Release Check$/m);
 assert.match(workflow, /^    if: github\.repository == 'openclaw\/crabbox'$/m);
-assert.match(workflow, /^    runs-on: macos-15$/m);
+assert.match(workflow, /^    runs-on: xcode-27$/m);
 assert.match(workflow, /actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1/);
 assert.match(workflow, /fetch-depth: 0/);
 assert.match(workflow, /persist-credentials: false/);

@@ -27,7 +27,7 @@ test('environment secrets are explicit, scoped to signing, and all public writes
   assert.match(w.jobs.verify.if, /always\(\).*inputs.dry-run/);
   assert.equal(contract.inputs['build-runner'].default, 'xcode-27');
   assert.deepEqual(w.jobs.verify.strategy.matrix.include, [
-    { arch: 'arm64', runner: 'macos-15' }, { arch: 'x86_64', runner: 'macos-15-intel' }, { arch: 'arm64', runner: 'macos-26' },
+    { arch: 'arm64', runner: 'xcode-27', verifier: 'arm64' }, { arch: 'x86_64', runner: 'xcode-27', verifier: 'x86_64' }, { arch: 'arm64', runner: 'xcode-27', verifier: 'runtime-audit' },
   ]);
   assert.ok(w.jobs.build.steps.some(s => s.with?.submodules === 'recursive'));
   assert.ok(w.jobs.verify.steps.some(s => s.with?.path === '${{ runner.temp }}/sparkle-payload/verified-sparkle-attestation.json'));
@@ -147,8 +147,8 @@ function publisherFixture(scenario = '') {
     },
   };
   const readFileSync = path => {
-    const runner = path.split('/')[1];
-    return JSON.stringify({ schemaVersion: 1, repository: 'openclaw/fixture', runId: '42', payloadArtifact: 'payload', tag: 'v1.2.3', commit: scenario === 'attestation' && runner === 'macos-26' ? 'changed' : 'commit', architecture: runner === 'macos-15-intel' ? 'x86_64' : 'arm64', runner, verdict: 'verified', assetInventory: '{}', sha256sums: sums, releaseNotes: notes });
+    const verifier = path.split('/')[1];
+    return JSON.stringify({ schemaVersion: 1, repository: 'openclaw/fixture', runId: '42', payloadArtifact: 'payload', tag: 'v1.2.3', commit: scenario === 'attestation' && verifier === 'runtime-audit' ? 'changed' : 'commit', architecture: verifier === 'x86_64' ? 'x86_64' : 'arm64', runner: 'xcode-27', verifier, verdict: 'verified', assetInventory: '{}', sha256sums: sums, releaseNotes: notes });
   };
   return { github, events, require: name => name === 'fs' ? { readFileSync } : require(name) };
 }

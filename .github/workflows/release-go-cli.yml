@@ -1018,7 +1018,7 @@ jobs:
   build:
     name: 3a · GoReleaser build matrix
     needs: [validate, tag]
-    runs-on: ${{ inputs.split-goreleaser-config != '' && 'macos-15' || (inputs.build-runner == 'macos' && 'macos-15' || 'ubuntu-latest') }}
+    runs-on: ${{ inputs.split-goreleaser-config != '' && 'xcode-27' || (inputs.build-runner == 'macos' && 'xcode-27' || 'ubuntu-latest') }}
     permissions:
       contents: read
     outputs:
@@ -1341,7 +1341,7 @@ jobs:
         needs.merge-builds.result == 'success'
       }}
     needs: [validate, build, merge-builds]
-    runs-on: macos-14
+    runs-on: xcode-27
     permissions:
       contents: read
     steps:
@@ -1929,7 +1929,7 @@ jobs:
         (inputs.split-goreleaser-config == '' || needs.build-split.result == 'success')
       }}
     needs: [validate, build, build-split]
-    runs-on: ${{ inputs.split-goreleaser-config != '' && 'ubuntu-latest' || (inputs.build-runner == 'macos' && 'macos-15' || 'ubuntu-latest') }}
+    runs-on: ${{ inputs.split-goreleaser-config != '' && 'ubuntu-latest' || (inputs.build-runner == 'macos' && 'xcode-27' || 'ubuntu-latest') }}
     permissions:
       contents: read
     outputs:
@@ -2499,13 +2499,25 @@ jobs:
       matrix:
         include:
           - arch: arm64
-            runner: macos-14
+            runner: xcode-27
           - arch: x86_64
-            runner: macos-15-intel
+            runner: xcode-27
     runs-on: ${{ matrix.runner }}
     permissions:
       actions: read
     steps:
+      - name: Verify execution architecture
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == arm64 ]]
+          if [[ "$EXPECTED_ARCH" == x86_64 ]]; then
+            if ! arch -x86_64 /usr/bin/true; then
+              sudo softwareupdate --install-rosetta --agree-to-license
+            fi
+            arch -x86_64 /usr/bin/true
+          fi
       - name: Download immutable verification payload
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:

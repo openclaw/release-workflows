@@ -251,7 +251,7 @@ jobs:
               version=e['VERSION'].removeprefix('v')
               require(bool(re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(?:alpha|beta|rc)\.(0|[1-9][0-9]*))?',version)), 'invalid SemVer')
               require(e['REPOSITORY_TYPE'] in ('openclaw','personal'), 'invalid repository-type')
-              require(e['BUILD_RUNNER'] in ('xcode-27','macos-15','macos-15-intel','macos-26'), 'unsupported build-runner')
+              require(e['BUILD_RUNNER'] in ('xcode-27','xcode-27-xlarge','macos-15','macos-15-intel','macos-26'), 'unsupported build-runner')
               require(bool(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9 _-]{0,79}', e['SIGNING_ENVIRONMENT'])), 'invalid signing-environment')
               if e['XCODE_PATH']: require(bool(re.fullmatch(r'/Applications/Xcode[A-Za-z0-9._ -]*\.app/Contents/Developer',e['XCODE_PATH'])), 'invalid Xcode developer path')
               for name in ('APP_NAME','CHECKSUM_FILENAME'): safe_name(e[name])
@@ -608,8 +608,10 @@ jobs:
             if (failures.length) core.setFailed(`non-green checks: ${failures.join(', ')}`);
   build:
     name: 2 · Build unsigned app and CLI
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ inputs.minimum-system-version }}
     needs: validate
-    runs-on: ${{ inputs.build-runner }}
+    runs-on: ${{ inputs.build-runner == 'xcode-27-xlarge' && 'xcode-27-xlarge' || 'xcode-27' }}
     permissions:
       contents: read
     steps:
@@ -712,7 +714,7 @@ jobs:
               version=e['VERSION'].removeprefix('v')
               require(bool(re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(?:alpha|beta|rc)\.(0|[1-9][0-9]*))?',version)), 'invalid SemVer')
               require(e['REPOSITORY_TYPE'] in ('openclaw','personal'), 'invalid repository-type')
-              require(e['BUILD_RUNNER'] in ('xcode-27','macos-15','macos-15-intel','macos-26'), 'unsupported build-runner')
+              require(e['BUILD_RUNNER'] in ('xcode-27','xcode-27-xlarge','macos-15','macos-15-intel','macos-26'), 'unsupported build-runner')
               require(bool(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9 _-]{0,79}', e['SIGNING_ENVIRONMENT'])), 'invalid signing-environment')
               if e['XCODE_PATH']: require(bool(re.fullmatch(r'/Applications/Xcode[A-Za-z0-9._ -]*\.app/Contents/Developer',e['XCODE_PATH'])), 'invalid Xcode developer path')
               for name in ('APP_NAME','CHECKSUM_FILENAME'): safe_name(e[name])
@@ -840,7 +842,7 @@ jobs:
     needs:
       - validate
       - build
-    runs-on: ${{ inputs.build-runner }}
+    runs-on: ${{ inputs.build-runner == 'xcode-27-xlarge' && 'xcode-27-xlarge' || 'xcode-27' }}
     environment: ${{ inputs.signing-environment }}
     permissions:
       actions: read
@@ -970,7 +972,7 @@ jobs:
               version=e['VERSION'].removeprefix('v')
               require(bool(re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(?:alpha|beta|rc)\.(0|[1-9][0-9]*))?',version)), 'invalid SemVer')
               require(e['REPOSITORY_TYPE'] in ('openclaw','personal'), 'invalid repository-type')
-              require(e['BUILD_RUNNER'] in ('xcode-27','macos-15','macos-15-intel','macos-26'), 'unsupported build-runner')
+              require(e['BUILD_RUNNER'] in ('xcode-27','xcode-27-xlarge','macos-15','macos-15-intel','macos-26'), 'unsupported build-runner')
               require(bool(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9 _-]{0,79}', e['SIGNING_ENVIRONMENT'])), 'invalid signing-environment')
               if e['XCODE_PATH']: require(bool(re.fullmatch(r'/Applications/Xcode[A-Za-z0-9._ -]*\.app/Contents/Developer',e['XCODE_PATH'])), 'invalid Xcode developer path')
               for name in ('APP_NAME','CHECKSUM_FILENAME'): safe_name(e[name])
@@ -1591,7 +1593,7 @@ jobs:
     needs:
       - validate
       - sign
-    runs-on: ${{ inputs.build-runner }}
+    runs-on: ${{ inputs.build-runner == 'xcode-27-xlarge' && 'xcode-27-xlarge' || 'xcode-27' }}
     permissions:
       actions: read
       contents: read
@@ -1707,7 +1709,7 @@ jobs:
               version=e['VERSION'].removeprefix('v')
               require(bool(re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(?:alpha|beta|rc)\.(0|[1-9][0-9]*))?',version)), 'invalid SemVer')
               require(e['REPOSITORY_TYPE'] in ('openclaw','personal'), 'invalid repository-type')
-              require(e['BUILD_RUNNER'] in ('xcode-27','macos-15','macos-15-intel','macos-26'), 'unsupported build-runner')
+              require(e['BUILD_RUNNER'] in ('xcode-27','xcode-27-xlarge','macos-15','macos-15-intel','macos-26'), 'unsupported build-runner')
               require(bool(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9 _-]{0,79}', e['SIGNING_ENVIRONMENT'])), 'invalid signing-environment')
               if e['XCODE_PATH']: require(bool(re.fullmatch(r'/Applications/Xcode[A-Za-z0-9._ -]*\.app/Contents/Developer',e['XCODE_PATH'])), 'invalid Xcode developer path')
               for name in ('APP_NAME','CHECKSUM_FILENAME'): safe_name(e[name])
@@ -2126,7 +2128,7 @@ jobs:
           echo "release-id=$release_id" >>"$GITHUB_OUTPUT"
     if: ${{ !inputs.dry-run }}
   verify:
-    name: 7 · Independent Sparkle verify (${{ matrix.runner }})
+    name: 7 · Independent Sparkle verify (${{ matrix.verifier }})
     needs:
       - validate
       - sign
@@ -2138,15 +2140,30 @@ jobs:
       matrix:
         include:
           - arch: arm64
-            runner: macos-15
+            runner: xcode-27
+            verifier: arm64
           - arch: x86_64
-            runner: macos-15-intel
+            runner: xcode-27
+            verifier: x86_64
           - arch: arm64
-            runner: macos-26
+            runner: xcode-27
+            verifier: runtime-audit
     runs-on: ${{ matrix.runner }}
     permissions:
       actions: read
     steps:
+      - name: Verify execution architecture
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == arm64 ]]
+          if [[ "$EXPECTED_ARCH" == x86_64 ]]; then
+            if ! arch -x86_64 /usr/bin/true; then
+              sudo softwareupdate --install-rosetta --agree-to-license
+            fi
+            arch -x86_64 /usr/bin/true
+          fi
       - name: Download ${{ needs.package.outputs.artifact-name }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
@@ -2240,7 +2257,7 @@ jobs:
               version=e['VERSION'].removeprefix('v')
               require(bool(re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(?:alpha|beta|rc)\.(0|[1-9][0-9]*))?',version)), 'invalid SemVer')
               require(e['REPOSITORY_TYPE'] in ('openclaw','personal'), 'invalid repository-type')
-              require(e['BUILD_RUNNER'] in ('xcode-27','macos-15','macos-15-intel','macos-26'), 'unsupported build-runner')
+              require(e['BUILD_RUNNER'] in ('xcode-27','xcode-27-xlarge','macos-15','macos-15-intel','macos-26'), 'unsupported build-runner')
               require(bool(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9 _-]{0,79}', e['SIGNING_ENVIRONMENT'])), 'invalid signing-environment')
               if e['XCODE_PATH']: require(bool(re.fullmatch(r'/Applications/Xcode[A-Za-z0-9._ -]*\.app/Contents/Developer',e['XCODE_PATH'])), 'invalid Xcode developer path')
               for name in ('APP_NAME','CHECKSUM_FILENAME'): safe_name(e[name])
@@ -3138,6 +3155,7 @@ jobs:
           SWIFT_RUNTIME_AUDIT: ${{ inputs.swift-runtime-audit }}
           EXPECTED_ARCH: ${{ matrix.arch }}
           VERIFY_RUNNER: ${{ matrix.runner }}
+          VERIFIER_ID: ${{ matrix.verifier }}
           PAYLOAD_ARTIFACT: ${{ needs.package.outputs.artifact-name }}
           NPM_PACK_SCRIPT: ${{ inputs.npm-pack-script }}
         run: |
@@ -3269,7 +3287,7 @@ jobs:
               subprocess.run(['codesign','--verify','--strict',str(p)],check=True)
               info=subprocess.run(['codesign','-dv','--verbose=4',str(p)],capture_output=True,text=True).stderr
               require('Authority='+os.environ['AUTHORITY']+'\n' in info and 'TeamIdentifier='+os.environ['TEAM_ID']+'\n' in info,'nested signer mismatch')
-              if os.environ['VERIFY_RUNNER']=='macos-26' and os.environ['SWIFT_RUNTIME_AUDIT']=='true': require(audit(None,p)==0,'Swift runtime audit failed')
+              if os.environ['VERIFIER_ID']=='runtime-audit' and os.environ['SWIFT_RUNTIME_AUDIT']=='true': require(audit(None,p)==0,'Swift runtime audit failed')
           # Check @rpath runtime companions slice-by-slice before executing the standalone CLI.
           if os.environ['CLI_BINARY_NAME']:
               root=Path('verified-universal')/(os.environ['CLI_ARCHIVE_PREFIX']+'-universal')
@@ -3277,23 +3295,24 @@ jobs:
               check_companions(root,os.environ['CLI_BINARY_NAME'])
               native=Path('verified-'+os.environ['EXPECTED_ARCH'])/(os.environ['CLI_ARCHIVE_PREFIX']+'-'+os.environ['EXPECTED_ARCH'])/os.environ['CLI_BINARY_NAME']
               environment={k:v for k,v in os.environ.items() if not any(x in k for x in ('TOKEN','SECRET','ACTIONS_','ASC_','P12','SPARKLE_PRIVATE'))}
-              result=subprocess.check_output([str(native),'--version'],env=environment,text=True)
+              command=['arch','-'+os.environ['EXPECTED_ARCH'],str(native)]
+              result=subprocess.check_output([*command,'--version'],env=environment,text=True)
               from contract import cli_version_matches
               require(cli_version_matches(result,os.environ['VERSION']),'native CLI version mismatch')
               args=json.loads(os.environ['CLI_SMOKE_ARGS'])
-              if args: subprocess.run([str(native),*args],env=environment,check=True)
+              if args: subprocess.run([*command,*args],env=environment,check=True)
           PYCODE
           python3 - <<'PYCODE'
           import os,json
           from pathlib import Path
           e=os.environ; root=Path('release-assets')
-          attestation=dict(schemaVersion=1,repository=e['GITHUB_REPOSITORY'],runId=e['GITHUB_RUN_ID'],payloadArtifact=e['PAYLOAD_ARTIFACT'],tag=e['TAG'],commit=e['TARGET_SHA'],architecture=e['EXPECTED_ARCH'],runner=e['VERIFY_RUNNER'],verdict='verified',assetInventory=(root/'ASSET-INVENTORY.json').read_bytes().decode('utf-8'),sha256sums=(root/e['CHECKSUM_FILENAME']).read_bytes().decode('utf-8'),releaseNotes=(root/'RELEASE-NOTES.md').read_bytes().decode('utf-8'))
+          attestation=dict(schemaVersion=1,repository=e['GITHUB_REPOSITORY'],runId=e['GITHUB_RUN_ID'],payloadArtifact=e['PAYLOAD_ARTIFACT'],tag=e['TAG'],commit=e['TARGET_SHA'],architecture=e['EXPECTED_ARCH'],runner=e['VERIFY_RUNNER'],verifier=e['VERIFIER_ID'],verdict='verified',assetInventory=(root/'ASSET-INVENTORY.json').read_bytes().decode('utf-8'),sha256sums=(root/e['CHECKSUM_FILENAME']).read_bytes().decode('utf-8'),releaseNotes=(root/'RELEASE-NOTES.md').read_bytes().decode('utf-8'))
           Path('verified-sparkle-attestation.json').write_text(json.dumps(attestation,indent=2)+'\n')
           PYCODE
-      - name: Upload verified-sparkle-${{ matrix.runner }}-${{ needs.package.outputs.artifact-name }}
+      - name: Upload verified-sparkle-${{ matrix.verifier }}-${{ needs.package.outputs.artifact-name }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: verified-sparkle-${{ matrix.runner }}-${{ needs.package.outputs.artifact-name }}
+          name: verified-sparkle-${{ matrix.verifier }}-${{ needs.package.outputs.artifact-name }}
           path: ${{ runner.temp }}/sparkle-payload/verified-sparkle-attestation.json
           if-no-files-found: error
           retention-days: 30
@@ -3311,21 +3330,21 @@ jobs:
     outputs:
       release-url: ${{ steps.publish.outputs.release-url }}
     steps:
-      - name: Download verified-sparkle-macos-15-${{ needs.package.outputs.artifact-name }}
+      - name: Download verified-sparkle-arm64-${{ needs.package.outputs.artifact-name }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: verified-sparkle-macos-15-${{ needs.package.outputs.artifact-name }}
-          path: attestations/macos-15
-      - name: Download verified-sparkle-macos-15-intel-${{ needs.package.outputs.artifact-name }}
+          name: verified-sparkle-arm64-${{ needs.package.outputs.artifact-name }}
+          path: attestations/arm64
+      - name: Download verified-sparkle-x86_64-${{ needs.package.outputs.artifact-name }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: verified-sparkle-macos-15-intel-${{ needs.package.outputs.artifact-name }}
-          path: attestations/macos-15-intel
-      - name: Download verified-sparkle-macos-26-${{ needs.package.outputs.artifact-name }}
+          name: verified-sparkle-x86_64-${{ needs.package.outputs.artifact-name }}
+          path: attestations/x86_64
+      - name: Download verified-sparkle-runtime-audit-${{ needs.package.outputs.artifact-name }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: verified-sparkle-macos-26-${{ needs.package.outputs.artifact-name }}
-          path: attestations/macos-26
+          name: verified-sparkle-runtime-audit-${{ needs.package.outputs.artifact-name }}
+          path: attestations/runtime-audit
       - name: Bind draft bytes and publish
         id: publish
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
@@ -3342,9 +3361,9 @@ jobs:
             const releaseId = Number(process.env.RELEASE_ID);
             if (!Number.isSafeInteger(releaseId) || releaseId <= 0) throw new Error("invalid draft ID");
             const paths = {
-              'macos-15': 'attestations/macos-15/verified-sparkle-attestation.json',
-              'macos-15-intel': 'attestations/macos-15-intel/verified-sparkle-attestation.json',
-              'macos-26': 'attestations/macos-26/verified-sparkle-attestation.json',
+              'arm64': 'attestations/arm64/verified-sparkle-attestation.json',
+              'x86_64': 'attestations/x86_64/verified-sparkle-attestation.json',
+              'runtime-audit': 'attestations/runtime-audit/verified-sparkle-attestation.json',
             };
             const attestations = Object.fromEntries(
               Object.entries(paths).map(([architecture, file]) => [
@@ -3360,8 +3379,9 @@ jobs:
                 payloadArtifact: process.env.VERIFICATION_ARTIFACT,
                 tag: process.env.TAG,
                 commit: process.env.TARGET_SHA,
-                architecture: architecture === 'macos-15-intel' ? 'x86_64' : 'arm64',
-                runner: architecture,
+                architecture: architecture === 'x86_64' ? 'x86_64' : 'arm64',
+                runner: 'xcode-27',
+                verifier: architecture,
                 verdict: 'verified',
               };
               for (const [field, value] of Object.entries(expected))
@@ -3369,10 +3389,10 @@ jobs:
                   throw new Error(`${architecture} attestation ${field} mismatch`);
             }
             for (const field of ['assetInventory', 'sha256sums', 'releaseNotes']) {
-              if (Object.values(attestations).some(a => a[field] !== attestations['macos-15'][field]))
+              if (Object.values(attestations).some(a => a[field] !== attestations['arm64'][field]))
                 throw new Error(`architecture ${field} disagreement`);
             }
-            const checksumLines = attestations['macos-15'].sha256sums.trimEnd().split('\n');
+            const checksumLines = attestations['arm64'].sha256sums.trimEnd().split('\n');
             const expectedDigests = new Map();
             for (const line of checksumLines) {
               const match = /^([0-9a-f]{64})  ([^\r\n]+)$/.exec(line);
@@ -3422,16 +3442,16 @@ jobs:
             if (JSON.stringify([...downloaded.keys()].sort()) !== JSON.stringify(expectedNames))
               throw new Error('draft asset inventory mismatch');
             if (
-              downloaded.get(process.env.CHECKSUM_FILENAME).toString('utf8') !== attestations['macos-15'].sha256sums
+              downloaded.get(process.env.CHECKSUM_FILENAME).toString('utf8') !== attestations['arm64'].sha256sums
             )
               throw new Error('draft checksum manifest differs from attestation');
             for (const [name, digest] of expectedDigests) {
               const observed = crypto.createHash('sha256').update(downloaded.get(name)).digest('hex');
               if (observed !== digest) throw new Error(`draft digest mismatch for ${name}`);
             }
-            if (!downloaded.get('ASSET-INVENTORY.json').equals(Buffer.from(attestations['macos-15'].assetInventory)))
+            if (!downloaded.get('ASSET-INVENTORY.json').equals(Buffer.from(attestations['arm64'].assetInventory)))
               throw new Error('draft inventory differs from attestation');
-            if (!downloaded.get('RELEASE-NOTES.md').equals(Buffer.from(attestations['macos-15'].releaseNotes)))
+            if (!downloaded.get('RELEASE-NOTES.md').equals(Buffer.from(attestations['arm64'].releaseNotes)))
               throw new Error('draft release notes differ from attestation');
             const ref = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
             if (ref.data.object.type !== 'tag')
@@ -3443,12 +3463,12 @@ jobs:
               ...context.repo,
               release_id: releaseId,
               draft: false,
-              body: attestations['macos-15'].releaseNotes + '\n\n## Verification\n\n' +
+              body: attestations['arm64'].releaseNotes + '\n\n## Verification\n\n' +
                 `Run: https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\n` +
-                'Verified on macos-15 (arm64), macos-15-intel (x86_64), and macos-26 (arm64).\n\n' +
+                'Verified on xcode-27: arm64, x86_64 under Rosetta, and an independent arm64 runtime audit.\n\n' +
                 'Toolchain and notarization submissions:\n```json\n' +
                 JSON.stringify(JSON.parse(downloaded.get('SIGNING-MANIFEST.json')), null, 2) +
-                '\n```\n\nChecksums:\n```text\n' + attestations['macos-15'].sha256sums + '\n```\n',
+                '\n```\n\nChecksums:\n```text\n' + attestations['arm64'].sha256sums + '\n```\n',
             });
             if (published.data.draft || !published.data.published_at)
               throw new Error('release did not become public');

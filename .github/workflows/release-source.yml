@@ -118,7 +118,7 @@ jobs:
         esac
         [[ "${TAG_PREFIX-v}" == v || "${GO_MODULES-[]}" == '[]' ]] || { echo 'Go modules require v-prefixed tags'; exit 1; }
         case "$TEST_RUNS_ON" in
-          ubuntu-latest|ubuntu-24.04|ubuntu-24.04-arm|macos-latest|macos-15|macos-15-intel|macos-26) ;;
+          ubuntu-latest|ubuntu-24.04|ubuntu-24.04-arm|xcode-27|xcode-27-xlarge|macos-latest|macos-15|macos-15-intel|macos-26) ;;
           *) echo 'test-runs-on must select a supported GitHub-hosted runner' >&2; exit 1 ;;
         esac
         [[ -z "$HOMEBREW_FORMULA" || "$SOURCE_ARCHIVES" == true ]] || { echo 'enable source-archives for Homebrew handoff'; exit 1; }
@@ -794,7 +794,7 @@ jobs:
     needs:
     - validate
     - tag
-    runs-on: "${{ inputs.test-runs-on }}"
+    runs-on: "${{ startsWith(inputs.test-runs-on, 'macos-') && 'xcode-27' || inputs.test-runs-on }}"
     permissions:
       contents: read
       actions: read

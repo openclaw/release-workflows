@@ -1,0 +1,6 @@
+# actionlint 1.7.12 predates the GA Xcode 27 image. Keep validation enabled and
+# register only the two new hosted labels until its built-in list catches up.
+self-hosted-runner:
+  labels:
+    - xcode-27
+    - xcode-27-xlarge

@@ -10,7 +10,7 @@ jobs:
   release-check:
     name: Release Check
     if: github.repository == 'openclaw/crabbox'
-    runs-on: macos-15
+    runs-on: xcode-27
     timeout-minutes: 45
 
     steps:

@@ -84,6 +84,7 @@ for (const helper of [false, true]) for (const linux of [false, true]) {
     tool('stat', 'wc -c < "${@: -1}"\n');
     tool('uname', 'echo arm64\n');
     tool('sw_vers', 'echo 26.0\n');
+    tool('arch', 'printf "%s\\n" "$*" >> "$ARCH_LOG"\nshift\nexec "$@"\n');
     tool('lipo', 'test -f "${@: -1}"\necho "arm64e arm64 x86_64"\n');
     tool('codesign', 'test -f "${@: -1}"\n');
     tool('file', 'echo "ELF 64-bit LSB executable, x86-64"\n');
@@ -95,6 +96,7 @@ for (const helper of [false, true]) for (const linux of [false, true]) {
       BINARY_NAME: 'fixture', BINARY_IDENTIFIER: 'org.fixture.cli',
       HELPER_NAME: helper ? 'helper.dylib' : '', HELPER_IDENTIFIER: helper ? 'org.fixture.helper' : '',
       CHECKSUM_FILENAME: 'SHA256SUMS', MACOS_ARCHIVE_NAME: 'fixture.zip', LINUX_ARCHIVE_NAME: 'fixture.tar.gz' };
+    env.ARCH_LOG = join(root, 'arch.log');
     writeFileSync(join(root, 'fixture/fixture'), '#!/bin/bash\nif [[ $1 == --version ]]; then echo 1.2.3; fi\n', { mode: 0o755 });
     if (helper) {
       writeFileSync(join(root, 'fixture/helper.dylib'), 'synthetic helper');
@@ -109,7 +111,13 @@ for (const helper of [false, true]) for (const linux of [false, true]) {
     assert.equal(inventory.payloads.length, linux ? 2 : 1);
     assert.equal(inventory.dryRun, true);
     shell(verify, root, env);
-    shell(verify, root, { ...env, EXPECTED_ARCH: 'x86_64' }, false);
+    for (const dir of ['macos', 'linux']) rmSync(join(root, 'release-assets', dir), { recursive: true, force: true });
+    shell(verify, root, { ...env, EXPECTED_ARCH: 'x86_64' });
+    const archLog = readFileSync(env.ARCH_LOG, 'utf8');
+    for (const arch of ['arm64', 'x86_64']) {
+      for (const flag of ['--version', '--help']) assert.ok(archLog.includes(`-${arch} ./macos/fixture ${flag}`));
+    }
+    assert.match(archLog, /-x86_64 \/usr\/bin\/true/);
     console.log(`PASS actual verifier shell: helper=${helper}, linux=${linux}`);
   } finally { rmSync(root, { recursive: true, force: true }); }
 }

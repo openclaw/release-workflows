@@ -24,7 +24,7 @@ jobs:
     with:
       version: ${{ inputs.version || github.ref_name }}
       dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
-      test-runs-on: macos-26
+      test-runs-on: xcode-27
       test-command: swift build -c release --jobs 2 && swift test --jobs 2
       source-archives: true
       # Existing unprefixed catalogs: tag-prefix: '' (also change the push filter)

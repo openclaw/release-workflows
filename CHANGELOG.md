@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.11.7 - 2026-10-18
+
+- Move all macOS release builds, signing, CI, and independent verification to the GA `xcode-27` runners; verify x86_64 with Rosetta, preserve caller deployment targets and legacy v1 runner inputs, and keep Sparkle's three attestations distinct by verifier identity.
+
 ## 1.11.6 - 2026-10-16
 
 - Add Swift CLI dry runs that sign, notarize, and independently verify current protected main without release writes, with optional helper dylib, Linux archive, and resource bundles; support macOS-only signed-tag callers and configurable macOS verification hosts.

@@ -26,8 +26,8 @@ for secret in ['MACOS_SIGNING_P12', 'MACOS_SIGNING_P12_PASSWORD', 'ASC_KEY_ID', 
     if f'secrets.{secret}' in verify:
         raise SystemExit(f'verify job references secret: {secret}')
 
-if 'macos-14' not in verify or 'macos-15-intel' not in verify:
-    raise SystemExit('verify matrix must cover arm64 and Intel macOS runners')
+if verify.count('runner: xcode-27') != 2 or 'arch -x86_64 /usr/bin/true' not in verify:
+    raise SystemExit('verify matrix must cover arm64 and Rosetta on xcode-27')
 
 if not re.search(r'permissions:\s*\n\s*actions: read\s*$', verify, re.MULTILINE):
     raise SystemExit('verify job must grant only actions: read')
@@ -77,7 +77,7 @@ build = workflow.split('\n  build:\n', 1)[1].split('\n  sign:\n', 1)[0]
 rebuild = workflow.split('\n  rebuild:\n', 1)[1].split('\n  compare:\n', 1)[0]
 compare = workflow.split('\n  compare:\n', 1)[1].split('\n  draft:\n', 1)[0]
 for required_build_control in [
-    "inputs.split-goreleaser-config != '' && 'macos-15'",
+    "inputs.split-goreleaser-config != '' && 'xcode-27'",
     'NFPM_MODE: ${{ inputs.nfpm }}',
     'nfpm-enabled:',
     'release --config=$config --clean --timeout 60m --parallelism=2 --release-notes=/dev/null --skip=',
@@ -358,7 +358,7 @@ for name, job in sparkle_jobs.items():
             raise SystemExit('Sparkle actions must have immutable SHA pins')
 if sparkle_jobs['tag']['needs'] != ['validate', 'sign', 'package']:
     raise SystemExit('Sparkle tag must wait for successful approval, signing and packaging')
-if [row['runner'] for row in sparkle_jobs['verify']['strategy']['matrix']['include']] != ['macos-15', 'macos-15-intel', 'macos-26']:
+if [row['runner'] for row in sparkle_jobs['verify']['strategy']['matrix']['include']] != ['xcode-27'] * 3:
     raise SystemExit('Sparkle requires all three independent verifier runners')
 if 'inputs.dry-run' not in sparkle_jobs['verify']['if'] or 'always()' not in sparkle_jobs['verify']['if']:
     raise SystemExit('Sparkle dry-run verification must survive the skipped draft job')

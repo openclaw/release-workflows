@@ -26,11 +26,11 @@ on:
       macos-runner:
         description: GitHub-hosted macOS build runner
         type: string
-        default: macos-15
+        default: xcode-27
       verify-arm64-runner:
         description: GitHub-hosted ARM verifier with a supported macOS version
         type: string
-        default: macos-14
+        default: xcode-27
       minimum-macos-version:
         description: Minimum macOS major version for native smoke execution (older hosts verify slices only)
         type: number
@@ -233,7 +233,8 @@ jobs:
           [[ "$HOMEBREW_TAP" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]+$ ]]
           [[ -z "$HOMEBREW_FORMULA" || "$HOMEBREW_FORMULA" =~ ^[A-Za-z0-9][A-Za-z0-9+_.@-]*$ ]]
           for runner in "$MACOS_RUNNER" "$VERIFY_ARM64_RUNNER"; do
-            [[ "$runner" =~ ^macos-(14|15|26)$ ]] || { echo "unsupported macOS runner" >&2; exit 1; }
+            # Preserve v1 caller inputs while routing legacy labels to the current image.
+            [[ "$runner" =~ ^(xcode-27(-xlarge)?|macos-(14|15|26))$ ]] || { echo "unsupported macOS runner" >&2; exit 1; }
           done
           [[ "$MINIMUM_MACOS_VERSION" =~ ^[0-9]+$ ]]
           [[ -n "$VERSION_FILE" || -n "$METADATA_CHECK_SCRIPT" ]] || { echo "version metadata validator required" >&2; exit 1; }
@@ -644,7 +645,9 @@ jobs:
     if: ${{ always() && needs.validate.result == 'success' && (needs.tag.result == 'success' || (inputs.dry_run && needs.tag.result == 'skipped')) }}
     name: 3a · Build universal Swift payload
     needs: [validate, tag]
-    runs-on: ${{ inputs.macos-runner }}
+    runs-on: ${{ inputs.macos-runner == 'xcode-27-xlarge' && 'xcode-27-xlarge' || 'xcode-27' }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ inputs.minimum-macos-version }}
     permissions:
       contents: read
     steps:
@@ -678,6 +681,31 @@ jobs:
           OUTPUT_DIR="$output" CODESIGN_IDENTITY=- "$MACOS_BUILD_SCRIPT"
           [[ -f "$output/$BINARY_NAME" && -x "$output/$BINARY_NAME" ]]
           [[ "$INCLUDE_HELPER" != true || -f "$output/$HELPER_NAME" ]]
+          OUTPUT_DIR="$output" python3 - <<'PY'
+          import os, re, subprocess
+          from pathlib import Path
+          limit = tuple(map(int, os.environ['MACOSX_DEPLOYMENT_TARGET'].split('.')))
+          limit = (limit + (0, 0))[:3]
+          files = [Path(os.environ['OUTPUT_DIR']) / os.environ['BINARY_NAME']]
+          if os.environ['INCLUDE_HELPER'] == 'true':
+              files.append(Path(os.environ['OUTPUT_DIR']) / os.environ['HELPER_NAME'])
+          for binary in files:
+              for arch in subprocess.check_output(['lipo', '-archs', str(binary)], text=True).split():
+                  load = subprocess.check_output(['otool', '-arch', arch, '-l', str(binary)], text=True)
+                  versions = []
+                  for command in re.split(r'Load command \d+', load):
+                      if re.search(r'cmd LC_VERSION_MIN_MACOSX\b', command):
+                          version = re.search(r'\bversion ([0-9.]+)', command)
+                      elif re.search(r'cmd LC_BUILD_VERSION\b', command) and re.search(r'platform (?:1|MACOS)\s', command):
+                          version = re.search(r'\bminos ([0-9.]+)', command)
+                      else:
+                          continue
+                      if version:
+                          value = tuple(map(int, version[1].split('.')))
+                          versions.append((value + (0, 0))[:3])
+                  if len(versions) != 1 or versions[0] > limit:
+                      raise SystemExit(f'{binary.name} ({arch}): missing or raised macOS deployment target: {versions}, limit {limit}')
+          PY
           [[ "$REQUIRE_RESOURCE_BUNDLES" != true || -n "$(find "$output" -maxdepth 1 -type d -name '*.bundle' -print -quit)" ]] || { echo "at least one resource bundle is required" >&2; exit 1; }
           [[ -z "$(find "$output" -type l -print -quit)" ]]
           if [[ -n "$ENTITLEMENTS_FILE" ]]; then cp "$ENTITLEMENTS_FILE" "$output/release.entitlements"; fi
@@ -744,7 +772,7 @@ jobs:
     if: ${{ always() && needs.validate.result == 'success' && needs.build-macos.result == 'success' && (needs.build-linux.result == 'success' || (!inputs.include-linux && needs.build-linux.result == 'skipped')) }}
     name: 3c · Sign, notarize, and freeze Swift assets
     needs: [validate, build-macos, build-linux]
-    runs-on: macos-15
+    runs-on: xcode-27
     permissions:
       actions: read
     outputs:
@@ -1017,9 +1045,9 @@ jobs:
       matrix:
         include:
           - arch: arm64
-            runner: ${{ inputs.verify-arm64-runner }}
+            runner: ${{ inputs.verify-arm64-runner == 'xcode-27-xlarge' && 'xcode-27-xlarge' || 'xcode-27' }}
           - arch: x86_64
-            runner: macos-15-intel
+            runner: xcode-27
     runs-on: ${{ matrix.runner }}
     permissions:
       actions: read
@@ -1048,7 +1076,13 @@ jobs:
           TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
         run: |
           set -euo pipefail
-          [[ "$(uname -m)" == "$EXPECTED_ARCH" ]]
+          [[ "$(uname -m)" == arm64 ]]
+          if [[ "$EXPECTED_ARCH" == x86_64 ]]; then
+            if ! arch -x86_64 /usr/bin/true; then
+              sudo softwareupdate --install-rosetta --agree-to-license
+            fi
+            arch -x86_64 /usr/bin/true
+          fi
           tar -xzf swift-release-assets.tar.gz
           cd release-assets
           shasum -a 256 -c "$CHECKSUM_FILENAME"
@@ -1081,8 +1115,8 @@ jobs:
           fi
           unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_RESULTS_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
           if (( $(sw_vers -productVersion | cut -d. -f1) >= MINIMUM_MACOS_VERSION )); then
-            "./$cli" --version | grep -F "${TAG#v}"
-            "./$cli" --help >/dev/null
+            arch "-$EXPECTED_ARCH" "./$cli" --version | grep -F "${TAG#v}"
+            arch "-$EXPECTED_ARCH" "./$cli" --help >/dev/null
           elif [[ "$EXPECTED_ARCH" == arm64 ]]; then
             echo "ARM verifier must support macOS $MINIMUM_MACOS_VERSION" >&2
             exit 1

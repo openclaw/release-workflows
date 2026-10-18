@@ -66,7 +66,8 @@ assert.match(sign, /ASSET-INVENTORY\.json/);
 
 assert.doesNotMatch(verify, /secrets\./);
 assert.match(verify, /permissions:\n      actions: read/);
-assert.match(verify, /macos-15-intel/);
+assert.match(verify, /runner: xcode-27/);
+assert.match(verify, /arch -x86_64 \/usr\/bin\/true/);
 assert.match(verify, /inputs.verify-arm64-runner/);
 assert.match(verify, /arm64e arm64 x86_64/);
 assert.match(verify, /ELF\.\*x86-64/);
