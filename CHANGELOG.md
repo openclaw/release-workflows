@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Remove target-side App credentials from ClawSweeper dispatch; use OIDC intake with independent webhook delivery and retryable transient failures.
+
 ## 1.11.8 - 2026-10-18
 
 - Trust only the exact Swift CLI Linux container checkout before dependency preparation so Git ownership checks do not block the release lockfile check.
