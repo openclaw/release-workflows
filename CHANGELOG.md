@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.11.8 - 2026-10-18
+
+- Trust only the exact Swift CLI Linux container checkout before dependency preparation so Git ownership checks do not block the release lockfile check.
+
 ## 1.11.7 - 2026-10-18
 
 - Move all macOS release builds, signing, CI, and independent verification to the GA `xcode-27` runners; verify x86_64 with Rosetta, preserve caller deployment targets and legacy v1 runner inputs, and keep Sparkle's three attestations distinct by verifier identity.

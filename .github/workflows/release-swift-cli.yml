@@ -742,6 +742,7 @@ jobs:
           PREPARE_SCRIPT: ${{ inputs.prepare-script }}
         run: |
           set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           apt-get update
           apt-get install -y --no-install-recommends python3 file
           if [[ -n "$GENERATE_VERSION_SCRIPT" ]]; then "$GENERATE_VERSION_SCRIPT"; fi

@@ -29,6 +29,7 @@ node scripts/test-checksum-collisions.mjs
 node scripts/test-build-artifact-matrix.mjs
 node scripts/test-split-host-build.mjs
 node scripts/test-swift-cli-workflow.mjs
+node scripts/test-swift-linux-git-ownership.mjs
 node scripts/test-swift-cli-options.mjs
 node scripts/test-swift-keychain-lifecycle.mjs
 node scripts/test-swift-draft-isolation.mjs
