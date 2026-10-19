@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Support one caller-generated source release asset, optionally consuming a qualified same-run artifact, through the existing read-only build, immutable artifact transport and independent checksum verification. Preserve source-only defaults and leave package qualification and Homebrew activation with callers.
+
 ## 1.11.8 - 2026-10-18
 
 - Trust only the exact Swift CLI Linux container checkout before dependency preparation so Git ownership checks do not block the release lockfile check.

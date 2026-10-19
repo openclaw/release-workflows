@@ -47,6 +47,16 @@ name: Release source
         required: false
         default: ''
         type: string
+      generated-asset:
+        description: Optional single release filename written by test-command to RELEASE_ASSET_PATH
+        required: false
+        default: ''
+        type: string
+      generated-input-artifact-id:
+        description: Optional same-run artifact consumed by test-command through RELEASE_ASSET_INPUT_DIR
+        required: false
+        default: ''
+        type: string
       homebrew-tap:
         description: Optional tap owner/repo
         required: false
@@ -110,6 +120,8 @@ jobs:
         GO_MODULES: "${{ inputs.go-modules }}"
         HOMEBREW_TAP: "${{ inputs.homebrew-tap }}"
         HOMEBREW_FORMULA: "${{ inputs.homebrew-formula }}"
+        GENERATED_ASSET: "${{ inputs.generated-asset }}"
+        GENERATED_INPUT_ARTIFACT_ID: "${{ inputs.generated-input-artifact-id }}"
       run: |
         set -euo pipefail
         case "${TAG_PREFIX-v}" in
@@ -127,9 +139,14 @@ jobs:
         [[ "$HOMEBREW_TAP" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || exit 1
         [[ -z "$HOMEBREW_FORMULA" || "$HOMEBREW_FORMULA" =~ ^[A-Za-z0-9][A-Za-z0-9+_.@-]*$ ]] || exit 1
         python3 - "$v" <<'SEMVER'
-        import sys
+        import os, re, sys
         pre=sys.argv[1].partition('-')[2]
         if any(x.isdigit() and len(x)>1 and x.startswith('0') for x in pre.split('.')): raise SystemExit('numeric prerelease identifiers cannot have leading zeros')
+        name=os.environ.get('GENERATED_ASSET', '')
+        reserved={'asset-inventory.json','sha256sums','release-notes.md','tests-passed','package-plan.json',f'source-{sys.argv[1]}.tar.gz'.lower(),f'source-{sys.argv[1]}.zip'.lower()}
+        if name and (not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]',name) or name.lower() in reserved): raise SystemExit('generated-asset must be a safe, non-reserved release filename')
+        artifact_id=os.environ.get('GENERATED_INPUT_ARTIFACT_ID','')
+        if artifact_id and (not name or not re.fullmatch(r'[1-9][0-9]*',artifact_id) or int(artifact_id)>9007199254740991): raise SystemExit('generated-input-artifact-id requires generated-asset and one positive safe integer')
         SEMVER
         printf 'release-version=%s\ntag=%s%s\n' "$v" "${TAG_PREFIX-v}" "$v" >> "$GITHUB_OUTPUT"
     - name: Resolve protected release target
@@ -807,15 +824,48 @@ jobs:
       with:
         ref: "${{ needs.validate.outputs.target-sha }}"
         persist-credentials: false
+    - name: Prepare isolated generated input
+      if: inputs.generated-input-artifact-id != ''
+      run: mkdir "$RUNNER_TEMP/generated-input"
+    - name: Download generated input from this run
+      if: inputs.generated-input-artifact-id != ''
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        path: "${{ runner.temp }}/generated-input"
+        artifact-ids: "${{ inputs.generated-input-artifact-id }}"
+        digest-mismatch: error
     - name: Run caller tests without write credentials
       env:
         TEST_COMMAND: "${{ inputs.test-command }}"
+        GENERATED_ASSET: "${{ inputs.generated-asset }}"
+        GENERATED_INPUT_ARTIFACT_ID: "${{ inputs.generated-input-artifact-id }}"
       run: |-
         set -euo pipefail
         unset NODE_AUTH_TOKEN NPM_TOKEN GH_TOKEN GITHUB_TOKEN
+        unset RELEASE_ASSET_PATH RELEASE_ASSET_INPUT_DIR
+        if [[ -n "${GENERATED_INPUT_ARTIFACT_ID:-}" ]]; then
+          node -e 'const fs=require("node:fs"),path=require("node:path"); if(!fs.lstatSync(path.join(process.env.RUNNER_TEMP,"generated-input")).isDirectory()) throw new Error("generated input must be a real directory")'
+          export RELEASE_ASSET_INPUT_DIR="$RUNNER_TEMP/generated-input"
+        fi
+        if [[ -n "${GENERATED_ASSET:-}" ]]; then
+          mkdir "$RUNNER_TEMP/generated"
+          export RELEASE_ASSET_PATH="$RUNNER_TEMP/generated/$GENERATED_ASSET"
+        fi
         bash -e -o pipefail -c "$TEST_COMMAND"
         mkdir "$RUNNER_TEMP/raw"
         echo verified > "$RUNNER_TEMP/raw/tests-passed"
+        if [[ -n "${GENERATED_ASSET:-}" ]]; then
+          node <<'JS'
+        const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+        const dir=path.join(process.env.RUNNER_TEMP,'generated'),name=process.env.GENERATED_ASSET;
+        // Inspect before upload: artifact transport omits hidden files and normalizes modes.
+        assert.ok(fs.lstatSync(dir).isDirectory(),'generated output must remain a real directory');
+        assert.deepEqual(fs.readdirSync(dir),[name],'generated output must contain only the requested asset');
+        const file=path.join(dir,name),stat=fs.lstatSync(file);
+        assert.ok(stat.isFile() && stat.size>0 && stat.size<2**31,'generated asset must be a nonempty regular file under 2 GiB');
+        fs.copyFileSync(file,path.join(process.env.RUNNER_TEMP,'raw',name),fs.constants.COPYFILE_EXCL);
+        JS
+        fi
     - id: artifact
       run: echo "name=source-raw-${{ needs.validate.outputs.tag }}-${{ github.run_id
         }}-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
@@ -855,6 +905,31 @@ jobs:
         set -euo pipefail
         gh api "repos/$GITHUB_REPOSITORY/tarball/$TARGET_SHA" > "$RUNNER_TEMP/payload/source-$RELEASE_VERSION.tar.gz"
         gh api "repos/$GITHUB_REPOSITORY/zipball/$TARGET_SHA" > "$RUNNER_TEMP/payload/source-$RELEASE_VERSION.zip"
+    - name: Download generated asset from this build
+      if: inputs.generated-asset != ''
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        path: "${{ runner.temp }}/generated-raw"
+        artifact-ids: "${{ needs.build.outputs.artifact-id }}"
+        digest-mismatch: error
+    - name: Accept only the requested generated asset
+      if: inputs.generated-asset != ''
+      env:
+        GENERATED_ASSET: "${{ inputs.generated-asset }}"
+      run: |
+        node <<'JS'
+        const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+        const dir=path.join(process.env.RUNNER_TEMP,'generated-raw'),name=process.env.GENERATED_ASSET;
+        assert.ok(fs.lstatSync(dir).isDirectory(),'raw output must be a real directory');
+        assert.deepEqual(fs.readdirSync(dir).sort(),[name,'tests-passed'].sort(),'unexpected raw asset set');
+        const marker=path.join(dir,'tests-passed');
+        assert.ok(fs.lstatSync(marker).isFile(),'test marker must be a regular file');
+        assert.equal(fs.readFileSync(marker,'utf8'),'verified\n','test marker must record success');
+        const file=path.join(dir,name),stat=fs.lstatSync(file),payload=path.join(process.env.RUNNER_TEMP,'payload');
+        assert.ok(stat.isFile() && stat.size>0 && stat.size<2**31,'generated asset must be a nonempty regular file under 2 GiB');
+        assert.ok(!fs.readdirSync(payload).some(existing=>existing.toLowerCase()===name.toLowerCase()),'generated asset collides with release payload');
+        fs.copyFileSync(file,path.join(payload,name),fs.constants.COPYFILE_EXCL);
+        JS
     - name: Freeze inventory and checksums
       env:
         TAG: "${{ needs.validate.outputs.tag }}"
@@ -862,10 +937,14 @@ jobs:
         RELEASE_VERSION: "${{ needs.validate.outputs.release-version }}"
         EXPECTED_TAG_OBJECT: "${{ needs.tag.outputs.tag-object-sha }}"
         PAYLOAD: "${{ runner.temp }}/payload"
+        GENERATED_ASSET: "${{ inputs.generated-asset }}"
+        SOURCE_ARCHIVES: "${{ inputs.source-archives }}"
       run: |-
         node <<'JS'
-        const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+        const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),assert=require('node:assert/strict');
         const dir=process.env.PAYLOAD;
+        const expected=['RELEASE-NOTES.md',...(process.env.SOURCE_ARCHIVES==='true'?[`source-${process.env.RELEASE_VERSION}.tar.gz`,`source-${process.env.RELEASE_VERSION}.zip`]:[]),...(process.env.GENERATED_ASSET?[process.env.GENERATED_ASSET]:[])].sort();
+        assert.deepEqual(fs.readdirSync(dir).sort(),expected,'unexpected release asset set');
         const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
         const assets=fs.readdirSync(dir).sort().map(name=>{
           if(!/^[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]$/.test(name) || !fs.lstatSync(path.join(dir,name)).isFile()) throw new Error('unsafe asset');
@@ -908,6 +987,8 @@ jobs:
         TARGET_SHA: "${{ needs.validate.outputs.target-sha }}"
         RELEASE_VERSION: "${{ needs.validate.outputs.release-version }}"
         PAYLOAD: "${{ runner.temp }}/payload"
+        GENERATED_ASSET: "${{ inputs.generated-asset }}"
+        SOURCE_ARCHIVES: "${{ inputs.source-archives }}"
       run: |
         node <<'JS'
         const fs=require('node:fs'), path=require('node:path'), crypto=require('node:crypto'), assert=require('node:assert/strict');
@@ -916,12 +997,15 @@ jobs:
         const inventoryBytes=fs.readFileSync(path.join(dir,'ASSET-INVENTORY.json'));
         const inv=JSON.parse(inventoryBytes);
         assert.equal(inv.repository,process.env.GITHUB_REPOSITORY); assert.equal(inv.commit,process.env.TARGET_SHA); assert.equal(inv.tag,process.env.TAG);
+        const expected=['RELEASE-NOTES.md',...(process.env.SOURCE_ARCHIVES==='true'?[`source-${process.env.RELEASE_VERSION}.tar.gz`,`source-${process.env.RELEASE_VERSION}.zip`]:[]),...(process.env.GENERATED_ASSET?[process.env.GENERATED_ASSET]:[])].sort();
+        assert.deepEqual(inv.assets.map(a=>a.name).sort(),expected,'unexpected release asset set');
         assert.deepEqual(fs.readdirSync(dir).sort(),[...inv.assets.map(a=>a.name),'ASSET-INVENTORY.json','SHA256SUMS'].sort());
         assert.equal(new Set(inv.assets.map(a=>a.name.toLowerCase())).size,inv.assets.length);
         for (const a of inv.assets) {
           assert.match(a.name,/^[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]$/);
           const p=path.join(dir,a.name); assert.ok(fs.lstatSync(p).isFile());
           const b=fs.readFileSync(p); assert.equal(b.length,a.size); assert.equal(hash(b),a.sha256);
+          if(a.name===process.env.GENERATED_ASSET) assert.ok(b.length>0 && b.length<2**31,'invalid generated asset size');
         }
         const sums=fs.readFileSync(path.join(dir,'SHA256SUMS'),'utf8');
         assert.equal(sums,inv.assets.map(a=>a.sha256+'  '+a.name+'\n').join('')+hash(inventoryBytes)+'  ASSET-INVENTORY.json\n');
@@ -1252,6 +1336,8 @@ jobs:
         TARGET_SHA: "${{ needs.validate.outputs.target-sha }}"
         RELEASE_VERSION: "${{ needs.validate.outputs.release-version }}"
         PAYLOAD: "${{ runner.temp }}/payload"
+        GENERATED_ASSET: "${{ inputs.generated-asset }}"
+        SOURCE_ARCHIVES: "${{ inputs.source-archives }}"
       run: |
         node <<'JS'
         const fs=require('node:fs'), path=require('node:path'), crypto=require('node:crypto'), assert=require('node:assert/strict');
@@ -1260,12 +1346,15 @@ jobs:
         const inventoryBytes=fs.readFileSync(path.join(dir,'ASSET-INVENTORY.json'));
         const inv=JSON.parse(inventoryBytes);
         assert.equal(inv.repository,process.env.GITHUB_REPOSITORY); assert.equal(inv.commit,process.env.TARGET_SHA); assert.equal(inv.tag,process.env.TAG);
+        const expected=['RELEASE-NOTES.md',...(process.env.SOURCE_ARCHIVES==='true'?[`source-${process.env.RELEASE_VERSION}.tar.gz`,`source-${process.env.RELEASE_VERSION}.zip`]:[]),...(process.env.GENERATED_ASSET?[process.env.GENERATED_ASSET]:[])].sort();
+        assert.deepEqual(inv.assets.map(a=>a.name).sort(),expected,'unexpected release asset set');
         assert.deepEqual(fs.readdirSync(dir).sort(),[...inv.assets.map(a=>a.name),'ASSET-INVENTORY.json','SHA256SUMS'].sort());
         assert.equal(new Set(inv.assets.map(a=>a.name.toLowerCase())).size,inv.assets.length);
         for (const a of inv.assets) {
           assert.match(a.name,/^[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]$/);
           const p=path.join(dir,a.name); assert.ok(fs.lstatSync(p).isFile());
           const b=fs.readFileSync(p); assert.equal(b.length,a.size); assert.equal(hash(b),a.sha256);
+          if(a.name===process.env.GENERATED_ASSET) assert.ok(b.length>0 && b.length<2**31,'invalid generated asset size');
         }
         const sums=fs.readFileSync(path.join(dir,'SHA256SUMS'),'utf8');
         assert.equal(sums,inv.assets.map(a=>a.sha256+'  '+a.name+'\n').join('')+hash(inventoryBytes)+'  ASSET-INVENTORY.json\n');

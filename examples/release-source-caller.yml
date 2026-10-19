@@ -27,6 +27,11 @@ jobs:
       test-runs-on: xcode-27
       test-command: swift build -c release --jobs 2 && swift test --jobs 2
       source-archives: true
+      # Optional: test-command writes one file to RELEASE_ASSET_PATH.
+      # generated-asset: local-package-envelope.tar.gz
+      # To consume qualified same-run input, depend on its producer and consumers:
+      # generated-input-artifact-id: ${{ needs.producer.outputs.artifact-id }}
+      # Validate RELEASE_ASSET_INPUT_DIR against the frozen checkout before wrapping.
       # Existing unprefixed catalogs: tag-prefix: '' (also change the push filter)
       # Optional branded title: release-name: Example Library
       # Go libraries: test-command: go test ./... and go-modules: '["."]'
