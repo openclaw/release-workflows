@@ -35,4 +35,7 @@ jobs:
       version: ${{ inputs.version }}
       dry_run: true
       source-archives: true
-      test-command: bash -n scripts/validate-workflows.sh
+      generated-asset: source-fixture.tar.gz
+      test-command: |
+        bash -n scripts/validate-workflows.sh
+        tar -czf "$RELEASE_ASSET_PATH" README.md
