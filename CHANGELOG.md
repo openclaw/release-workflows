@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Update Node setup to v7.1.0, artifact upload/download to v7.0.2/v8.0.2, and the GoReleaser action to v7.3.0; retain immutable pins and gain artifact rate-limit retries and current transitive fixes.
 - Support one caller-generated source release asset, optionally consuming a qualified same-run artifact, through the existing read-only build, immutable artifact transport and independent checksum verification. Preserve source-only defaults and leave package qualification and Homebrew activation with callers; thanks @vincentkoc.
 - Remove target-side App credentials from ClawSweeper dispatch; use OIDC intake with independent webhook delivery and retryable transient failures.
 

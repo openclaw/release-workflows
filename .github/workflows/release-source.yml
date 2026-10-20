@@ -388,7 +388,7 @@ jobs:
         done
         echo "release-notes-artifact-name=source-notes-$RELEASE_VERSION-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
     - name: Upload frozen release notes
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: "${{ steps.metadata.outputs.release-notes-artifact-name }}"
         path: "${{ runner.temp }}/RELEASE-NOTES.md"
@@ -829,7 +829,7 @@ jobs:
       run: mkdir "$RUNNER_TEMP/generated-input"
     - name: Download generated input from this run
       if: inputs.generated-input-artifact-id != ''
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         path: "${{ runner.temp }}/generated-input"
         artifact-ids: "${{ inputs.generated-input-artifact-id }}"
@@ -869,7 +869,7 @@ jobs:
     - id: artifact
       run: echo "name=source-raw-${{ needs.validate.outputs.tag }}-${{ github.run_id
         }}-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
-    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: "${{ steps.artifact.outputs.name }}"
         path: "${{ runner.temp }}/raw"
@@ -890,7 +890,7 @@ jobs:
       artifact-id: "${{ steps.payload-upload.outputs.artifact-id }}"
       artifact-digest: "${{ steps.payload-upload.outputs.artifact-digest }}"
     steps:
-    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         path: "${{ runner.temp }}/payload"
         artifact-ids: "${{ needs.validate.outputs.metadata-id }}"
@@ -907,7 +907,7 @@ jobs:
         gh api "repos/$GITHUB_REPOSITORY/zipball/$TARGET_SHA" > "$RUNNER_TEMP/payload/source-$RELEASE_VERSION.zip"
     - name: Download generated asset from this build
       if: inputs.generated-asset != ''
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         path: "${{ runner.temp }}/generated-raw"
         artifact-ids: "${{ needs.build.outputs.artifact-id }}"
@@ -957,7 +957,7 @@ jobs:
     - id: artifact
       run: echo "name=source-payload-${{ needs.validate.outputs.tag }}-${{ github.run_id
         }}-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
-    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: "${{ steps.artifact.outputs.name }}"
         path: "${{ runner.temp }}/payload"
@@ -972,12 +972,12 @@ jobs:
     permissions:
       actions: read
     steps:
-    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         path: "${{ runner.temp }}/payload"
         artifact-ids: "${{ needs.assemble.outputs.artifact-id }}"
         merge-multiple: true
-    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
       with:
         node-version: '24'
         package-manager-cache: false
@@ -1018,7 +1018,7 @@ jobs:
         cp "$RUNNER_TEMP/payload/ASSET-INVENTORY.json" "$RUNNER_TEMP/payload/SHA256SUMS" "$RUNNER_TEMP/attestation/"
         printf '%s\n' "$PAYLOAD_ARTIFACT" > "$RUNNER_TEMP/attestation/payload-artifact"
         printf 'verified\n' > "$RUNNER_TEMP/attestation/verdict"
-    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: verified-ubuntu-latest-${{ needs.assemble.outputs.artifact-name }}
         path: "${{ runner.temp }}/attestation"
@@ -1044,17 +1044,17 @@ jobs:
     outputs:
       release-url: "${{ steps.release.outputs.release-url }}"
     steps:
-    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         path: "${{ runner.temp }}/payload"
         artifact-ids: "${{ needs.assemble.outputs.artifact-id }}"
         merge-multiple: true
-    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         path: "${{ runner.temp }}/verified-ubuntu-latest"
         artifact-ids: "${{ needs.verify.outputs.artifact-id }}"
         merge-multiple: true
-    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         path: "${{ runner.temp }}/verified-ubuntu-24.04-arm"
         artifact-ids: "${{ needs.verify-arm.outputs.artifact-id }}"
@@ -1203,7 +1203,7 @@ jobs:
     permissions:
       actions: read
     steps:
-    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         path: "${{ runner.temp }}/payload"
         artifact-ids: "${{ needs.assemble.outputs.artifact-id }}"
@@ -1321,12 +1321,12 @@ jobs:
     permissions:
       actions: read
     steps:
-    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         path: "${{ runner.temp }}/payload"
         artifact-ids: "${{ needs.assemble.outputs.artifact-id }}"
         merge-multiple: true
-    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
       with:
         node-version: '24'
         package-manager-cache: false
@@ -1367,7 +1367,7 @@ jobs:
         cp "$RUNNER_TEMP/payload/ASSET-INVENTORY.json" "$RUNNER_TEMP/payload/SHA256SUMS" "$RUNNER_TEMP/attestation/"
         printf '%s\n' "$PAYLOAD_ARTIFACT" > "$RUNNER_TEMP/attestation/payload-artifact"
         printf 'verified\n' > "$RUNNER_TEMP/attestation/verdict"
-    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: verified-ubuntu-24.04-arm-${{ needs.assemble.outputs.artifact-name }}
         path: "${{ runner.temp }}/attestation"

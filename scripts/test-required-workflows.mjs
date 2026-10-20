@@ -19,7 +19,7 @@ assert.match(workflow, /test "\$GITHUB_REPOSITORY" = openclaw\/crabbox/);
 assert.match(workflow, /test "\$GITHUB_BASE_REF" = main/);
 assert.match(workflow, /test "\$\(git rev-parse HEAD\)" = "\$GITHUB_SHA"/);
 assert.match(workflow, /actions\/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e/);
-assert.match(workflow, /goreleaser\/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94/);
+assert.match(workflow, /goreleaser\/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de/);
 assert.match(workflow, /release --snapshot --clean --skip=publish --parallelism 1/);
 assert.match(workflow, /crabbox-apple-vm-helper/);
 assert.match(workflow, /"embedded":true/);
