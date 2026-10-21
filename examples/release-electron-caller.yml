@@ -22,7 +22,7 @@ jobs:
     with:
       version: ${{ inputs.version }}
       repository-type: openclaw
-      node-version: '26'
+      node-version: '26.12.1'
       pnpm-version: '11.28.5'
       desktop-package: '@clickclack/desktop'
       desktop-directory: apps/desktop
