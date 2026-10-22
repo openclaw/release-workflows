@@ -48,7 +48,7 @@ Configure trust **right before the first release**: an unused trusted-publisher 
 | --- | --- |
 | `version` | Release SemVer, optionally prefixed by `v`; every package has this exact version. |
 | `dry_run` | Defaults to `true`; validates, builds, packs, installs, and smoke-tests without creating tags or publishing. Callers explicitly pass false for tag pushes. |
-| `node-version` | Build and smoke Node version; defaults to `24`. OIDC publication and provenance verification use Node 24 and its modern npm CLI. |
+| `node-version` | Build and smoke Node version; defaults to `24.22.1`. OIDC publication and provenance verification use Node 24 and its modern npm CLI. |
 | `package-manager` / `package-manager-version` | `npm`, `pnpm`, or `bun`; pnpm and bun require an exact manager version. |
 | `package-dirs` | JSON array, default `["."]`; dependency-first order, unique names and archive filenames, no symlinked directories. |
 | `install-command` | Optional install override. Defaults to `npm ci`, `pnpm install --frozen-lockfile`, or `bun install --frozen-lockfile`. |
