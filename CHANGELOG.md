@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Publish Electron and Swift releases with `prerelease` set from a hyphen in the tag, on draft create and again when the draft is published, so a beta tag does not become the stable latest release.
+
 ## 1.12.0 - 2026-10-20
 
 **Highlights:** Verified generated source assets, more resilient artifact transfers, and keyless ClawSweeper dispatch.

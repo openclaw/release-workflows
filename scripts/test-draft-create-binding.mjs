@@ -91,6 +91,7 @@ for (const archetype of ['electron', 'swift-cli', 'sparkle-app']) {
     const created = result.state[1];
     assert.equal(created.tag_name, 'v1.2.3');
     assert.equal(created.draft, true);
+    assert.equal(created.prerelease, false);
     assert.equal(created.body, 'frozen RELEASE-NOTES.md\r\n');
     assert.deepEqual(created.assets, Object.fromEntries(names.map((name) => [name, Buffer.from(`frozen ${name}\r\n`).toString('base64')])));
   });
@@ -107,9 +108,11 @@ for (const archetype of ['electron', 'swift-cli', 'sparkle-app']) {
 }
 
 
-test('sparkle-app: beta drafts are explicitly prereleases', () => {
-  const result = runDraft('sparkle-app', 'prerelease');
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.state[1].tag_name, 'v1.2.3-beta.1');
-  assert.equal(result.state[1].prerelease, true);
-});
+for (const archetype of ['electron', 'swift-cli', 'sparkle-app']) {
+  test(`${archetype}: beta drafts are explicitly prereleases`, () => {
+    const result = runDraft(archetype, 'prerelease');
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.state[1].tag_name, 'v1.2.3-beta.1');
+    assert.equal(result.state[1].prerelease, true);
+  });
+}

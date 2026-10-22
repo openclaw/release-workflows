@@ -1020,7 +1020,7 @@ jobs:
           mapfile -t assets < <(find release-assets -maxdepth 1 -type f -print | LC_ALL=C sort)
           (( ${#assets[@]} >= 5 ))
           gh api "repos/${GH_REPO}/git/ref/tags/${TAG}" >/dev/null
-          payload=$(jq -n --arg tag "$TAG" --rawfile notes release-assets/RELEASE-NOTES.md '{tag_name:$tag, name:$tag, draft:true, body:$notes}')
+          payload=$(jq -n --arg tag "$TAG" --rawfile notes release-assets/RELEASE-NOTES.md '{tag_name:$tag, name:$tag, draft:true, prerelease:($tag|contains("-")), body:$notes}')
           created=$(gh api --method POST --input - "repos/${GH_REPO}/releases" <<<"$payload")
           release_id=$(jq -r .id <<<"$created")
           upload_base=$(jq -r .upload_url <<<"$created")
@@ -1282,6 +1282,7 @@ jobs:
               ...context.repo,
               release_id: releaseId,
               draft: false,
+              prerelease: process.env.TAG.includes('-'),
               body: attestations.arm64.releaseNotes,
             });
             if (published.data.draft || !published.data.published_at)
