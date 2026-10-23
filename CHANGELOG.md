@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.12.1 - 2026-10-23
+
+**Highlights:** Security-patched Node runtimes and refreshed Go snapshot CI.
+
 - Pin Node runtime defaults and verification jobs to security-patched releases and update snapshot CI to Go 1.27.3; thanks @joshavant.
 
 ## 1.12.0 - 2026-10-20
