@@ -25,7 +25,7 @@ jobs:
     with:
       version: ${{ inputs.version || github.ref_name }}
       dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
-      node-version: '24'
+      node-version: '24.22.1'
       package-manager: pnpm
       package-manager-version: '11.28.5'
       package-dirs: '["packages/core","packages/cli"]'
