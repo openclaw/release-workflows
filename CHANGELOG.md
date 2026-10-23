@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Pin Node runtime defaults and verification jobs to security-patched releases and update snapshot CI to Go 1.27.3; thanks @joshavant.
+
 ## 1.12.0 - 2026-10-20
 
 **Highlights:** Verified generated source assets, more resilient artifact transfers, and keyless ClawSweeper dispatch.
