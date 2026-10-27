@@ -27,6 +27,11 @@ name: Release source
         required: false
         default: false
         type: boolean
+      require-current-signer:
+        description: Recheck the tag signer against protected default-branch policy before each release write
+        required: false
+        default: false
+        type: boolean
       strict-checks:
         description: Require all independent CI signals
         required: false
@@ -113,6 +118,8 @@ jobs:
     - name: Validate inputs
       id: inputs
       env:
+        REQUIRE_SIGNED_TAG: "${{ inputs.require-signed-tag }}"
+        REQUIRE_CURRENT_SIGNER: "${{ inputs.require-current-signer }}"
         TEST_RUNS_ON: "${{ inputs.test-runs-on }}"
         SOURCE_ARCHIVES: "${{ inputs.source-archives }}"
         VERSION: "${{ inputs.version }}"
@@ -124,6 +131,7 @@ jobs:
         GENERATED_INPUT_ARTIFACT_ID: "${{ inputs.generated-input-artifact-id }}"
       run: |
         set -euo pipefail
+        [[ "${REQUIRE_CURRENT_SIGNER:-false}" != true || "${REQUIRE_SIGNED_TAG:-false}" == true ]] || { echo 'require-current-signer requires require-signed-tag' >&2; exit 1; }
         case "${TAG_PREFIX-v}" in
           v|'') ;;
           *) echo 'tag-prefix must be v or empty' >&2; exit 1 ;;
@@ -1077,6 +1085,7 @@ jobs:
       id: release
       uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
       env:
+        REQUIRE_CURRENT_SIGNER: "${{ inputs.require-current-signer }}"
         TAG: "${{ needs.validate.outputs.tag }}"
         TARGET_SHA: "${{ needs.validate.outputs.target-sha }}"
         RELEASE_VERSION: "${{ needs.validate.outputs.release-version }}"
@@ -1084,12 +1093,85 @@ jobs:
         EXPECTED_TAG_OBJECT: "${{ needs.tag.outputs.tag-object-sha }}"
         PAYLOAD: "${{ runner.temp }}/payload"
       with:
+        retries: 0
         script: |
-          const ref = await github.rest.git.getRef({...context.repo, ref: 'tags/' + process.env.TAG});
-          if (ref.data.object.type !== 'tag' || ref.data.object.sha !== process.env.EXPECTED_TAG_OBJECT) throw new Error('frozen tag object changed');
-          const tag = await github.rest.git.getTag({...context.repo, tag_sha: ref.data.object.sha});
-          if (tag.data.object.type !== 'commit' || tag.data.object.sha !== process.env.TARGET_SHA) throw new Error('frozen tag target changed');
           const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+          const assertFrozenTag = async () => {
+            const ref = (await github.rest.git.getRef({...context.repo, ref: 'tags/'+process.env.TAG})).data;
+            if (ref.object.type !== 'tag' || ref.object.sha !== process.env.EXPECTED_TAG_OBJECT) throw new Error('frozen tag object changed before release write');
+            return ref;
+          };
+          const ref = await assertFrozenTag();
+          const tag = await github.rest.git.getTag({...context.repo, tag_sha: ref.object.sha});
+          if (tag.data.object.type !== 'commit' || tag.data.object.sha !== process.env.TARGET_SHA) throw new Error('frozen tag target changed');
+          const assertCurrentSigner = async () => {
+            if (process.env.REQUIRE_CURRENT_SIGNER !== 'true') return;
+            // Re-read policy for every write, including publisher-only retries. A frozen
+            // tag proves historical approval; only current policy can revoke that signer.
+            const repository = (await github.rest.repos.get(context.repo)).data;
+            const branchName = repository.default_branch;
+            assert.ok(typeof branchName === 'string' && branchName.length > 0, 'missing default branch');
+            const branch = (await github.rest.repos.getBranch({...context.repo, branch: branchName})).data;
+            assert.equal(branch.protected, true, 'current signer policy branch must be protected');
+            const head = branch.commit.sha;
+            assert.match(head, /^[0-9a-f]{40}$/);
+            const commit = (await github.rest.git.getCommit({...context.repo, commit_sha: head})).data;
+            assert.equal(commit.sha, head);
+            const entry = async (treeSha, name) => {
+              assert.match(treeSha, /^[0-9a-f]{40}$/);
+              // Do not use Contents: it follows symlinks. Omit recursive entirely.
+              const tree = (await github.rest.git.getTree({...context.repo, tree_sha: treeSha})).data;
+              assert.equal(tree.sha, treeSha);
+              assert.equal(tree.truncated, false, 'current signer policy tree is truncated');
+              const matches = tree.tree.filter(item => item.path === name);
+              assert.equal(matches.length, 1, 'missing or ambiguous current signer policy path: '+name);
+              return matches[0];
+            };
+            const directory = await entry(commit.tree.sha, '.github');
+            assert.equal(directory.type, 'tree');assert.equal(directory.mode, '040000');
+            const policy = await entry(directory.sha, 'release-allowed-signers');
+            assert.equal(policy.type, 'blob');
+            assert.ok(['100644', '100755'].includes(policy.mode), 'current signer policy must be a regular file');
+            assert.ok(Number.isSafeInteger(policy.size) && policy.size > 0 && policy.size <= 65536, 'current signer policy must be nonempty and at most 64 KiB');
+            assert.match(policy.sha, /^[0-9a-f]{40}$/);
+            const blob = (await github.rest.git.getBlob({...context.repo, file_sha: policy.sha})).data;
+            assert.equal(blob.sha, policy.sha);assert.equal(blob.encoding, 'base64');
+            assert.ok(typeof blob.content === 'string' && blob.content.length <= 131072, 'invalid current signer policy bytes');
+            const policyBytes = Buffer.from(blob.content, 'base64');
+            assert.equal(blob.size, policy.size);assert.equal(policyBytes.length, policy.size);
+            const objectHash = (type, bytes) => require('node:crypto').createHash('sha1').update(type+' '+bytes.length+'\0').update(bytes).digest('hex');
+            assert.equal(objectHash('blob', policyBytes), policy.sha, 'current signer policy blob hash differs');
+            assert.ok(policyBytes.toString('utf8').trim().length > 0, 'current signer policy is empty');
+            const {payload, signature} = tag.data.verification ?? {};
+            assert.ok(typeof payload === 'string' && Buffer.byteLength(payload) <= 1048576, 'missing or oversized signed tag payload');
+            assert.ok(typeof signature === 'string' && signature.startsWith('-----BEGIN SSH SIGNATURE-----\n') && Buffer.byteLength(signature) <= 65536, 'tag must have an SSH signature');
+            const rawTag = Buffer.from(payload+signature);
+            assert.equal(objectHash('tag', rawTag), process.env.EXPECTED_TAG_OBJECT, 'signed tag bytes differ from frozen object');
+            // Native Git owns SSH signature semantics. This object-only bare repository
+            // never checks out caller source or inherits signing/configuration credentials.
+            const temp = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'release-signer-'));
+            try {
+              const git = (args, input) => require('node:child_process').execFileSync('git', args, {
+                cwd: temp, input, encoding: 'utf8', timeout: 10000, maxBuffer: 1048576,
+                env: {PATH: process.env.PATH, HOME: temp, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null'},
+                stdio: ['pipe', 'pipe', 'pipe'],
+              });
+              git(['init', '--bare', '--template=', '--object-format=sha1', '.']);
+              const policyPath = path.join(temp, 'allowed-signers');
+              fs.writeFileSync(policyPath, policyBytes, {mode: 0o600});
+              assert.equal(git(['hash-object', '-t', 'tag', '-w', '--stdin'], rawTag).trim(), process.env.EXPECTED_TAG_OBJECT);
+              git(['-c', 'gpg.format=ssh', '-c', 'gpg.ssh.allowedSignersFile='+policyPath, 'verify-tag', process.env.EXPECTED_TAG_OBJECT]);
+            } finally {
+              fs.rmSync(temp, {recursive: true, force: true});
+            }
+            // Policy lookup and native verification must not age the final source check.
+            await assertFrozenTag();
+            const latestRepository = (await github.rest.repos.get(context.repo)).data;
+            assert.equal(latestRepository.default_branch, branchName, 'default branch changed during signer verification');
+            const latestBranch = (await github.rest.repos.getBranch({...context.repo, branch: branchName})).data;
+            assert.equal(latestBranch.protected, true, 'signer policy branch lost protection');
+            assert.equal(latestBranch.commit.sha, head, 'signer policy head changed during verification');
+          };
           const dir=process.env.PAYLOAD;
           const names=fs.readdirSync(dir).sort();
           const notes=fs.readFileSync(path.join(dir,'RELEASE-NOTES.md'),'utf8');
@@ -1109,7 +1191,7 @@ jobs:
             assert.equal(release.tag_name,tagName);assert.equal(release.body,notes);await compare(release);
             core.info('Existing public release matches exact verified bytes; no mutation.');
           }else{
-            if(!release){release=(await github.rest.repos.createRelease({...context.repo,tag_name:tagName,target_commitish:process.env.TARGET_SHA,name:releaseName,body:notes,draft:true,prerelease:tagName.includes('-')})).data;}
+            if(!release){await assertCurrentSigner();release=(await github.rest.repos.createRelease({...context.repo,tag_name:tagName,target_commitish:process.env.TARGET_SHA,name:releaseName,body:notes,draft:true,prerelease:tagName.includes('-')})).data;}
             assert.equal(release.tag_name,tagName);
             const existing=await github.paginate(github.rest.repos.listReleaseAssets,{...context.repo,release_id:release.id,per_page:100});
             assert.ok(existing.every(a=>names.includes(a.name)),'unexpected existing draft asset');
@@ -1120,15 +1202,16 @@ jobs:
                 const r=await github.request('GET /repos/{owner}/{repo}/releases/assets/{asset_id}',{...context.repo,asset_id:a.id,headers:{accept:'application/octet-stream'}});
                 assert.deepEqual(Buffer.from(r.data),data,'existing draft differs; refusing overwrite');
               }else{
+                await assertCurrentSigner();
                 await github.rest.repos.uploadReleaseAsset({...context.repo,release_id:release.id,name,data,headers:{'content-type':'application/octet-stream','content-length':data.length}});
               }
             }
             await compare(release);
             // Recheck after uploads too: a changed tag cannot be published by racing the initial check.
-            const finalRef=await github.rest.git.getRef({...context.repo,ref:'tags/'+tagName});
-            assert.equal(finalRef.data.object.type,'tag');assert.equal(finalRef.data.object.sha,process.env.EXPECTED_TAG_OBJECT);
+            if (process.env.REQUIRE_CURRENT_SIGNER !== 'true') await assertFrozenTag();
             const current=(await github.rest.repos.getRelease({...context.repo,release_id:release.id})).data;
             assert.equal(current.tag_name,tagName);assert.equal(current.draft,true);
+            await assertCurrentSigner();
             release=(await github.rest.repos.updateRelease({...context.repo,release_id:release.id,body:notes,draft:false})).data;
           }
           assert.equal(release.draft,false);

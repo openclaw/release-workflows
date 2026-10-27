@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add opt-in current signer authorization to source releases: reverify the frozen SSH tag against protected default-branch policy immediately before every release write, while preserving exact-byte public release replay.
+
 ## 1.12.1 - 2026-10-23
 
 **Highlights:** Security-patched Node runtimes and refreshed Go snapshot CI.
