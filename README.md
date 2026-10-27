@@ -98,6 +98,22 @@ code-owner approval before changing them. Keep the ordinary Crabbox CI workflow
 separate; the ruleset workflow is the independent trust anchor for
 release-build proof.
 
+The check skips Go setup, the snapshot build, and the embedded VM daemon probe
+only for a verified, nonempty change set of regular files under `docs/` or the
+root `README.md` and `CHANGELOG.md`. It compares the event base with the exact
+checked-out merge tree after binding both merge parents to the event base and
+PR head. Regular documentation deletions qualify; symlinks, submodules, type
+changes, tests, build inputs, empty diffs, and uncertain comparisons require
+the full snapshot. Identity and Apple Silicon checks always run.
+
+Before any exempt path becomes a compilation, embed, build-hook, archive, or
+release-notes input, remove its exemption here through normal protected
+CODEOWNER review, then add the input in Crabbox. The current snapshot disables
+release notes and explicitly archives `artifacts/release-runtime/*`; Go test
+files remain build inputs because the runner source embed includes them.
+This admission applies only to pull requests; it adds no merge-queue trigger
+or exemption.
+
 ## SwiftPM CLI archetype
 
 `release-swift-cli.yml` applies the same frozen-source, workflow-owned-tag, immutable-payload, dual-verifier, and exact-publication boundary to SwiftPM command-line tools. Its default contract matches `imsg`: the caller's version-generation and dependency-patch scripts prepare SwiftPM, the macOS build script emits a universal CLI, an `arm64e`/`arm64`/`x86_64` companion dylib, and resource bundles, while the Linux script emits a static-Swift x86_64 archive.
