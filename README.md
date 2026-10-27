@@ -380,6 +380,14 @@ scripts/validate-workflows.sh
 
 The shell entry point orchestrates actionlint, executable regression tests and safe YAML loading. `scripts/validate-workflow-contracts.py` checks the release job topology, permissions, required controls and action pins; run it from the repository root for focused contract validation. Both validation entry points are code-owned with the workflow sources.
 
+CI builds actionlint from the immutable upstream ShellCheck stdin deadlock fix
+and verifies its exact version before adding the job-local binary to `PATH`.
+This adds a Go source build to validation while retaining integrated ShellCheck;
+it does not update local installations. The installer and large-script regression
+tests run before the unchanged full validator. Use
+`node scripts/test-actionlint-install.mjs --installer-only` for local installer
+fixtures without downloading or replacing tools.
+
 This runs actionlint on reusable, CI, and example workflows; parses every YAML document with Psych safe loading; executes adversarial frozen-tag, native-build selection, nFPM target/inventory, draft-binding, Homebrew tap-selection, explicit-assets, fallback, live slacrawl/graincrawl platform-formula, and post-dispatch formula-binding scenarios; and enforces the required job/input topology, actions-read-only dual-architecture verifier, publisher hash binding, and immutable action references.
 
 The keychain lifecycle suite (`scripts/test-swift-keychain-lifecycle.mjs`) executes all three workflows' signer and cleanup shell blocks with synthetic key material and a simulated security command, without changing local keychains. Every signer snapshots the search list before creation; cleanup restores that snapshot and attempts deletion independently, including failed imports without step outputs and empty original lists under Bash 3. CI runs the same suite with `--real-keychains` on a disposable hosted macOS runner, exercising native creation, search-list restoration, deletion and injected failures without release credentials. This native mode refuses to run outside GitHub-hosted macOS CI; it does not test real certificate import or notarization.
