@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Skip the protected Crabbox release snapshot only for verified regular documentation-only merge changes; preserve full builds for uncertain comparisons and all build inputs.
 - Add opt-in current signer authorization to source releases: reverify the frozen SSH tag against protected default-branch policy immediately before every release write, while preserving exact-byte public release replay.
 
 ## 1.12.1 - 2026-10-23
