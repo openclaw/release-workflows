@@ -60,7 +60,7 @@ try {
     const fault = name => { if (scenario.apiError === name) throw Object.assign(new Error('policy API forbidden: '+name), {status:403}); };
     const github = {rest:{
       git:{
-        getRef: async () => ({data:{object:{type:scenario.refType ?? 'tag', sha:scenario.refDrift && checks > 0 && writes.length >= (scenario.refDriftAfterWrites ?? 0) ? 'f'.repeat(40) : scenario.refSha ?? expectedTag}}}),
+        getRef: async () => ({data:{object:{type:scenario.refType ?? 'tag', sha:scenario.refDrift && checks >= (scenario.refDriftAtCheck ?? 1) ? 'f'.repeat(40) : scenario.refSha ?? expectedTag}}}),
         getTag: async () => ({data:scenario.tagData ?? {...tagData, object:{type:scenario.targetType ?? 'commit', sha:scenario.target ?? target}}}),
         getCommit: async request => {
           fault('commit');calls.push('commit');assert.equal(request.commit_sha, head);
@@ -124,7 +124,7 @@ try {
   await test('unapproved signer blocks before draft',{policy:removed},[],/Command failed/);
   await test('removed signer blocks existing draft retry',{policy:removed,release:'draft'},[],/Command failed/);
   for(let index=1;index<expectedWrites.length;index++)await test('revocation after write '+index+' blocks the next write',{revokeAfter:index},expectedWrites.slice(0,index),/Command failed/);
-  await test('tag replacement during final signer verification blocks un-draft',{refDrift:true,refDriftAfterWrites:expectedWrites.length-1},expectedWrites.slice(0,-1),/frozen tag object changed before release write/);
+  await test('tag replacement during final signer verification blocks un-draft',{refDrift:true,refDriftAtCheck:expectedWrites.length},expectedWrites.slice(0,-1),/frozen tag object changed before release write/);
   const retry=await test('publisher-only retry rechecks before each remaining write',{release:'draft',assets:names.slice(0,2)},['upload:'+names[2],'publish']);
   assert.equal(retry.checks,2);
   const publicReplay=await test('public exact-byte replay succeeds after signer removal',{release:'public',policy:removed},[]);
