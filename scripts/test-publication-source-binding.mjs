@@ -29,18 +29,57 @@ const scenarios = [
   { name: 'deleted tag is rejected', refError: 404, error: /ref unavailable/ },
   { name: 'unreadable tag object is rejected', objectError: 403, error: /object unavailable/ },
 ];
+
+async function freezeGoTag(existing) {
+  const outputs = {};
+  const script = workflowStep(loadWorkflow(), 'tag', 'name', 'Create immutable annotated tag').with.script;
+  await new AsyncFunction('github', 'context', 'core', 'process', script)({ rest: { git: {
+    getRef: async () => {
+      if (!existing) throw Object.assign(new Error('missing'), { status: 404 });
+      return { data: { object: { type: 'tag', sha: 'b'.repeat(40) } } };
+    },
+    getTag: async () => ({ data: { object: { type: 'commit', sha: targetSha } } }),
+    createTag: async () => ({ data: { sha: 'b'.repeat(40) } }),
+    createRef: async (request) => { assert.equal(request.sha, 'b'.repeat(40)); },
+  } } }, { repo: repository }, {
+    info() {}, setFailed(message) { throw new Error(message); },
+    setOutput(name, value) { outputs[name] = value; },
+  }, { env: { DRY_RUN: 'false', EXPECTED_TAG_OBJECT: existing ? 'b'.repeat(40) : '', TAG: tag, TARGET_SHA: targetSha, REPOSITORY_TYPE: 'openclaw' } });
+  assert.equal(outputs['tag-object-sha'], 'b'.repeat(40));
+  return outputs['tag-object-sha'];
+}
+
 let failures = 0;
 for (const archetype of ['go-cli', 'swift-cli', 'electron']) {
   const script = workflowStep(loadWorkflow(`release-${archetype}.yml`), 'publish', 'id', 'publish').with.script;
   const execute = new AsyncFunction('github', 'context', 'core', 'process', 'require', script);
-  const cases = archetype === 'swift-cli' ? [...scenarios, { name: 'replaced signed tag object is rejected', expectedTagObject: 'd'.repeat(40), error: /tag object changed/ }] : scenarios;
+  const cases = [...scenarios];
+  if (['go-cli', 'swift-cli'].includes(archetype)) {
+    cases.push({ name: 'replaced signed tag object is rejected', expectedTagObject: 'd'.repeat(40), error: /tag object changed/ });
+  }
+  if (archetype === 'go-cli') {
+    cases.push(
+      { name: 'workflow-created tag publishes with producer identity', producer: 'created', valid: true },
+      { name: 'existing tag publishes with producer identity', producer: 'existing', valid: true },
+      { name: 'existing public release replay preserves the frozen object', publicReplay: true, valid: true },
+      { name: 'replacement object blocks public release replay', publicReplay: true, expectedTagObject: 'd'.repeat(40), error: /tag object changed/ },
+      { name: 'replacement during public asset download blocks replay', publicReplay: true, replaceDuringPublicDownload: true, error: /tag object changed/ },
+      { name: 'replacement during public release lookup blocks publication', replaceDuringReleaseLookup: true, error: /tag object changed/ },
+      { name: 'missing producer identity blocks publication', expectedTagObject: '', error: /tag object changed/ },
+      { name: 'missing producer identity blocks public replay', publicReplay: true, expectedTagObject: '', error: /tag object changed/ },
+    );
+  }
   for (const scenario of cases) {
     const calls = [];
+    let refSha = 'b'.repeat(40);
     let thrown;
     const github = {
       paginate: async () => assets,
       request: async (_route, request) => {
         calls.push('download');
+        if (scenario.replaceDuringPublicDownload && calls.filter((call) => call === 'download').length > assets.length) {
+          refSha = 'd'.repeat(40);
+        }
         return { data: assets.find((asset) => asset.id === request.asset_id).bytes };
       },
       rest: {
@@ -49,7 +88,7 @@ for (const archetype of ['go-cli', 'swift-cli', 'electron']) {
             assert.deepEqual(request, { ...repository, ref: `tags/${tag}` });
             calls.push('ref');
             if (scenario.refError) throw Object.assign(new Error('ref unavailable'), { status: scenario.refError });
-            return { data: { object: { type: scenario.refType ?? 'tag', sha: 'b'.repeat(40) } } };
+            return { data: { object: { type: scenario.refType ?? 'tag', sha: refSha } } };
           },
           getTag: async (request) => {
             assert.deepEqual(request, { ...repository, tag_sha: 'b'.repeat(40) });
@@ -61,7 +100,15 @@ for (const archetype of ['go-cli', 'swift-cli', 'electron']) {
         repos: {
           getRelease: async () => ({ data: { id: 7, draft: true, tag_name: scenario.draftTag ?? tag } }),
           listReleaseAssets: 'assets',
-          getReleaseByTag: async () => { throw Object.assign(new Error('no public release'), { status: 404 }); },
+          getReleaseByTag: async () => {
+            if (scenario.replaceDuringReleaseLookup) refSha = 'd'.repeat(40);
+            if (scenario.publicReplay) return { data: { id: 8, draft: false, tag_name: tag, body: releaseNotes, published_at: '2026-09-15', html_url: 'https://example.test/release' } };
+            throw Object.assign(new Error('no public release'), { status: 404 });
+          },
+          deleteRelease: async (request) => {
+            assert.equal(request.release_id, 7);
+            calls.push('delete');
+          },
           updateRelease: async (request) => {
             calls.push('publish');
             assert.equal(request.release_id, 7);
@@ -80,20 +127,30 @@ for (const archetype of ['go-cli', 'swift-cli', 'electron']) {
       },
     } : require(name);
     try {
+      const expectedTagObject = scenario.producer
+        ? await freezeGoTag(scenario.producer === 'existing')
+        : scenario.expectedTagObject ?? (archetype === 'go-cli' ? 'b'.repeat(40) : undefined);
       await execute(github, { repo: repository, runId: Number(runId) }, {
         info() {}, warning() {}, setOutput() {}, setFailed(message) { throw new Error(message); },
-      }, { env: { EXPECTED_TAG_OBJECT: scenario.expectedTagObject, CHECKSUM_FILENAME: 'SHA256SUMS', RELEASE_ID: '7', TAG: tag, TARGET_SHA: targetSha, GITHUB_RUN_ID: runId, VERIFICATION_ARTIFACT: artifact, VERIFICATION_PAYLOAD_ARTIFACT: artifact } }, testRequire);
+      }, { env: { EXPECTED_TAG_OBJECT: expectedTagObject, CHECKSUM_FILENAME: 'SHA256SUMS', RELEASE_ID: '7', TAG: tag, TARGET_SHA: targetSha, GITHUB_RUN_ID: runId, VERIFICATION_ARTIFACT: artifact, VERIFICATION_PAYLOAD_ARTIFACT: artifact } }, testRequire);
     } catch (error) { thrown = error; }
     try {
       if (scenario.valid) {
         assert.equal(thrown, undefined);
-        assert.equal(calls.filter((call) => call === 'publish').length, 1);
-        assert.ok(calls.indexOf('ref') > calls.lastIndexOf('download'), 'recheck source after binding the asset bytes');
-        assert.ok(calls.indexOf('publish') > calls.indexOf('tag'));
+        assert.equal(calls.filter((call) => call === 'publish').length, scenario.publicReplay ? 0 : 1);
+        assert.equal(calls.filter((call) => call === 'delete').length, scenario.publicReplay ? 1 : 0);
+        assert.equal(calls.slice(0, calls.indexOf('ref')).filter((call) => call === 'download').length,
+          assets.length * (scenario.publicReplay ? 2 : 1),
+          'recheck source only after every release asset has been downloaded and bound');
+        const mutation = calls.indexOf(scenario.publicReplay ? 'delete' : 'publish');
+        assert.ok(mutation > calls.indexOf('tag'));
+        assert.ok(mutation > calls.lastIndexOf('download'));
+        if (archetype === 'go-cli') assert.deepEqual(calls.slice(mutation - 2, mutation), ['ref', 'tag']);
       } else {
         assert.ok(thrown, 'changed source must fail before publication');
         assert.match(thrown.message, scenario.error);
         assert.ok(!calls.includes('publish'), 'failure must not publish');
+        assert.ok(!calls.includes('delete'), 'failure must not delete a draft');
       }
       console.log(`PASS ${archetype}: ${scenario.name}`);
     } catch (error) {

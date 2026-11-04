@@ -129,7 +129,7 @@ for forbidden_draft_rebuild_execution in ['goreleaser/goreleaser-action', 'repro
 for required_policy_control in [
     'Verify required SSH-signed tag',
     'Reverify required SSH-signed tag before publication',
-    'gpg.ssh.allowedSignersFile="$policy" verify-tag "$TAG"',
+    'gpg.ssh.allowedSignersFile="$policy" verify-tag "$tag_object"',
     'STABLE_IDENTIFIER: ${{ inputs.stable-identifier }}',
     'identifier=${STABLE_IDENTIFIER:-"$IDENTIFIER_PREFIX.$repo_slug.$binary_slug"}',
     'DARWIN_UNIVERSAL: ${{ inputs.darwin-universal }}',
@@ -305,6 +305,9 @@ for required_preflight_control in [
 
 tag = workflow.split('\n  tag:\n', 1)[1].split('\n  build:\n', 1)[0]
 for required_tag_control in [
+    'tag-object-sha: ${{ steps.tag.outputs.tag-object-sha }}',
+    "core.setOutput('tag-object-sha', existing.data.object.sha)",
+    "core.setOutput('tag-object-sha', tagObject.data.sha)",
     'EXPECTED_TAG_OBJECT: ${{ needs.validate.outputs.tag-object-sha }}',
     'tag disappeared after validation',
     'existing.data.object.sha !== process.env.EXPECTED_TAG_OBJECT',
@@ -313,6 +316,14 @@ for required_tag_control in [
 ]:
     if required_tag_control not in tag:
         raise SystemExit(f'missing exact tag freeze control: {required_tag_control}')
+for required_publication_tag_control in [
+    'needs: [validate, tag, draft, verify]',
+    "needs.tag.result == 'success'",
+    'EXPECTED_TAG_OBJECT: ${{ needs.tag.outputs.tag-object-sha }}',
+    'ref.data.object.sha !== process.env.EXPECTED_TAG_OBJECT',
+]:
+    if required_publication_tag_control not in publish:
+        raise SystemExit(f'missing frozen tag publication control: {required_publication_tag_control}')
 
 closeout = workflow.split('\n  closeout:\n', 1)[1]
 for required_closeout_diagnostic in [
