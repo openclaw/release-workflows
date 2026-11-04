@@ -386,6 +386,7 @@ jobs:
       - name: Verify required SSH-signed tag
         if: inputs.require-signed-tag && !inputs.dry-run
         env:
+          EXPECTED_TAG_OBJECT: ${{ steps.repository.outputs.tag-object-sha }}
           TAG: ${{ steps.inputs.outputs.tag }}
           TARGET_SHA: ${{ steps.repository.outputs.target-sha }}
         run: |
@@ -395,15 +396,32 @@ jobs:
             echo "$policy must be a nonempty regular file when require-signed-tag is enabled" >&2
             exit 1
           }
-          [[ "$(git cat-file -t "refs/tags/$TAG")" == tag ]] || {
+          tag_object=$(git rev-parse --verify "refs/tags/$TAG")
+          [[ "$tag_object" == "$EXPECTED_TAG_OBJECT" ]] || {
+            echo "$TAG object changed after freezing" >&2
+            exit 1
+          }
+          [[ "$(git cat-file -t "$tag_object")" == tag ]] || {
             echo "$TAG must be an annotated SSH-signed tag" >&2
             exit 1
           }
-          [[ "$(git rev-parse "refs/tags/$TAG^{}")" == "$TARGET_SHA" ]] || {
+          [[ "$(git rev-parse "$tag_object^{}")" == "$TARGET_SHA" ]] || {
             echo "$TAG does not peel to the frozen target" >&2
             exit 1
           }
-          git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile="$policy" verify-tag "$TAG"
+          # Git chooses its verifier from signature bytes, not gpg.format.
+          # Admit only trailing SSH armor before cryptographic verification.
+          python3 - "$tag_object" <<'PY'
+          import re
+          import subprocess
+          import sys
+
+          raw = subprocess.check_output(["git", "cat-file", "tag", sys.argv[1]])
+          armor = rb"\n-----BEGIN SSH SIGNATURE-----\r?\n(?:[A-Za-z0-9+/=]+\r?\n)+-----END SSH SIGNATURE-----(?:\r?\n)?\Z"
+          if not re.search(armor, raw):
+              raise SystemExit("release tag must end with an SSH signature")
+          PY
+          git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile="$policy" verify-tag "$tag_object"
 
       - name: Validate release metadata
         id: metadata
@@ -946,8 +964,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      tag-object-sha: ${{ steps.tag.outputs.tag-object-sha }}
     steps:
       - name: Create immutable annotated tag
+        id: tag
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           DRY_RUN: ${{ inputs.dry-run }}
@@ -990,6 +1011,7 @@ jobs:
                 return;
               }
               core.info(`reusing exact signed or annotated tag ${process.env.TAG}`);
+              core.setOutput('tag-object-sha', existing.data.object.sha);
               return;
             }
 
@@ -1014,6 +1036,7 @@ jobs:
               ref: `refs/tags/${process.env.TAG}`,
               sha: tagObject.data.sha,
             });
+            core.setOutput('tag-object-sha', tagObject.data.sha);
 
   build:
     name: 3a · GoReleaser build matrix
@@ -2876,10 +2899,11 @@ jobs:
       ${{
         !inputs.dry-run && always() &&
         needs.validate.result == 'success' &&
+        needs.tag.result == 'success' &&
         needs.draft.result == 'success' &&
         needs.verify.result == 'success'
       }}
-    needs: [validate, draft, verify]
+    needs: [validate, tag, draft, verify]
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -2897,6 +2921,7 @@ jobs:
       - name: Reverify required SSH-signed tag before publication
         if: inputs.require-signed-tag
         env:
+          EXPECTED_TAG_OBJECT: ${{ needs.tag.outputs.tag-object-sha }}
           TAG: ${{ needs.validate.outputs.tag }}
           TARGET_SHA: ${{ needs.validate.outputs.target-sha }}
         run: |
@@ -2906,15 +2931,32 @@ jobs:
             echo "$policy must be a nonempty regular file when require-signed-tag is enabled" >&2
             exit 1
           }
-          [[ "$(git cat-file -t "refs/tags/$TAG")" == tag ]] || {
+          tag_object=$(git rev-parse --verify "refs/tags/$TAG")
+          [[ "$tag_object" == "$EXPECTED_TAG_OBJECT" ]] || {
+            echo "$TAG object changed after freezing" >&2
+            exit 1
+          }
+          [[ "$(git cat-file -t "$tag_object")" == tag ]] || {
             echo "$TAG must be an annotated SSH-signed tag" >&2
             exit 1
           }
-          [[ "$(git rev-parse "refs/tags/$TAG^{}")" == "$TARGET_SHA" ]] || {
+          [[ "$(git rev-parse "$tag_object^{}")" == "$TARGET_SHA" ]] || {
             echo "$TAG does not peel to the frozen target" >&2
             exit 1
           }
-          git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile="$policy" verify-tag "$TAG"
+          # Git chooses its verifier from signature bytes, not gpg.format.
+          # Admit only trailing SSH armor before cryptographic verification.
+          python3 - "$tag_object" <<'PY'
+          import re
+          import subprocess
+          import sys
+
+          raw = subprocess.check_output(["git", "cat-file", "tag", sys.argv[1]])
+          armor = rb"\n-----BEGIN SSH SIGNATURE-----\r?\n(?:[A-Za-z0-9+/=]+\r?\n)+-----END SSH SIGNATURE-----(?:\r?\n)?\Z"
+          if not re.search(armor, raw):
+              raise SystemExit("release tag must end with an SSH signature")
+          PY
+          git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile="$policy" verify-tag "$tag_object"
       - name: Download arm64 verified inventory attestation
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -2929,6 +2971,7 @@ jobs:
         id: publish
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
+          EXPECTED_TAG_OBJECT: ${{ needs.tag.outputs.tag-object-sha }}
           CHECKSUM_FILENAME: ${{ inputs.checksum-filename }}
           RELEASE_ID: ${{ needs.draft.outputs.release-id }}
           TAG: ${{ needs.validate.outputs.tag }}
@@ -3073,14 +3116,20 @@ jobs:
             const downloaded = await downloadReleaseAssets(releaseId, 'draft');
             requireBoundAssets(downloaded, 'draft');
 
-            const ref = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
-            if (ref.data.object.type !== 'tag') {
-              throw new Error('release tag is no longer annotated or signed');
-            }
-            const tagObject = await github.rest.git.getTag({ ...context.repo, tag_sha: ref.data.object.sha });
-            if (tagObject.data.object.type !== 'commit' || tagObject.data.object.sha !== process.env.TARGET_SHA) {
-              throw new Error('frozen tag target changed before publication');
-            }
+            // Check after asset downloads and release lookups, immediately before either mutation.
+            const requireFrozenTag = async () => {
+              const ref = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
+              if (ref.data.object.type !== 'tag') {
+                throw new Error('release tag is no longer annotated or signed');
+              }
+              if (ref.data.object.sha !== process.env.EXPECTED_TAG_OBJECT) {
+                throw new Error('release tag object changed before publication');
+              }
+              const tagObject = await github.rest.git.getTag({ ...context.repo, tag_sha: ref.data.object.sha });
+              if (tagObject.data.object.type !== 'commit' || tagObject.data.object.sha !== process.env.TARGET_SHA) {
+                throw new Error('frozen tag target changed before publication');
+              }
+            };
             let existingPublicRelease;
             try {
               existingPublicRelease = await github.rest.repos.getReleaseByTag({ ...context.repo, tag: process.env.TAG });
@@ -3095,11 +3144,13 @@ jobs:
               }
               const publicAssets = await downloadReleaseAssets(existing.id, 'existing public release');
               requireBoundAssets(publicAssets, 'existing public release');
+              await requireFrozenTag();
               await github.rest.repos.deleteRelease({ ...context.repo, release_id: releaseId });
               core.info(`verified existing public release and deleted redundant retry draft ${releaseId}`);
               core.setOutput('release-url', existing.html_url);
               return;
             }
+            await requireFrozenTag();
             const published = await github.rest.repos.updateRelease({
               ...context.repo,
               release_id: releaseId,
