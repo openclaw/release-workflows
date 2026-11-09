@@ -17,10 +17,12 @@ async function runScenario({
   peeledTarget = targetSha,
   peeledType = 'commit',
   dryRun = false,
+  refCreationFails = false,
 } = {}) {
   const failures = [];
   const info = [];
   const mutations = [];
+  const outputs = {};
   const missing = () => Object.assign(new Error('not found'), { status: 404 });
   const github = {
     rest: {
@@ -39,6 +41,7 @@ async function runScenario({
         },
         createRef: async (request) => {
           mutations.push(['createRef', request.ref, request.sha]);
+          if (refCreationFails) throw new Error('ref creation failed');
         },
       },
     },
@@ -47,6 +50,7 @@ async function runScenario({
   const core = {
     info: (message) => info.push(message),
     setFailed: (message) => failures.push(message),
+    setOutput: (name, value) => { outputs[name] = value; },
   };
   let thrown;
   try {
@@ -62,12 +66,13 @@ async function runScenario({
   } catch (error) {
     thrown = error;
   }
-  return { failures, info, mutations, thrown };
+  return { failures, info, mutations, outputs, thrown };
 }
 
 const dry = await runScenario({ dryRun: true });
 assert.deepEqual(dry.mutations, []);
 assert.equal(dry.thrown, undefined);
+assert.deepEqual(dry.outputs, {});
 
 const absent = await runScenario();
 assert.deepEqual(absent.failures, []);
@@ -76,6 +81,7 @@ assert.deepEqual(absent.mutations, [
   ['createTag', targetSha],
   ['createRef', 'refs/tags/v1.2.3', 'c'.repeat(40)],
 ]);
+assert.deepEqual(absent.outputs, { 'tag-object-sha': 'c'.repeat(40) });
 
 const exact = await runScenario({
   currentTagObject: expectedTagObject,
@@ -85,6 +91,7 @@ assert.deepEqual(exact.failures, []);
 assert.equal(exact.thrown, undefined);
 assert.deepEqual(exact.mutations, []);
 assert.match(exact.info[0], /reusing exact/);
+assert.deepEqual(exact.outputs, { 'tag-object-sha': expectedTagObject });
 
 const appeared = await runScenario({ currentTagObject: expectedTagObject });
 assert.match(appeared.failures[0], /appeared after validation/);
@@ -117,4 +124,10 @@ const retargeted = await runScenario({
 assert.match(retargeted.failures[0], /does not freeze/);
 assert.deepEqual(retargeted.mutations, []);
 
-console.log('tag freeze tests passed (7 scenarios)');
+const failedCreate = await runScenario({ refCreationFails: true });
+assert.match(failedCreate.thrown?.message, /ref creation failed/);
+for (const rejected of [appeared, disappeared, changed, lightweight, retargeted, failedCreate]) {
+  assert.deepEqual(rejected.outputs, {}, 'failed freeze must not export an authorized object');
+}
+
+console.log('tag freeze tests passed (9 scenarios)');
