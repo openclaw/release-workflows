@@ -154,6 +154,7 @@ async function runScenario(mutate = () => {}, publisherRunAttempt = runAttempt, 
     await executePublisher(github, context, core, {
       env: {
         CHECKSUM_FILENAME: selectedChecksumFilename,
+        EXPECTED_TAG_OBJECT: 'b'.repeat(40),
         GITHUB_RUN_ATTEMPT: publisherRunAttempt,
         GITHUB_RUN_ID: runId,
         RELEASE_ID: '42',

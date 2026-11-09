@@ -24,7 +24,7 @@ const requiredContinuationNeeds = {
   compare: ['validate', 'build', 'sign', 'rebuild'],
   draft: ['validate', 'build', 'sign', 'compare'],
   verify: ['validate', 'draft'],
-  publish: ['validate', 'draft', 'verify'],
+  publish: ['validate', 'tag', 'draft', 'verify'],
   handoff: ['validate', 'draft', 'publish'],
 };
 for (const [job, requiredNeeds] of Object.entries(requiredContinuationNeeds)) {

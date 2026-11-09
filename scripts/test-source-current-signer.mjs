@@ -84,14 +84,15 @@ try {
           fault('branch');calls.push('branch');branchReads++;assert.equal(request.branch,'main');
           return {data:{protected:!(scenario.unprotected || (scenario.protectionDrift && branchReads % 2 === 0)), commit:{sha:scenario.headDrift && branchReads % 2 === 0 ? 'd'.repeat(40) : head}}};
         },
-        getReleaseByTag: async () => {if(!release)throw Object.assign(new Error('absent'),{status:404});return {data:release};},
+        getReleaseByTag: async () => {if(!release || release.draft)throw Object.assign(new Error('no published release'),{status:404});return {data:release};},
+        listReleases: async () => ({status:200,headers:{},data:release ? [release] : []}),
         createRelease: async request => {write('create');assert.equal(request.draft,true);assert.equal(request.target_commitish,target);release={id:7,tag_name:request.tag_name,body:request.body,draft:true};return {data:release};},
         uploadReleaseAsset: async request => {write('upload:'+request.name);assets.push({id:assets.length,name:request.name,bytes:request.data});return {data:{}};},
         updateRelease: async request => {write('publish');assert.equal(request.draft,false);release={...release,draft:false,html_url:'https://example.test/release'};return {data:release};},
-        listReleaseAssets: 'assets',
-        getRelease: async () => ({data:release}),
+        listReleaseAssets: async request => {assert.equal(request.release_id,release.id);return {status:200,headers:{},data:assets};},
+        getRelease: async request => {assert.equal(request.release_id,release.id);return {data:release};},
       },
-    },paginate:async () => assets,request:async (_route, request) => ({data:assets.find(asset => asset.id === request.asset_id).bytes})};
+    },request:async (_route, request) => ({data:assets.find(asset => asset.id === request.asset_id).bytes})};
     const testRequire = name => {
       if (name === 'node:fs') return {...fs, mkdtempSync(prefix){const dir=fs.mkdtempSync(prefix);tempPaths.push(dir);return dir;}};
       if (name === 'node:child_process') return {execFileSync(command,args,options){
@@ -123,6 +124,7 @@ try {
   await test('SSH validity uses tag time, not current wall clock',{policy:Buffer.from('fixture@example.test valid-before="20250101Z" '+keys[0].public+'\n')},expectedWrites);
   await test('unapproved signer blocks before draft',{policy:removed},[],/Command failed/);
   await test('removed signer blocks existing draft retry',{policy:removed,release:'draft'},[],/Command failed/);
+  await test('removed signer blocks partially uploaded draft retry',{policy:removed,release:'draft',assets:names.slice(0,2)},[],/Command failed/);
   for(let index=1;index<expectedWrites.length;index++)await test('revocation after write '+index+' blocks the next write',{revokeAfter:index},expectedWrites.slice(0,index),/Command failed/);
   await test('tag replacement during final signer verification blocks un-draft',{refDrift:true,refDriftAtCheck:expectedWrites.length},expectedWrites.slice(0,-1),/frozen tag object changed before release write/);
   const retry=await test('publisher-only retry rechecks before each remaining write',{release:'draft',assets:names.slice(0,2)},['upload:'+names[2],'publish']);

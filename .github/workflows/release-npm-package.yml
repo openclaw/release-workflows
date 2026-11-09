@@ -1313,10 +1313,23 @@ jobs:
           const names=fs.readdirSync(dir).sort();
           const notes=fs.readFileSync(path.join(dir,'RELEASE-NOTES.md'),'utf8');
           const tagName=process.env.TAG;
-          let release;
-          try {release=(await github.rest.repos.getReleaseByTag({...context.repo,tag:tagName})).data;}catch(e){if(e.status!==404)throw e;}
+          // Tag lookup excludes drafts; Octokit's generic paginator masks HTTP 409.
+          // Read every page directly so lookup failures never authorize new writes.
+          const list = async (method, parameters = {}) => {
+            const items = [];
+            for (let page = 1; ; page++) {
+              const response = await method({...parameters, ...context.repo, per_page:100, page});
+              assert.equal(response.status, 200, 'release listing failed');
+              assert.ok(Array.isArray(response.data), 'invalid release listing');
+              items.push(...response.data);
+              if (!/<[^<>]+>;\s*rel="next"/.test(response.headers.link ?? '')) return items;
+            }
+          };
+          const matches = (await list(github.rest.repos.listReleases)).filter(item => item.tag_name === tagName);
+          assert.ok(matches.length <= 1, 'multiple releases match frozen tag');
+          let [release] = matches;
           const compare=async release=>{
-            const assets=await github.paginate(github.rest.repos.listReleaseAssets,{...context.repo,release_id:release.id,per_page:100});
+            const assets=await list(github.rest.repos.listReleaseAssets,{release_id:release.id});
             assert.deepEqual(assets.map(a=>a.name).sort(),names,'release asset set differs from verified payload');
             for(const a of assets){
               const r=await github.request('GET /repos/{owner}/{repo}/releases/assets/{asset_id}',{...context.repo,asset_id:a.id,headers:{accept:'application/octet-stream'}});
@@ -1329,7 +1342,7 @@ jobs:
           }else{
             if(!release){release=(await github.rest.repos.createRelease({...context.repo,tag_name:tagName,target_commitish:process.env.TARGET_SHA,name:tagName,body:notes,draft:true,prerelease:tagName.includes('-')})).data;}
             assert.equal(release.tag_name,tagName);
-            const existing=await github.paginate(github.rest.repos.listReleaseAssets,{...context.repo,release_id:release.id,per_page:100});
+            const existing=await list(github.rest.repos.listReleaseAssets,{release_id:release.id});
             assert.ok(existing.every(a=>names.includes(a.name)),'unexpected existing draft asset');
             for(const name of names){
               const a=existing.find(a=>a.name===name);

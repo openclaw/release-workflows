@@ -14,6 +14,7 @@ actionlint "${workflow_files[@]}"
 
 node scripts/test-source-npm-workflows.mjs
 node scripts/test-source-current-signer.mjs
+node scripts/test-release-resume.mjs
 node scripts/test-macos-runners.mjs
 node scripts/test-package-publication.mjs
 node scripts/test-npm-trusted-publisher.mjs
