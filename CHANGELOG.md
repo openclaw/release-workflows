@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Pin CI actionlint to the upstream ShellCheck stdin deadlock fix, verifying the installed version before use and retaining integrated diagnostics.
 - Clarify explicit allowlisted SSH key selection for version and compatibility release tags.
 - Require SSH signature armor when Go releases require signed tags, and bind publication to the exact annotated tag object frozen by creation or reuse.
 - Resume source and npm GitHub-release drafts by their existing IDs; reject ambiguous releases and propagate listing failures before further writes.
