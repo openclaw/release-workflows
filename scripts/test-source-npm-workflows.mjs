@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, cpSync, mkdirSync, readdirSync, unlinkSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -238,6 +239,34 @@ for(const mutation of ['modified','missing','unrequested']) {
   if(mutation==='unrequested')fixture.env.GENERATED_ASSET='another.tgz';
   for(const job of ['verify','verify-arm'])assert.throws(()=>run('/bin/bash',['-c',step(source,job,'Independently verify frozen bytes').run],{env:fixture.env}),/Command failed/,`${job} rejects ${mutation} generated asset`);
 }
+// Exercise only the Node frozen-inventory checks, separately from npm tarball validation.
+for(const w of workflows) {
+  const fixture=sourceFixture();
+  writeFileSync(path.join(fixture.payload,generatedName),'frozen fixture bytes\n');
+  run('/bin/bash',['-c',step(w,'assemble','Freeze inventory and checksums').run],{env:fixture.env});
+  const asset=path.join(fixture.payload,generatedName);
+  const original=readFileSync(asset);
+  const modified=Buffer.from(original);modified[0]^=1;
+  assert.equal(modified.length,original.length);
+  const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
+  assert.notEqual(digest(modified),digest(original));
+  for(const job of ['verify','verify-arm']) {
+    const block=step(w,job,'Independently verify frozen bytes').run.match(/^node <<'JS'\n([\s\S]*?)\nJS(?:\n|$)/);
+    assert.ok(block,`${w.name}/${job} has a Node inventory verifier`);
+    run(process.execPath,['-e',block[1]],{env:fixture.env});
+    writeFileSync(asset,modified);
+    assert.throws(()=>run(process.execPath,['-e',block[1]],{env:fixture.env}),error=>{
+      assert.equal(error.status,1);
+      const stderr=String(error.stderr);
+      assert.match(stderr,/ERR_ASSERTION/);
+      assert.ok(stderr.includes(digest(modified)),`${w.name}/${job} reports the modified digest`);
+      assert.ok(stderr.includes(digest(original)),`${w.name}/${job} reports the frozen digest`);
+      return true;
+    },`${w.name}/${job} rejects same-size asset corruption at the digest check`);
+    writeFileSync(asset,original);
+  }
+}
 console.log('source generated assets: default parity, exact output/transport, adversarial paths and both verifiers passed');
+console.log('source/npm: both Node inventory verifiers reject same-size asset corruption');
 console.log('source/npm: dry-run tag isolation, real monorepo packs, exact pins, workspace rejection and dated metadata passed');
 } finally {rmSync(root,{recursive:true,force:true});}
