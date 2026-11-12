@@ -27,17 +27,25 @@ jobs:
         with:
           node-version: ${{ env.CI_NODE_VERSION }}
           package-manager-cache: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.3'
+          cache: false
       - name: Install actionlint
         env:
-          ACTIONLINT_LINUX_AMD64_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
-          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_COMMIT: 011a6d15e749bb3f2d771eed9c7aa0e7e3e10ee7
+          ACTIONLINT_VERSION: v1.7.13-0.20260419144658-011a6d15e749
         run: |
           set -euo pipefail
-          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-          curl -fsSLO "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}"
-          printf '%s  %s\n' "$ACTIONLINT_LINUX_AMD64_SHA256" "$archive" | sha256sum -c -
-          tar -xzf "$archive" actionlint
-          sudo install -m 0755 actionlint /usr/local/bin/actionlint
+          # https://github.com/rhysd/actionlint/pull/651 fixes large-script stdin deadlocks.
+          # Replace with a fixed release when available; keep integrated ShellCheck.
+          export GOBIN="$RUNNER_TEMP/actionlint-bin"
+          go install "github.com/rhysd/actionlint/cmd/actionlint@$ACTIONLINT_COMMIT"
+          actual_version="$("$GOBIN/actionlint" -version)"
+          test "${actual_version%%$'\n'*}" = "$ACTIONLINT_VERSION"
+          echo "$GOBIN" >> "$GITHUB_PATH"
+      - name: Test actionlint installation and ShellCheck integration
+        run: node scripts/test-actionlint-install.mjs
       - name: Validate workflows
         run: scripts/validate-workflows.sh
 
