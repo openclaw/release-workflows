@@ -148,8 +148,12 @@ jobs:
             const workflow=loadWorkflow('release-source.yml');
             const gate=workflowStep(workflow,'validate','name','Require independent CI green on frozen target').with.script;
             const {collectCheckRuns}=new Function(`${extractMarkedSource(gate,'// ci-check-collector-begin','// ci-check-collector-end')}\nreturn {collectCheckRuns};`)();
-            const discovered=await collectCheckRuns({github,repo:context.repo,targetSha:context.sha,allowedEvents:new Set(['push']),currentRunId:context.runId});
-            assert.ok(Array.isArray(discovered.checkRuns));
+            // Include this run on the PR head to exercise both API routes.
+            // This read-only permission probe never evaluates the release gate.
+            const targetSha=context.payload.pull_request?.head.sha||context.sha;
+            const discovered=await collectCheckRuns({github,repo:context.repo,targetSha,allowedEvents:new Set(),currentRunId:0});
+            assert.ok(discovered.workflowRunEvents.has(context.runId));
+            assert.ok(discovered.checkRuns.length>0);
             core.info(`Actions-token source CI discovery read ${discovered.workflowRunEvents.size} workflow events`);
             const payload=path.join(process.env.RUNNER_TEMP,'payload');
             fs.mkdirSync(payload);
