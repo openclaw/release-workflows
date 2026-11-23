@@ -52,6 +52,10 @@ jobs:
   action-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      checks: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -138,8 +142,13 @@ jobs:
               fs.readFileSync('README.md'),
             );
             const {execFileSync}=require('node:child_process');
-            const {loadWorkflow,workflowStep}=require('./scripts/workflow-source.cjs');
+            const {loadWorkflow,workflowStep,extractMarkedSource}=require('./scripts/workflow-source.cjs');
             const workflow=loadWorkflow('release-source.yml');
+            const gate=workflowStep(workflow,'validate','name','Require independent CI green on frozen target').with.script;
+            const {collectCheckRuns}=new Function(`${extractMarkedSource(gate,'// ci-check-collector-begin','// ci-check-collector-end')}\nreturn {collectCheckRuns};`)();
+            const discovered=await collectCheckRuns({github,repo:context.repo,targetSha:context.sha,allowedEvents:new Set(['push']),currentRunId:context.runId});
+            assert.ok(Array.isArray(discovered.checkRuns));
+            core.info(`Actions-token source CI discovery read ${discovered.workflowRunEvents.size} workflow events`);
             const payload=path.join(process.env.RUNNER_TEMP,'payload');
             fs.mkdirSync(payload);
             fs.writeFileSync(path.join(payload,'RELEASE-NOTES.md'),'Integration fixture notes.\n');

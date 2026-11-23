@@ -472,6 +472,60 @@ jobs:
             return accepted;
           };
           // ci-check-event-filter-end
+          // ci-check-collector-begin
+          const collectCheckRuns = async ({ github, repo, targetSha, allowedEvents, currentRunId }) => {
+            const checkRuns = [];
+            const workflowRunEvents = new Map();
+            const seenSuites = new Set();
+            const seenCursors = new Set();
+            let cursor = null;
+            // The commit REST endpoint truncates at 1,000 suites. Walk the full
+            // connection; nullable workflow provenance keeps custom/unknown checks.
+            do {
+              const result = await github.graphql(`
+                query($owner: String!, $repo: String!, $sha: GitObjectID!, $cursor: String) {
+                  repository(owner: $owner, name: $repo) {
+                    object(oid: $sha) { ... on Commit {
+                      oid
+                      checkSuites(first: 100, after: $cursor) {
+                        nodes { databaseId workflowRun { databaseId event } }
+                        pageInfo { hasNextPage endCursor }
+                      }
+                    } }
+                  }
+                }`, { ...repo, sha: targetSha, cursor });
+              const commit = result.repository?.object;
+              const page = commit?.checkSuites;
+              if (commit?.oid !== targetSha || !Array.isArray(page?.nodes) || typeof page.pageInfo?.hasNextPage !== 'boolean') {
+                throw new Error('Incomplete check-suite response for frozen commit');
+              }
+              for (const suite of page.nodes) {
+                if (!Number.isSafeInteger(suite?.databaseId) || suite.databaseId <= 0 || seenSuites.has(suite.databaseId) || !Object.hasOwn(suite, 'workflowRun')) {
+                  throw new Error('Missing or duplicate check-suite identity');
+                }
+                seenSuites.add(suite.databaseId);
+                const run = suite.workflowRun;
+                if (run !== null) {
+                  if (!Number.isSafeInteger(run?.databaseId) || run.databaseId <= 0 || typeof run.event !== 'string' || !run.event) {
+                    throw new Error('Incomplete workflow-run identity');
+                  }
+                  workflowRunEvents.set(run.databaseId, run.event);
+                  if (run.databaseId === currentRunId || (allowedEvents.size > 0 && !allowedEvents.has(run.event))) continue;
+                }
+                checkRuns.push(...await github.paginate(github.rest.checks.listForSuite, {
+                  ...repo, check_suite_id: suite.databaseId, per_page: 100, filter: 'latest',
+                }));
+              }
+              if (!page.pageInfo.hasNextPage) break;
+              cursor = page.pageInfo.endCursor;
+              if (typeof cursor !== 'string' || !cursor || seenCursors.has(cursor)) {
+                throw new Error('Incomplete check-suite pagination');
+              }
+              seenCursors.add(cursor);
+            } while (true);
+            return { checkRuns, workflowRunEvents };
+          };
+          // ci-check-collector-end
           // ci-check-gate-helpers-begin
           const evaluateAllChecks = ({ checkRuns, latestStatuses, acceptableConclusions }) => {
             const pending = [];
@@ -675,25 +729,13 @@ jobs:
           }
 
           const loadSignals = async () => {
-            const allCheckRuns = await github.paginate(github.rest.checks.listForRef, {
-              ...context.repo,
-              ref: process.env.TARGET_SHA,
-              per_page: 100,
-              filter: 'latest',
+            const { checkRuns: allCheckRuns, workflowRunEvents } = await collectCheckRuns({
+              github,
+              repo: context.repo,
+              targetSha: process.env.TARGET_SHA,
+              allowedEvents: allowedCheckEvents,
+              currentRunId,
             });
-            const workflowRunEvents = new Map();
-            if (allowedCheckEvents.size > 0) {
-              try {
-                const workflowRuns = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
-                  ...context.repo,
-                  head_sha: process.env.TARGET_SHA,
-                  per_page: 100,
-                });
-                for (const run of workflowRuns) workflowRunEvents.set(run.id, run.event);
-              } catch (error) {
-                core.warning(`Could not resolve Actions events for CI filtering; retaining all checks: ${error.message}`);
-              }
-            }
             const checkRuns = filterCheckRunsByEvent({
               checkRuns: allCheckRuns,
               allowedEvents: allowedCheckEvents,

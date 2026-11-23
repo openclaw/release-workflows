@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Discover source-release CI across the complete check-suite history, preserving older eligible runs and unknown checks when a commit exceeds GitHub's 1,000-suite REST window.
+
 - Pin CI actionlint to the upstream ShellCheck stdin deadlock fix, verifying the installed version before use and retaining integrated diagnostics.
 - Skip the protected Crabbox release snapshot only for verified regular documentation-only merge changes; preserve full builds for uncertain comparisons and all build inputs.
 - Clarify explicit allowlisted SSH key selection for version and compatibility release tags.
