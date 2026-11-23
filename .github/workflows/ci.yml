@@ -101,6 +101,7 @@ jobs:
       - name: Download named payload
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          github-token: ${{ github.token }}
           artifact-ids: ${{ steps.input-upload.outputs.artifact-id }}
           path: ${{ runner.temp }}/generated-input
           digest-mismatch: error
@@ -127,6 +128,7 @@ jobs:
       - name: Download generated raw payload
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          github-token: ${{ github.token }}
           artifact-ids: ${{ steps.generated-upload.outputs.artifact-id }}
           path: ${{ runner.temp }}/generated-raw
           digest-mismatch: error
