@@ -25,6 +25,7 @@ node scripts/test-required-workflows.mjs
 node scripts/test-signing-credential-preflight.mjs
 node scripts/test-tag-freeze.mjs
 node scripts/test-ci-check-event-filter.mjs
+node scripts/test-source-ci-discovery.mjs
 node scripts/test-ci-run-identity.mjs
 node scripts/test-ci-commit-statuses.mjs
 node scripts/test-checksum-collisions.mjs

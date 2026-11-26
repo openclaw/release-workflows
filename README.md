@@ -63,6 +63,8 @@ Source and npm GitHub-release publishers discover published releases and drafts 
 
 ## Source-only archetype
 
+Source release CI discovery reads the complete check-suite history, including commits with more than 1,000 suites. It preserves checks with unknown workflow provenance and fails closed when a page or suite identity cannot be read. Event selection, required app/context checks, and commit statuses retain their existing policy.
+
 Source catalogs with an established unprefixed tag convention may set `tag-prefix: ''`; the default remains `v`. Go proxy releases require the default `v` prefix. `release-name` optionally preserves project-branded titles such as `Agent Scripts 0.12.0`; without it the title remains the tag. Neither option changes version metadata validation or permits moving an existing tag.
 
 `release-source.yml` fits SwiftPM libraries, Go libraries, skill catalogs, and this repository itself. It validates version metadata, a real calendar date in one unambiguous changelog section, protected-branch ancestry, and green independent push CI at the frozen commit. An optional `test-command` runs without write credentials. `test-runs-on` selects its GitHub-hosted runner (default `ubuntu-latest`); macOS-only SwiftPM libraries select `xcode-27` and use the image’s Xcode 27. Existing v1 macOS runner inputs are routed to `xcode-27`. Keep the package platforms and build deployment targets explicit. The validation, archive assembly, and two independent verifier jobs remain on Linux. Two fresh runners verify the same-run inventory, checksums, source identity, and exact notes before publishing a GitHub Release.
