@@ -25,11 +25,12 @@ assert.ok(build.steps.indexOf(gate) < build.steps.findIndex((step) => step.name 
 assert.ok(rebuild.steps.indexOf(rebuildGate) < rebuild.steps.findIndex((step) => step.name === 'Upload raw independent rebuild'));
 
 // Use actual ELF notes, so the regression exercises readelf rather than a mock.
+// Exclude host startup objects: their own ISA notes must not taint the fixtures.
 const root = mkdtempSync(join(tmpdir(), 'linux-amd64-isa-'));
 mkdirSync(join(root, 'dist'));
 writeFileSync(join(root, 'fixture.c'), 'int main(void) { return 0; }\n');
 for (const level of ['baseline', 'v2', 'v3', 'v4']) {
-  execFileSync('gcc', ['fixture.c', '-o', `dist/${level}`, `-Wl,-z,x86-64-${level}`], { cwd: root });
+  execFileSync('gcc', ['fixture.c', '-nostdlib', '-Wl,-e,main', '-o', `dist/${level}`, `-Wl,-z,x86-64-${level}`], { cwd: root });
 }
 const run = (binary) => {
   writeFileSync(join(root, 'dist/artifacts.json'), JSON.stringify(binary ? [
