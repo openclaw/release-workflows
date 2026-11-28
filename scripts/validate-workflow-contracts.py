@@ -89,7 +89,7 @@ for required_build_control in [
 if not re.search(r'permissions:\s*\n\s*contents: read\s*$', rebuild, re.MULTILINE):
     raise SystemExit('reproducible rebuild job must grant only contents: read')
 for required_rebuild_control in [
-    "inputs.split-goreleaser-config != '' && 'ubuntu-latest'",
+    "inputs.split-goreleaser-config != '' && 'ubuntu-24.04'",
     'fetch-depth: 0',
     'version: ${{ needs.build.outputs.goreleaser-version }}',
     '[[ "$(go env GOVERSION)" == "$EXPECTED_GO_VERSION" ]]',
