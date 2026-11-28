@@ -31,6 +31,7 @@ node scripts/test-ci-commit-statuses.mjs
 node scripts/test-checksum-collisions.mjs
 node scripts/test-build-artifact-matrix.mjs
 node scripts/test-split-host-build.mjs
+node scripts/test-linux-amd64-isa.mjs
 node scripts/test-swift-cli-workflow.mjs
 node scripts/test-swift-linux-git-ownership.mjs
 node scripts/test-swift-cli-options.mjs
